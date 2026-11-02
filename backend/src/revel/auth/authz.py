@@ -87,10 +87,11 @@ Unconfigured OpenFGA (``configure_authz`` not called, or store/model IDs unset):
 one warning and return ``None`` (a skipped grant only denies); revoke hooks raise
 ``FgaConfigurationError`` (a skipped delete would leave access in place). Pre-commit hooks
 propagate every configured OpenFGA error and ``TimeoutError``; post-commit hooks log them.
-Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, ``visible_claims``) raise
-``FgaConfigurationError`` when unconfigured; they never allow by default. They are bounded:
-each OpenFGA check by ``CHECK_TIMEOUT_SECONDS`` and a whole tier resolution by
-``TIER_RESOLUTION_TIMEOUT_SECONDS``; past either they fail CLOSED with
+Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, ``visible_claims``,
+``can_respond``, ``can_release_answer``) raise ``FgaConfigurationError`` when unconfigured; they
+never allow by default. They are bounded: each OpenFGA check by ``CHECK_TIMEOUT_SECONDS``, a
+whole tier resolution by ``TIER_RESOLUTION_TIMEOUT_SECONDS`` and a whole answer-release check by
+``ANSWER_RELEASE_TIMEOUT_SECONDS``; past any of them they fail CLOSED with
 ``AuthorizationCheckTimeout`` (a ``TimeoutError``, never a grant or a lower tier).
 
 Known residual: a post-commit grant delayed past a LATER revoke of the same row (approve, then
@@ -751,6 +752,97 @@ async def require_viewer(
     if tier is ViewerTier.none:
         raise AuthorizationDenied()
     return tier
+
+
+# --- Question checks (F7) ---------------------------------------------------------------------
+#
+# The keyword-only ``fga`` argument (unlike the positional one above) is the signature F7
+# requested; ``None`` uses the configured client and, like every check, raises
+# ``FgaConfigurationError`` when unconfigured.
+
+# Overall bound for can_release_answer: the profile guard, read_answer and a tier resolution (up
+# to six checks; each check keeps CHECK_TIMEOUT_SECONDS and the tier resolution its own bound).
+ANSWER_RELEASE_TIMEOUT_SECONDS = 5.0
+
+
+async def can_respond(
+    principal: PrincipalLike, question_id: UUID, *, fga: FgaClient | None = None
+) -> bool:
+    """Whether the principal may answer the question: a ``respond`` check on ``question:<id>``.
+
+    ``respond`` is ``owner_agent from about``: only an agent of the asked-about profile's owner
+    (never the human user, the requester or a disconnected delegation). Bounded by
+    ``CHECK_TIMEOUT_SECONDS`` (``AuthorizationCheckTimeout``, never ``False``, on timeout). An
+    inconsistent principal raises ``AuthorizationDenied`` (as in ``can_contribute``).
+    """
+    return await _bounded_check(
+        _check_client(fga),
+        user=subject_for(principal),
+        relation=RESPOND,
+        object=question_object(question_id),
+    )
+
+
+async def require_respond(
+    principal: PrincipalLike, question_id: UUID, *, fga: FgaClient | None = None
+) -> None:
+    """``can_respond``, raising the uniform ``AuthorizationDenied`` when it is ``False``."""
+    if not await can_respond(principal, question_id, fga=fga):
+        raise AuthorizationDenied()
+
+
+async def can_release_answer(
+    requester_principal: PrincipalLike,
+    question_id: UUID,
+    profile_id: UUID,
+    *,
+    fga: FgaClient | None = None,
+) -> ViewerTier | None:
+    """The requester's CURRENT tier on ``profile_id`` if an answer to the question may be
+    released to them, else ``None``.
+
+    Returns the tier only when ALL of these hold, checked in this order:
+
+    1. ``question:<question_id>#about`` is ``profile:<profile_id>`` (a direct check of the
+       written tuple). A caller passing the wrong ``profile_id`` gets ``None``, never a tier on
+       another profile. Without this guard, a requester of a question about B who is connected
+       to C would get C's tier for B's answer.
+    2. ``read_answer`` on the question is allowed for ``subject_for(requester_principal)``: the
+       requester or the requester's connected agent, unless the profile's owner blocked the
+       requester (also the owner and the owner's agents, who get ``only_me``).
+    3. ``resolve_viewer_tier(requester_principal, profile_id)`` is not ``none``.
+       ``read_answer`` deliberately survives revoking the requester's tier, so this re-check is
+       what stops a revoked requester receiving the answer.
+
+    The tier only bounds what may be released. F7 must ALSO, before releasing, confirm that
+    every claim the answer cites as evidence is still in ``visible_claims`` for this requester,
+    and that the answer's audience rank is at most the returned tier. This helper never reads
+    PostgreSQL.
+
+    Bounded: each check by ``CHECK_TIMEOUT_SECONDS`` and the whole call by
+    ``ANSWER_RELEASE_TIMEOUT_SECONDS``; past either it raises ``AuthorizationCheckTimeout``
+    (never a tier). Unconfigured OpenFGA raises ``FgaConfigurationError``; an inconsistent
+    principal raises ``AuthorizationDenied``.
+    """
+    client = _check_client(fga)
+    subject = subject_for(requester_principal)
+    question = question_object(question_id)
+    try:
+        with anyio.fail_after(ANSWER_RELEASE_TIMEOUT_SECONDS):
+            if not await _bounded_check(
+                client, user=profile_object(profile_id), relation=ABOUT, object=question
+            ):
+                return None
+            if not await _bounded_check(
+                client, user=subject, relation=READ_ANSWER, object=question
+            ):
+                return None
+            tier = await resolve_viewer_tier(client, requester_principal, profile_id)
+    except AuthorizationCheckTimeout:
+        raise
+    except TimeoutError as exc:
+        raise AuthorizationCheckTimeout() from exc
+    return None if tier is ViewerTier.none else tier
 
 
 # --- Claim visibility ------------------------------------------------------------------------
