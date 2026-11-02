@@ -459,11 +459,11 @@ resource "google_cloud_run_v2_job" "fga_admin" {
   }
 
   lifecycle {
-    # Image rolls out with `gcloud run jobs update --image`; operators override args per
-    # execution (`gcloud run jobs execute --args`), so neither is drift.
+    # Image rolls out with `gcloud run jobs update --image`. Args are NOT ignored: Terraform keeps
+    # the job's default args at the read-only `--check`. Per-execution overrides
+    # (`gcloud run jobs execute --args`) do not change the job spec, so they are not drift.
     ignore_changes = [
       template[0].template[0].containers[0].image,
-      template[0].template[0].containers[0].args,
       client,
       client_version,
     ]

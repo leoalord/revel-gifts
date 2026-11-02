@@ -125,7 +125,7 @@ Change the migration command through the `migrate_command` variable (default `al
 - `DATABASE_URL` comes from Secret Manager over the Cloud SQL socket.
 - `OPENFGA_STORE_ID` and `OPENFGA_AUTHORIZATION_MODEL_ID` are set once the variables are.
 
-The job's command is `python`. Its default args are the read-only `--check` probe. Pass other args per execution with `--args`, which replaces the job's args for that run only. Terraform ignores args drift on this job. It was first created with gcloud and is adopted through the `import` block in `run.tf`.
+The job's command is `python`. Its default args are the read-only `--check` probe. Pass other args per execution with `--args`, which replaces the job's args for that run only and leaves the job spec unchanged. Terraform manages the default args and resets them to `--check` if they change, so don't change them with `gcloud run jobs update --args`. The job was first created with gcloud and is adopted through the `import` block in `run.tf`. The import's first apply replaces the gcloud-set bootstrap args with `--check`.
 
 Every run writes only IDs, counts or a health word to the logs, never tokens, tuples or credentials. Run these after `revel-openfga-migrate` and with the current app image (see [Images](#images)).
 
