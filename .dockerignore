@@ -1,0 +1,42 @@
+# Secrets and local environment files (including .env.example): never copy into the image.
+**/.env
+**/.env.*
+
+# VCS, agent and editor state
+.git
+.gitignore
+.claude/
+**/.DS_Store
+
+# Python build/runtime artifacts (the venv is built inside the image)
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+**/dist
+
+# Node
+**/node_modules
+frontend/
+
+# Infrastructure: Terraform working dir, state, plans and variables
+infra/
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars
+**/plan-output.txt
+crash.log
+
+# Root research notes and repository docs not needed at runtime
+/0*-*.md
+docs/
+agent-guidance/
+dev/
+docker-compose.yml
+Dockerfile
+.dockerignore

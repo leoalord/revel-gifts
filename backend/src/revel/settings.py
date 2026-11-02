@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     gcp_region: str | None = None
 
     # --- Database ---
-    database_url: str = "postgresql+psycopg://revel:revel@localhost:5432/revel"
+    # Plain str for SQLAlchemy/Alembic; repr=False keeps the embedded password out of repr/logs.
+    database_url: str = Field(
+        default="postgresql+psycopg://revel:revel@localhost:5432/revel", repr=False
+    )
 
     # --- OpenFGA ---
     openfga_api_url: str = "http://localhost:8080"
@@ -73,6 +76,11 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.app_env in ("development", "test")
+
+    def validate_runtime(self) -> None:
+        """Fail closed on unsafe production configuration (called by create_app)."""
+        if self.app_env == "production" and urlsplit(self.public_base_url).scheme != "https":
+            raise ValueError("PUBLIC_BASE_URL must use https when APP_ENV=production")
 
     @property
     def normalized_mcp_path(self) -> str:

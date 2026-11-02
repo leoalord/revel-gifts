@@ -21,7 +21,7 @@ Requires [uv](https://docs.astral.sh/uv/) (Python 3.12 is pinned in `.python-ver
 ```sh
 cd backend
 uv sync                                   # install runtime + dev dependencies from uv.lock
-uv run uvicorn revel.app:app --reload     # http://localhost:8000/healthz, MCP at /mcp
+uv run uvicorn revel.app:app --reload     # http://localhost:8000/health (also /healthz), MCP at /mcp
 uv run pytest                             # tests
 uv run ruff check . && uv run ruff format --check .
 ```
@@ -29,6 +29,10 @@ uv run ruff check . && uv run ruff format --check .
 Configuration comes from environment variables, then `backend/.env`, then the repository-root
 `.env` (copy `../.env.example`). Local Postgres and OpenFGA: `docker compose up -d` from the repo
 root (see `../dev/README.md`).
+
+`APP_ENV=production` requires an `https://` `PUBLIC_BASE_URL`; `create_app` raises otherwise.
+Deployed checks use `/health`: Cloud Run reserves some paths ending in `z`. The container image
+is built from the repo-root `Dockerfile` (see `../infra/README.md`); it never contains `.env`.
 
 ## Database migrations
 
