@@ -106,13 +106,28 @@ def test_app_still_serves_health_and_mcp(
     assert hints["add_facts"] is False and hints["remove_fact"] is False
     assert hints["set_fact_audience"] is False
     assert tools["remove_fact"]["annotations"]["destructiveHint"] is True
+    assert tools["remove_fact"]["annotations"]["idempotentHint"] is False
+    assert "volunteers" in tools["get_contribution_policy"]["description"]
 
 
 def test_bearer_mcp_and_ui_share_one_profile(
     stack: tuple[TestClient, AuthRuntime, FakeFga], factory: sessionmaker[Session]
 ) -> None:
     client, runtime, _ = stack
-    assert client.get("/api/v1/profile/policy").json()["policy"] is None
+    initial = client.get("/api/v1/profile/policy").json()
+    assert initial["policy"] is None and initial["defaults"]["share_provisional"] is True
+    assert [a["id"] for a in initial["audiences"]] == [
+        "only_me",
+        "trusted_circle",
+        "connections",
+        "public",
+    ]
+    assert client.get("/api/v1/profile").json()["defaults"]["enrichment_enabled"] is True
+    # Structural body errors are FastAPI's 422; semantic ones are per item or 400.
+    bad = client.post(
+        "/api/v1/profile/facts", json={"facts": [{**FACT, "evidence_type": "rumour"}]}
+    )
+    assert bad.status_code == 422
     assert client.get("/api/ui/profile").status_code == 401  # a bearer token is no UI session
 
     # Bearer API contribution (no policy yet: held for review).
@@ -190,6 +205,13 @@ def test_bearer_mcp_and_ui_share_one_profile(
         )
         assert corrected.status_code == 200
         assert corrected.json()["supersedes_id"] == fid
+        empty = ui.patch(
+            f"/api/ui/profile/facts/{corrected.json()['id']}",
+            json={"statement": ""},
+            headers=ORIGIN,
+        )
+        assert empty.status_code == 400
+        assert empty.json()["detail"][0]["loc"] == ["body", "statement"]
 
         # Removal: MCP and DELETE; unknown ids are 404 / generic tool errors.
         new_id = corrected.json()["id"]

@@ -3,6 +3,7 @@ reads, corrections, audience changes, removal, review and policy effects on shar
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -19,7 +20,7 @@ from revel.auth.authz import AuthorizationDenied, owner_tuple, public_tuples
 from revel.auth.visibility import visible_claims
 from revel.db.enums import Audience, ClaimStatus
 from revel.db.models import Claim, ClaimEvent, ContributionPolicy, Profile
-from revel.services import profiles
+from revel.services import claim_writes, profiles
 from revel.services.profiles import (
     AuthorizationUnavailable,
     CategorySetting,
@@ -727,3 +728,173 @@ async def test_enable_grant_skipped_when_withdrawn_meanwhile(
         s.commit()
     await profiles._grant_public_after_commit(session, pid)
     assert not set(public_tuples(pid)) & fga.tuples
+
+
+# --- Review fixes (B1-B3, lock order) ---------------------------------------------------------
+
+
+async def test_defaults_and_audiences_while_no_policy(session: Session, world: World) -> None:
+    expected_defaults = {
+        "public_opt_in": False,
+        "share_provisional": True,
+        "require_review_all": False,
+        "enrichment_enabled": True,
+    }
+    expected_audiences = [
+        {"id": "only_me", "label": "Only me"},
+        {"id": "trusted_circle", "label": "Trusted Circle"},
+        {"id": "connections", "label": "Connections"},
+        {"id": "public", "label": "Public"},
+    ]
+    before = (await profiles.get_policy(session, world.alex.mcp)).model_dump(mode="json")
+    assert before["policy"] is None and before["defaults"] == expected_defaults
+    assert before["audiences"] == expected_audiences
+    no_profile = await profiles.get_my_profile(session, world.alex.mcp)
+    assert no_profile.defaults.model_dump() == expected_defaults
+    await add(session, world.alex.mcp, fact())  # profile exists, still no policy
+    no_policy = await profiles.get_my_profile(session, world.alex.mcp)
+    assert no_policy.profile_id is not None and no_policy.policy is None
+    assert no_policy.defaults.model_dump() == expected_defaults
+
+    after = await approve_policy(session, world)
+    assert after.policy is not None and after.defaults is None
+    assert [a.model_dump(mode="json") for a in after.audiences] == expected_audiences
+    mine = await profiles.get_my_profile(session, world.alex.ui)
+    assert mine.policy is not None and mine.defaults is None
+
+
+async def test_every_fact_change_requires_contribute(
+    session: Session, fga: FakeFga, world: World
+) -> None:
+    """Fails if ``require_contribute`` is dropped from the fact-change paths: with the OpenFGA
+    owner tuple gone (a revoked or never-synced grant) every path is denied for the owner's own
+    UI and agent principals, and an agent of another user forging Alex's id is denied too."""
+    await approve_policy(session, world, require_review_all=True)
+    (live,) = await add(session, world.alex.ui, fact())
+    (pending,) = await add(session, world.alex.mcp, fact(statement="Pending one"))
+    pid = (await profiles.get_my_profile(session, world.alex.ui)).profile_id
+    forged = profiles_principal(world.alex.user.id, world.sam.delegation)
+
+    agent_paths = {
+        "set_fact_audience": lambda p: profiles.set_fact_audience(
+            session, p, live.claim_id, Audience.ONLY_ME
+        ),
+        "remove_fact": lambda p: profiles.remove_fact(session, p, live.claim_id),
+    }
+    ui_paths = {
+        **agent_paths,
+        "approve_fact": lambda p: profiles.approve_fact(session, p, pending.claim_id),
+        "reject_fact": lambda p: profiles.reject_fact(session, p, pending.claim_id),
+        "patch_fact": lambda p: profiles.patch_fact(
+            session, p, live.claim_id, FactPatch(statement="Corrected")
+        ),
+        "patch_audience": lambda p: profiles.patch_fact(
+            session, p, live.claim_id, FactPatch(audience=Audience.ONLY_ME)
+        ),
+    }
+    for name, op in agent_paths.items():
+        with pytest.raises(AuthorizationDenied):
+            await op(forged)
+        assert name
+
+    fga.tuples.discard(owner_tuple(world.alex.user.id, pid))
+    for name, op in ui_paths.items():
+        with pytest.raises(AuthorizationDenied):
+            await op(world.alex.ui)
+        assert name
+    for op in agent_paths.values():
+        with pytest.raises(AuthorizationDenied):
+            await op(world.alex.mcp)
+
+    # Nothing changed.
+    fga.tuples.add(owner_tuple(world.alex.user.id, pid))
+    facts = {f.id: f for f in (await profiles.get_my_profile(session, world.alex.ui)).facts}
+    assert facts[live.claim_id].status is ClaimStatus.ACTIVE
+    assert facts[live.claim_id].audience is Audience.CONNECTIONS
+    assert facts[pending.claim_id].status is ClaimStatus.PENDING_REVIEW
+
+
+async def test_patch_errors_are_field_level_with_correct_reasons(
+    session: Session, world: World
+) -> None:
+    await approve_policy(session, world)
+    (r,) = await add(session, world.alex.ui, fact("birthday", "Birthday in March"))
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.patch_fact(session, world.alex.ui, r.claim_id, FactPatch(statement="  "))
+    assert [e["loc"] for e in info.value.errors] == [["body", "statement"]]
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.patch_fact(
+            session,
+            world.alex.ui,
+            r.claim_id,
+            FactPatch(statement=None, details={"month": 3, "day": 14, "year": 1990}),
+        )
+    assert [e["loc"] for e in info.value.errors] == [["body", "statement"], ["body", "details"]]
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.patch_fact(
+            session, world.alex.ui, r.claim_id, FactPatch(observed_precision="month")
+        )
+    assert [e["loc"] for e in info.value.errors] == [["body", "observed_at"]]
+
+    # Refusal reasons follow the actual rule.
+    (s,) = await add(session, world.alex.mcp, fact("sensitive", "Volunteered"))
+    await profiles.approve_fact(session, world.alex.ui, s.claim_id)
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.patch_fact(
+            session, world.alex.ui, s.claim_id, FactPatch(audience=Audience.CONNECTIONS)
+        )
+    assert info.value.errors == [
+        {"loc": ["body", "audience"], "msg": "Sensitive facts are always Only Me"}
+    ]
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.patch_fact(
+            session, world.alex.ui, r.claim_id, FactPatch(audience=Audience.PUBLIC)
+        )
+    assert info.value.errors[0]["msg"] == "This category can never be Public"
+    (i,) = await add(session, world.alex.ui, fact())
+    with pytest.raises(profiles.InvalidRequest) as info:
+        await profiles.set_fact_audience(session, world.alex.ui, i.claim_id, Audience.PUBLIC)
+    assert info.value.errors[0]["msg"] == "Public needs the owner's Public opt-in"
+    (bad,) = await add(session, world.alex.mcp, fact("sensitive", "x", audience="connections"))
+    assert bad.message == "Sensitive facts are always Only Me"
+
+
+async def test_concurrent_batches_superseding_in_opposite_order_do_not_deadlock(
+    factory: sessionmaker[Session],
+    session: Session,
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supersede targets are locked up front in id order: the second batch waits for the first
+    and then finds both targets retired, instead of a deadlock (500)."""
+    await approve_policy(session, world)
+    a, b = await add(session, world.alex.mcp, fact(statement="A"), fact(statement="B"))
+    outcomes: list[list[str]] = []
+    real_insert = claim_writes.insert_fact
+
+    def slow_insert(*args: Any, **kwargs: Any) -> Any:
+        # Widen the window between the two per-item locks so interleaving is certain.
+        claim = real_insert(*args, **kwargs)
+        time.sleep(0.3)
+        return claim
+
+    monkeypatch.setattr(claim_writes, "insert_fact", slow_insert)
+
+    async def batch(first, second) -> None:
+        with factory() as s:
+            results = await profiles.add_facts(
+                s,
+                world.alex.mcp,
+                [
+                    fact(statement=f"replaces {first.claim_id}", supersedes_id=str(first.claim_id)),
+                    fact(
+                        statement=f"replaces {second.claim_id}", supersedes_id=str(second.claim_id)
+                    ),
+                ],
+            )
+            outcomes.append(sorted(r.outcome for r in results.results))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(batch, a, b)
+        tg.start_soon(batch, b, a)
+    assert sorted(outcomes) == [["accepted", "accepted"], ["rejected", "rejected"]]
