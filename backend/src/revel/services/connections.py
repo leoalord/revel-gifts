@@ -70,11 +70,11 @@ fails or times out, Postgres stays approved and ``fga_reconcile`` (scheduled) re
 missing grant only denies. A revoke-hook failure rolls the change back; a commit failure after a
 successful revoke hook only over-denies until reconcile re-grants.
 
-Profiles. Tier and block tuples live on ``profile:<target profile id>``. Approval (and tier
-change) requires the approver to have a profile (``ProfileNotSetUp`` otherwise; F5's #9 profile
-creation is not merged yet). Block and unblock work without one (the row still hides the target
-from lookups); with no profile there is nothing to protect in OpenFGA, and reconcile writes the
-``blocked`` tuple once the profile exists.
+Profiles. Tier and block tuples live on ``profile:<target profile id>``. Approve, tier change and
+block call F5's ``revel.services.profiles.ensure_profile`` for the target/blocker inside their
+transaction (after the pair and row locks, before the row write), so approval works for someone
+who has no profile yet and a block always writes its ``blocked`` tuple in the same transaction
+(no block-before-profile gap). ``ProfileNotSetUp`` stays in the contract but is unreachable.
 
 Rate limits (module constants). ``REQUEST_LIMIT`` new requests per requester per
 ``REQUEST_WINDOW`` are counted in Postgres via ``(requester_user_id, created_at)`` under a
@@ -120,6 +120,7 @@ from revel.db.enums import (
 )
 from revel.db.models import Agent, AgentDelegation, ConnectionRequest, Handle, Profile, User
 from revel.db.models.connections import AVATAR_URL_MAX_LENGTH, HANDLE_PATTERN
+from revel.services import profiles
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,9 @@ class InvalidTier(ConnectionsError):
 
 
 class ProfileNotSetUp(ConnectionsError):
+    """Kept for the F8 contract (``profile_not_set_up``); unreachable since approval creates the
+    approver's profile through F5's ``ensure_profile``. Defensive only."""
+
     message = "Set up your Revel profile before approving connections"
 
 
@@ -373,6 +377,16 @@ def _profile_id(session: Session, user_id: UUID) -> UUID | None:
     return session.execute(
         select(Profile.id).where(Profile.user_id == user_id)
     ).scalar_one_or_none()
+
+
+def _ensure_profile(session: Session, user_id: UUID) -> UUID:
+    """F5's ``ensure_profile`` in THIS transaction (get or create; on creation it calls
+    ``on_profile_created`` pre-commit, a grant on a brand-new row). Called after the pair lock
+    and the ``connection_requests`` row lock and before the row write, so the transaction holds
+    ROW SHARE on ``connection_requests`` before it can wait on a concurrent profile insert: the
+    reconcile barrier (which never locks ``profiles``) cannot hold ``connection_requests``
+    while we wait, so no cycle. Failures become ``ConnectionsUnavailable`` (rollback)."""
+    return _hook(profiles.ensure_profile, session=session, user_id=user_id)
 
 
 def _hook(fn: Callable[..., Any], **kwargs: Any) -> Any:
@@ -1014,9 +1028,7 @@ async def _set_tier(
             row = _locked_row(session, principal, request_id, "target")
             if row.status != from_status:
                 raise InvalidState()
-            profile_id = _profile_id(session, row.target_user_id)
-            if profile_id is None:
-                raise ProfileNotSetUp()
+            profile_id = _ensure_profile(session, row.target_user_id)
             values: dict[str, Any] = {
                 "status": _APPROVED,
                 "granted_tier": tier.value,
@@ -1181,6 +1193,7 @@ async def block(
             row = _live_row(session, requester, target, for_update=True)
             if row is not None and row.status == _BLOCKED:
                 return _result(row), requester
+            profile_id = _ensure_profile(session, target)
             if row is not None:
                 values: dict[str, Any] = {
                     "status": _BLOCKED,
@@ -1202,9 +1215,7 @@ async def block(
                     )
                     .returning(ConnectionRequest)
                 ).scalar_one()
-            profile_id = _profile_id(session, target)
-            if profile_id is not None:
-                _hook(authz.on_blocked, profile_id=profile_id, blocked_user_id=requester)
+            _hook(authz.on_blocked, profile_id=profile_id, blocked_user_id=requester)
             return _result(row), requester
 
     result, blocked_user = await _run(work)

@@ -20,9 +20,15 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.auth import authz, fga_reconcile
-from revel.auth.authz import ViewerTier, blocked_tuple, resolve_viewer_tier, tier_tuple
+from revel.auth.authz import (
+    ViewerTier,
+    blocked_tuple,
+    owner_tuple,
+    resolve_viewer_tier,
+    tier_tuple,
+)
 from revel.db.enums import ConnectionTier
-from revel.db.models import ConnectionRequest
+from revel.db.models import ConnectionRequest, Profile
 from revel.services import connections as svc
 
 pytestmark = pytest.mark.anyio
@@ -331,17 +337,55 @@ async def test_disconnected_delegation_cannot_act(
     assert rows(session)[0].status == "pending"
 
 
-async def test_approval_requires_a_profile(session: Session, sessions, fake_fga: FakeFga) -> None:
+def profile_of(session: Session, person: Person):
+    session.expire_all()
+    return session.execute(
+        select(Profile.id).where(Profile.user_id == person.user.id)
+    ).scalar_one_or_none()
+
+
+async def test_approval_creates_the_approvers_profile_and_grants(
+    session: Session, sessions, fake_fga: FakeFga
+) -> None:
+    sam = add_person(session, "sam")
+    alex = add_person(session, "alex", profile=False)
+    seed_fga(fake_fga, sam, alex)
+    req = await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
+    assert profile_of(session, alex) is None
+    await svc.approve(alex.agent, req.request.id, tier="connections", sessions=sessions)
+    pid = profile_of(session, alex)
+    assert pid is not None
+    assert owner_tuple(alex.user.id, pid) in fake_fga.tuples  # F5/F4's on_profile_created
+    assert await resolve_viewer_tier(fake_fga, sam.ui, pid) is ViewerTier.connections
+    assert await resolve_viewer_tier(fake_fga, alex.ui, pid) is ViewerTier.only_me
+
+
+async def test_block_without_a_profile_writes_the_blocked_tuple_at_once(
+    session: Session, sessions, fake_fga: FakeFga
+) -> None:
     sam = add_person(session, "sam")
     alex = add_person(session, "alex", profile=False)
     req = await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
-    with pytest.raises(svc.ProfileNotSetUp):
-        await svc.approve(alex.ui, req.request.id, tier="connections", sessions=sessions)
-    assert rows(session)[0].status == "pending"
-    # Declining and blocking still work without a profile.
     assert (await svc.block(alex.ui, req.request.id, sessions=sessions)).status == "blocked"
+    pid = profile_of(session, alex)
+    assert pid is not None
+    assert blocked_tuple(pid, sam.user.id) in fake_fga.tuples
     with pytest.raises(svc.TargetNotFound):
         await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
+
+
+async def test_profile_creation_failure_rolls_back_approval(
+    session: Session, sessions, fake_fga: FakeFga
+) -> None:
+    sam = add_person(session, "sam")
+    alex = add_person(session, "alex", profile=False)
+    req = await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
+    fake_fga.error = RuntimeError("synthetic OpenFGA outage")  # on_profile_created fails
+    with pytest.raises(svc.ConnectionsUnavailable):
+        await svc.approve(alex.ui, req.request.id, tier="connections", sessions=sessions)
+    fake_fga.error = None
+    assert rows(session)[0].status == "pending"
+    assert profile_of(session, alex) is None  # rolled back with the approval
 
 
 # --- Blocks -----------------------------------------------------------------------------------

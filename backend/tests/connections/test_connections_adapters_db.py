@@ -14,6 +14,7 @@ from conn_helpers import Person, add_person, seed_fga
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mcp.server.mcpserver.exceptions import ToolError
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.api import connections as api
@@ -23,6 +24,7 @@ from revel.auth.authz import ViewerTier, resolve_viewer_tier
 from revel.auth.fga import create_fga_client
 from revel.auth.identity import Principal
 from revel.auth.ui import current_ui_principal, same_origin_ui_principal
+from revel.db.models import Profile
 from revel.mcp import connection_tools
 from revel.services import connections as svc
 from revel.settings import Settings
@@ -302,6 +304,55 @@ async def test_end_to_end_on_real_openfga(
         # Reconcile agrees with the service's writes (nothing to re-grant or revoke).
         await fga_reconcile.reconcile(fga, lambda: factory, window=timedelta(0))
         assert await tier(sam.ui, alex) is ViewerTier.none
+    finally:
+        authz.reset_authz()
+        await fga.close()
+
+
+@pytest.mark.openfga
+@pytest.mark.anyio
+async def test_block_and_approve_without_profiles_on_real_openfga(
+    session: Session, sessions: Any, factory: sessionmaker[Session]
+) -> None:
+    """ensure_profile inside block/approve: the blocked tuple and the grant land at once."""
+    if not _openfga_reachable():
+        pytest.skip("OPENFGA_TEST_API_URL is not set or not reachable")
+    base = Settings(_env_file=None, openfga_api_url=OPENFGA_TEST_API_URL)
+    boot = await fga_bootstrap.bootstrap(base, store_name=f"revel-test-{uuid4()}")
+    fga = create_fga_client(
+        base.model_copy(
+            update={
+                "openfga_store_id": boot.store_id,
+                "openfga_authorization_model_id": boot.authorization_model_id,
+            }
+        )
+    )
+    authz.configure_authz(fga)
+    try:
+        sam = add_person(session, "sam")
+        alex = add_person(session, "alex", profile=False)
+        cal = add_person(session, "cal", profile=False)
+        await fga_reconcile.reconcile(fga, lambda: factory, window=timedelta(0))
+
+        blocked = await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
+        await svc.block(alex.ui, blocked.request.id, sessions=sessions)
+        alex_profile = session.execute(
+            select(Profile.id).where(Profile.user_id == alex.user.id)
+        ).scalar_one()
+        assert await fga.check(
+            user=f"user:{sam.user.id}", relation="blocked", object=f"profile:{alex_profile}"
+        )
+        # Even a Public opt-in would not reach Sam: the block applies already.
+        await authz.on_public_opt_in_changed(profile_id=alex_profile, enabled=True)
+        assert await resolve_viewer_tier(fga, sam.ui, alex_profile) is ViewerTier.none
+
+        req = await svc.lookup_and_request(sam.agent, handle="cal_demo", sessions=sessions)
+        await svc.approve(cal.agent, req.request.id, tier="trusted_circle", sessions=sessions)
+        cal_profile = session.execute(
+            select(Profile.id).where(Profile.user_id == cal.user.id)
+        ).scalar_one()
+        assert await resolve_viewer_tier(fga, sam.agent, cal_profile) is ViewerTier.trusted_circle
+        assert await resolve_viewer_tier(fga, cal.ui, cal_profile) is ViewerTier.only_me
     finally:
         authz.reset_authz()
         await fga.close()

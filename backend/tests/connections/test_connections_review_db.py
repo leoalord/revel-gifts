@@ -142,21 +142,31 @@ async def test_row_write_precedes_revoke_hook(
     expected = {"revoke": "revoked", "tier": "approved"}.get(action, "blocked")
     real_hook = getattr(authz, HOOKS[action])
     real_update = svc._update_row
-    real_profile_id = svc._profile_id
+    real_ensure, real_profile_id = svc._ensure_profile, svc._profile_id
     events: list[str] = []
-    seen_in_tx: list[str] = []
+    tx: list[Session] = []  # the changing transaction's session
+    seen_in_tx: list[set[tuple[str, str | None]]] = []
 
     def update_row(session_, request_id, **values):
         events.append("update")
         return real_update(session_, request_id, **values)
 
+    def ensure_profile(session_, user_id):
+        tx.append(session_)
+        return real_ensure(session_, user_id)
+
     def profile_id(session_, user_id):
-        # Runs in the changing transaction right before the hook: record what it sees.
-        statuses = session_.execute(
-            select(ConnectionRequest.status).where(ConnectionRequest.target_user_id == alex.user.id)
-        ).scalars()
-        seen_in_tx.append(",".join(sorted(statuses)))
+        tx.append(session_)
         return real_profile_id(session_, user_id)
+
+    def read_in_tx() -> set[tuple[str, str | None]]:
+        # The worker thread is parked in the hook, so the session is not in concurrent use.
+        rows_ = tx[-1].execute(
+            select(ConnectionRequest.status, ConnectionRequest.granted_tier).where(
+                ConnectionRequest.target_user_id == alex.user.id
+            )
+        )
+        return {(r[0], r[1]) for r in rows_}
 
     async def hook(**kwargs):
         events.append("hook")
@@ -169,9 +179,11 @@ async def test_row_write_precedes_revoke_hook(
                 )
             ).scalar_one()
         assert held >= 1, "revoke-class hook ran before the row write"
+        seen_in_tx.append(await anyio.to_thread.run_sync(read_in_tx))
         return await real_hook(**kwargs)
 
     monkeypatch.setattr(svc, "_update_row", update_row)
+    monkeypatch.setattr(svc, "_ensure_profile", ensure_profile)
     monkeypatch.setattr(svc, "_profile_id", profile_id)
     monkeypatch.setattr(authz, HOOKS[action], hook)
     if action == "revoke":
@@ -184,8 +196,8 @@ async def test_row_write_precedes_revoke_hook(
     assert events.count("hook") == 1
     if action != "block_insert":  # the insert path writes with INSERT, not _update_row
         assert events.index("update") < events.index("hook")
-    if action != "tier":  # tier change reads the profile before its UPDATE
-        assert expected in seen_in_tx[-1].split(",")
+    expected_row = (expected, "connections" if action == "tier" else None)
+    assert expected_row in seen_in_tx[0]  # the transaction already sees its own write
     assert any(r.status == expected for r in rows(session))
 
 
