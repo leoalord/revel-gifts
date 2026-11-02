@@ -1,5 +1,21 @@
 # Agent guidance
 
-Canonical versioned agent-facing workflow instructions belong here when implemented. Derive website guidance and supported skill bundles from the same source, aligned with the implemented contract.
+The canonical, versioned agent guidance lives as package data in
+[`backend/src/revel/guidance/skills/`](../backend/src/revel/guidance/skills/):
+`<name>/SKILL.md` per skill, plus `index.md` and `CHANGELOG.md`. Each file has front matter
+(`name`, `description`, `version` as semver, `status`). Edit those files only; do not keep copies
+here. Bump `version` and add a `CHANGELOG.md` entry for every content change.
+
+One renderer (`revel.guidance.render_markdown`) produces both delivery formats from the same
+bytes:
+
+- website Markdown: `GET /guidance` (index) and `GET /guidance/<name>.md`, public, `text/markdown`;
+- MCP: each skill as a no-argument prompt named after the skill, and each document as the
+  resource `revel://guidance/<name>` (`text/markdown`).
+
+Operation names in the guidance are checked by `backend/tests/guidance/test_content_lint.py`
+against `revel.guidance.operations`: anything not live must be marked `<!-- PROVISIONAL ... -->`
+on the same line. Move a name to the implemented set only once its contract is merged and
+deployed.
 
 [Agent-Led Onboarding](https://app.notion.com/p/40a2bade7f3181eab40de24dfbe88adb) owns guidance requirements and client verification. [Privacy](https://app.notion.com/p/40b2bade7f31811d8e55d8818e949b31) owns contribution rules; [Questions](https://app.notion.com/p/40a2bade7f3181bf9975f7fa9a1f597d) owns routing and lifecycle. Runtime instructions must implement those decisions; this README is not a separate policy specification. Document only tested client capabilities and supported operations.
