@@ -54,15 +54,19 @@ class FakeFga:
         return RelationTuple(user, relation, object) in self.tuples
 
     async def read_tuples(
-        self, *, relation: str, object: str, user: str | None = None
+        self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]:
         self._call("read")
         return [
             t
             for t in self.tuples
             if (user is None or t.user == user)
-            and t.relation == relation
-            and (t.object == object or (object.endswith(":") and t.object.startswith(object)))
+            and (relation is None or t.relation == relation)
+            and (
+                object is None
+                or t.object == object
+                or (object.endswith(":") and t.object.startswith(object))
+            )
         ]
 
     async def close(self) -> None:

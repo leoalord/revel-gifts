@@ -69,7 +69,7 @@ class FgaClient(Protocol):
     async def check(self, *, user: str, relation: str, object: str) -> bool: ...
 
     async def read_tuples(
-        self, *, relation: str, object: str, user: str | None = None
+        self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]: ...
 
     @property
@@ -216,9 +216,12 @@ class OpenFgaServiceClient:
         return bool(response.allowed)
 
     async def read_tuples(
-        self, *, relation: str, object: str, user: str | None = None
+        self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]:
-        """OpenFGA Read. ``object`` is ``type:id``, or ``type:`` (all of a type; needs ``user``)."""
+        """OpenFGA Read. ``object`` is ``type:id``, or ``type:`` (all of a type; needs ``user``).
+
+        With no arguments, reads every tuple in the store (used by ``fga_reconcile --prune``).
+        """
         self._require_configured()
         found: list[RelationTuple] = []
         continuation: str | None = None

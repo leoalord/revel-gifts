@@ -263,18 +263,29 @@ def reset_authz(fga: FgaClient | None = None) -> None:
     _warned_unconfigured = False
 
 
-def _hooks_or_none() -> TupleHooks | None:
-    """Configured hooks for a granting operation, or ``None`` (one warning) when unconfigured.
+def _grant_state() -> _AuthzState | None:
+    """Configured state for a granting operation, or ``None`` (one warning) when unconfigured.
 
     Skipping a grant never grants access, so sign-in keeps working before bootstrap.
     """
     global _warned_unconfigured
     if _state is not None and _state.fga.configured:
-        return _state.hooks
+        return _state
     if not _warned_unconfigured:
         logger.warning("OpenFGA is not configured; skipping authorization tuple writes")
         _warned_unconfigured = True
     return None
+
+
+def _hooks_or_none() -> TupleHooks | None:
+    state = _grant_state()
+    return None if state is None else state.hooks
+
+
+def configured_client_or_none() -> FgaClient | None:
+    """The configured client for a GRANT hook, or ``None`` (one warning) while unconfigured."""
+    state = _grant_state()
+    return None if state is None else state.fga
 
 
 def _revoke_hooks() -> TupleHooks:
@@ -381,13 +392,11 @@ async def require_viewer(
     return tier
 
 
-# --- Claim visibility (pending #7) ------------------------------------------------------------
+# --- Claim visibility ------------------------------------------------------------------------
 #
-# visible_claims(fga, session, principal, profile_id) belongs here: it resolves the viewer tier
-# above and filters claims in PostgreSQL by status (pending_review, superseded and removed are
-# hidden) and audience <= tier. It is intentionally not implemented until F3's claims schema
-# (#7) is merged; do not read claims anywhere else. Like the checks above, it must raise
-# FgaConfigurationError when OpenFGA is unconfigured (use _check_client).
+# visible_claims / owner_claims live in revel.auth.visibility (they need the database models);
+# do not read claims anywhere else. Like the checks above, they raise FgaConfigurationError when
+# OpenFGA is unconfigured (via resolve_viewer_tier -> _check_client).
 #
 # Adapters (MCP/HTTP) must map AuthorizationDenied to a generic denial and OpenFGA SDK or
 # FgaConfigurationError exceptions to a generic 5xx, and never return their text: SDK errors
