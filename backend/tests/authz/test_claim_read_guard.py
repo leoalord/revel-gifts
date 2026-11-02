@@ -31,7 +31,11 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src" / "revel"
 GUARDED_PACKAGES = ("api", "mcp", "services")
 # Claim WRITE modules, relative to src/revel (see the module docstring). Empty until F5.
-CLAIM_WRITE_MODULES: frozenset[str] = frozenset()
+CLAIM_WRITE_MODULES: frozenset[str] = frozenset(
+    {
+        "services/claim_writes.py",  # RG-18 (#9): claim write path; reviewed by F4
+    }
+)
 
 _CLAIM_MODEL = re.compile(r"\bClaim\b|revel\.db\.models\.profile")
 _CLAIM_QUERY = re.compile(
