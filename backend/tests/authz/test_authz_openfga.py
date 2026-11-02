@@ -16,7 +16,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -35,7 +35,7 @@ from revel.auth.authz import (
     reset_authz,
     resolve_viewer_tier,
 )
-from revel.auth.fga import OpenFgaServiceClient, create_fga_client
+from revel.auth.fga import OpenFgaServiceClient, RelationTuple, create_fga_client
 from revel.settings import Settings
 
 OPENFGA_TEST_API_URL = os.environ.get("OPENFGA_TEST_API_URL", "")
@@ -118,14 +118,10 @@ async def test_bootstrap_writes_new_version_when_model_changes(
 
 async def test_hooks_owner_agent_and_cross_user_isolation(fga: OpenFgaServiceClient) -> None:
     alex, sam = make_person(), make_person()
-    profiles = {alex.user_id: alex.profile_id, sam.user_id: sam.profile_id}
-
-    async def resolve(user_id: UUID) -> UUID | None:
-        return profiles.get(user_id)
-
-    hooks = TupleHooks(fga, resolve)
+    hooks = TupleHooks(fga)
     shared_client = uuid4()  # one global agents row for both users' Muse
     for person in (alex, sam):
+        await reconcile_owner_tuples(fga, [(person.user_id, person.profile_id)])
         # Twice: duplicate writes must be ignored by the real server.
         for _ in range(2):
             await hooks.on_user_created(user_id=person.user_id)
@@ -153,31 +149,49 @@ async def test_hooks_owner_agent_and_cross_user_isolation(fga: OpenFgaServiceCli
     assert await resolve_viewer_tier(fga, alex_muse, alex.profile_id) is ViewerTier.none
     assert await can_contribute(fga, alex.as_user(), alex.profile_id)
     assert await can_contribute(fga, sams_muse, sam.profile_id)
-    owner_agent = await fga.read_tuples(
-        user=f"agent:{alex.delegation_id}", relation="owner_agent", object="profile:"
+    delegate = await fga.read_tuples(
+        user=f"agent:{alex.delegation_id}", relation="delegate", object="user:"
     )
-    assert owner_agent == []
+    assert delegate == []
 
 
-async def test_deferred_profile_then_reconcile(fga: OpenFgaServiceClient) -> None:
+async def test_delegation_before_profile_then_owner_tuple(fga: OpenFgaServiceClient) -> None:
     alex = make_person()
-    hooks = TupleHooks(fga)  # no profiles yet
+    hooks = TupleHooks(fga)
     await hooks.on_user_created(user_id=alex.user_id)
-    deferred = await hooks.on_agent_delegated(
+    await hooks.on_agent_delegated(
         user_id=alex.user_id, agent_id=uuid4(), delegation_id=alex.delegation_id
     )
-    assert deferred.profile_deferred
     agent = alex.as_agent(uuid4())
     assert not await can_contribute(fga, agent, alex.profile_id)
 
+    # Only the owner tuple is written at profile creation; owner_agent is computed.
     await reconcile_owner_tuples(fga, [(alex.user_id, alex.profile_id)])
-    await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id, alex.profile_id)])
     assert await can_contribute(fga, alex.as_user(), alex.profile_id)
     assert await can_contribute(fga, agent, alex.profile_id)
 
-    # Disconnect without a resolver still finds the backfilled owner_agent tuple.
     await hooks.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
     assert not await can_contribute(fga, agent, alex.profile_id)
+
+
+async def test_owner_agent_cannot_be_written(fga: OpenFgaServiceClient) -> None:
+    alex = make_person()
+    with pytest.raises(Exception):  # noqa: B017 - the server rejects the type restriction
+        await fga.write_tuples(
+            [
+                RelationTuple(
+                    f"agent:{alex.delegation_id}", "owner_agent", f"profile:{alex.profile_id}"
+                )
+            ]
+        )
+
+
+async def test_stored_tuples_carry_write_times(fga: OpenFgaServiceClient) -> None:
+    alex = make_person()
+    await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id)])
+    stored = await fga.read_stored_tuples()
+    assert len(stored) == 2
+    assert all(s.written_at.tzinfo is not None for s in stored)
 
 
 async def test_check_probe_healthy_and_missing_model(store: Settings) -> None:
@@ -228,7 +242,8 @@ async def test_disconnect_revokes_every_acts_for_on_the_delegation(
     alex, other = make_person(), make_person()
     configure_authz(fga)
     try:
-        await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id, alex.profile_id)])
+        await reconcile_owner_tuples(fga, [(alex.user_id, alex.profile_id)])
+        await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id)])
         await fga.write_tuples([acts_for_tuple(other.user_id, alex.delegation_id)])
         await on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
         remaining = await fga.read_tuples(relation="acts_for", object=f"agent:{alex.delegation_id}")

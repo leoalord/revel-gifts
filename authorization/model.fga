@@ -9,6 +9,9 @@ model
   schema 1.1
 
 type user
+  relations
+    # The user's connected agents (one per active delegation); deleted on disconnect.
+    define delegate: [agent]
 
 type agent
   relations
@@ -17,7 +20,8 @@ type agent
 type profile
   relations
     define owner: [user]
-    # Written when the owner connects an agent; deleted on disconnect.
-    define owner_agent: [agent]
+    # Computed: every delegate of the owner. Not directly writable, so agent connect and
+    # disconnect never need the profile (identity hooks stay database-free).
+    define owner_agent: delegate from owner
     define contribute: owner or owner_agent
     define view_only_me: owner or owner_agent

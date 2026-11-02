@@ -1,6 +1,8 @@
 name: Revel Gifts authorization model v1
 model_file: ../model.fga
 # agent:<id> is an agent_delegations.id (one per user and OAuth client pair).
+# Agent connect writes agent:<d>#acts_for@user:<u> and user:<u>#delegate@agent:<d>;
+# profile#owner_agent is computed (delegate from owner) and never written.
 
 tests:
   - name: owner and connected agent
@@ -13,8 +15,8 @@ tests:
         relation: acts_for
         object: agent:deleg-alex-claude
       - user: agent:deleg-alex-claude
-        relation: owner_agent
-        object: profile:alex
+        relation: delegate
+        object: user:alex
       - user: user:bob
         relation: owner
         object: profile:bob
@@ -22,8 +24,8 @@ tests:
         relation: acts_for
         object: agent:deleg-bob-claude
       - user: agent:deleg-bob-claude
-        relation: owner_agent
-        object: profile:bob
+        relation: delegate
+        object: user:bob
     check:
       - user: user:alex
         object: profile:alex
@@ -71,7 +73,7 @@ tests:
             - profile:bob
 
   - name: two delegations of the same client
-    description: Alex and Sam both connect the same Muse client; each delegation is its own agent object, so Sam's cannot use Alex's profile.
+    description: Alex and Sam both connect the same Muse client; each delegation is its own agent object, so Sam's delegate cannot use Alex's profile.
     tuples:
       - user: user:alex
         relation: owner
@@ -80,8 +82,8 @@ tests:
         relation: acts_for
         object: agent:deleg-alex-muse
       - user: agent:deleg-alex-muse
-        relation: owner_agent
-        object: profile:alex
+        relation: delegate
+        object: user:alex
       - user: user:sam
         relation: owner
         object: profile:sam
@@ -89,8 +91,8 @@ tests:
         relation: acts_for
         object: agent:deleg-sam-muse
       - user: agent:deleg-sam-muse
-        relation: owner_agent
-        object: profile:sam
+        relation: delegate
+        object: user:sam
     check:
       - user: agent:deleg-alex-muse
         object: profile:alex
@@ -118,7 +120,7 @@ tests:
             - profile:sam
 
   - name: agent disconnected
-    description: Without the owner_agent tuple (disconnect deletes it) the agent is denied even though acts_for remains; the owner keeps access.
+    description: Without the delegate tuple (disconnect deletes it) the agent is denied even though acts_for remains; the owner keeps access.
     tuples:
       - user: user:alex
         relation: owner
@@ -145,30 +147,32 @@ tests:
           view_only_me: []
           contribute: []
 
-  - name: owner_agent is scoped to one profile
-    description: An agent that acts_for alex but is owner_agent only of another profile cannot use alex's profile.
+  - name: owner_agent follows the owner
+    description: An agent delegated by alex gets owner_agent only on profiles alex owns, not on a profile owned by someone else.
     tuples:
       - user: user:alex
         relation: owner
         object: profile:alex
-      - user: user:alex
+      - user: user:bob
         relation: owner
-        object: profile:alex-other
+        object: profile:bob
       - user: user:alex
         relation: acts_for
         object: agent:deleg-alex-muse
       - user: agent:deleg-alex-muse
-        relation: owner_agent
-        object: profile:alex-other
+        relation: delegate
+        object: user:alex
     check:
       - user: agent:deleg-alex-muse
-        object: profile:alex
+        object: profile:bob
         assertions:
+          owner_agent: false
           contribute: false
           view_only_me: false
       - user: agent:deleg-alex-muse
-        object: profile:alex-other
+        object: profile:alex
         assertions:
+          owner_agent: true
           contribute: true
           view_only_me: true
     list_objects:
@@ -176,4 +180,85 @@ tests:
         type: profile
         assertions:
           view_only_me:
-            - profile:alex-other
+            - profile:alex
+
+  - name: delegate without acts_for still derives owner_agent
+    description: owner_agent is derived only through user#delegate; the owner's profile is reachable as soon as the delegate tuple exists, with no profile-specific write.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: agent:deleg-alex-muse
+        relation: delegate
+        object: user:alex
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          owner_agent: true
+          contribute: true
+          view_only_me: true
+
+  - name: delegate written before the profile exists
+    description: The delegation (acts_for + delegate) predates the profile; writing only the owner tuple later grants the agent.
+    tuples:
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-muse
+      - user: agent:deleg-alex-muse
+        relation: delegate
+        object: user:alex
+      - user: user:alex
+        relation: owner
+        object: profile:alex-later
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex-later
+        assertions:
+          owner_agent: true
+          contribute: true
+          view_only_me: true
+
+  - name: acts_for without delegate grants nothing
+    description: acts_for alone (for example a stray tuple after a partial disconnect) gives no profile access.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-muse
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          owner_agent: false
+          contribute: false
+          view_only_me: false
+
+  - name: sam's delegate on alex's profile
+    description: A delegate tuple on Sam never grants on Alex's profile, even for the same OAuth client and even if it also acts_for alex.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:sam
+        relation: owner
+        object: profile:sam
+      - user: agent:deleg-sam-muse
+        relation: delegate
+        object: user:sam
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-sam-muse
+    check:
+      - user: agent:deleg-sam-muse
+        object: profile:alex
+        assertions:
+          owner_agent: false
+          contribute: false
+          view_only_me: false
+      - user: agent:deleg-sam-muse
+        object: profile:sam
+        assertions:
+          owner_agent: true

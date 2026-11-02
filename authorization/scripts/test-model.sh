@@ -22,6 +22,23 @@ fi
 echo "Running tests/*.fga.yaml"
 fga model test --allow-external-files --tests 'tests/*.fga.yaml'
 
+# Negative cases must be rejected: profile#owner_agent is computed, never written directly.
+echo "Running tests/negative/*.fga.yaml (each must be rejected)"
+for negative in "${AUTHZ_DIR}"/tests/negative/*.fga.yaml; do
+  name="tests/negative/$(basename "${negative}")"
+  if output="$(fga model test --allow-external-files --tests "${name}" 2>&1)"; then
+    echo "${output}"
+    echo "Negative test unexpectedly passed: ${name}" >&2
+    exit 1
+  fi
+  if ! grep -q "Invalid tuple" <<<"${output}"; then
+    echo "${output}"
+    echo "Negative test failed for an unexpected reason: ${name}" >&2
+    exit 1
+  fi
+  echo "rejected as expected: ${name}"
+done
+
 # model.json (written by fga_bootstrap) must be the CLI transform of model.fga.
 echo "Checking model.json matches model.fga"
 # shellcheck source=generate-model-json.sh

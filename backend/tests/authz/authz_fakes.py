@@ -2,10 +2,11 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from revel.auth.fga import RelationTuple
+from revel.auth.fga import RelationTuple, StoredTuple
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class FakeFga:
 
     def __init__(self, *, configured: bool = True) -> None:
         self.tuples: set[RelationTuple] = set()
+        # Write time per tuple (defaults to now when first written); tests may backdate entries.
+        self.written_at: dict[RelationTuple, datetime] = {}
         self.calls: list[str] = []
         self.closed = False
         self.configured = configured
@@ -39,7 +42,14 @@ class FakeFga:
 
     async def write_tuples(self, tuples: Iterable[RelationTuple]) -> None:
         self._call("write")
-        self.tuples.update(tuples)
+        tuples = list(tuples)
+        if any(t.relation == "owner_agent" for t in tuples):
+            # Like the real server: owner_agent is computed and has no direct type restriction.
+            raise ValueError("owner_agent is not directly writable")
+        for t in tuples:
+            if t not in self.tuples:
+                self.written_at[t] = datetime.now(UTC)
+            self.tuples.add(t)
 
     async def delete_tuples(self, tuples: Iterable[RelationTuple]) -> None:
         self._call("delete")
@@ -47,23 +57,39 @@ class FakeFga:
 
     async def check(self, *, user: str, relation: str, object: str) -> bool:
         self._call("check")
+        if relation == "owner_agent":
+            return self._owner_agent(user, object)
         if relation in ("contribute", "view_only_me"):
-            return RelationTuple(user, "owner", object) in self.tuples or (
-                RelationTuple(user, "owner_agent", object) in self.tuples
+            return RelationTuple(user, "owner", object) in self.tuples or self._owner_agent(
+                user, object
             )
         return RelationTuple(user, relation, object) in self.tuples
 
+    def _owner_agent(self, user: str, object: str) -> bool:
+        # owner_agent: delegate from owner.
+        owners = {t.user for t in self.tuples if t.relation == "owner" and t.object == object}
+        return any(RelationTuple(user, "delegate", owner) in self.tuples for owner in owners)
+
     async def read_tuples(
-        self, *, relation: str, object: str, user: str | None = None
+        self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]:
         self._call("read")
         return [
             t
             for t in self.tuples
             if (user is None or t.user == user)
-            and t.relation == relation
-            and (t.object == object or (object.endswith(":") and t.object.startswith(object)))
+            and (relation is None or t.relation == relation)
+            and (
+                object is None
+                or t.object == object
+                or (object.endswith(":") and t.object.startswith(object))
+            )
         ]
+
+    async def read_stored_tuples(self) -> list[StoredTuple]:
+        self._call("read")
+        epoch = datetime.fromtimestamp(0, UTC)
+        return [StoredTuple(t, self.written_at.get(t, epoch)) for t in self.tuples]
 
     async def close(self) -> None:
         self.closed = True

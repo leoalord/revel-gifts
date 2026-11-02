@@ -1,0 +1,15 @@
+name: owner_agent is computed and cannot be written
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this direct owner_agent tuple.
+
+tests:
+  - name: direct owner_agent tuple
+    tuples:
+      - user: agent:deleg-alex-muse
+        relation: owner_agent
+        object: profile:alex
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          owner_agent: true

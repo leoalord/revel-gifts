@@ -5,8 +5,9 @@ import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
+import anyio
 import pytest
 from authz_fakes import FakeFga, Principal, make_person
 from fastapi.testclient import TestClient
@@ -19,7 +20,7 @@ from revel.auth.authz import (
     acts_for_tuple,
     can_contribute,
     configure_authz,
-    owner_agent_tuple,
+    delegate_tuple,
     owner_tuple,
     require_contribute,
     require_viewer,
@@ -47,13 +48,6 @@ def f2_hook(name: str) -> Any:
     return getattr(importlib.import_module("revel.auth.authz"), name)
 
 
-def resolver(mapping: dict[UUID, UUID]) -> authz.ProfileResolver:
-    async def resolve(user_id: UUID) -> UUID | None:
-        return mapping.get(user_id)
-
-    return resolve
-
-
 # --- Module-level hooks -----------------------------------------------------------------------
 
 
@@ -65,7 +59,8 @@ def test_f2_lookup_finds_all_hooks() -> None:
 
 async def test_module_hooks_delegate_to_configured_hooks(fake_fga: FakeFga) -> None:
     alex = make_person()
-    configure_authz(fake_fga, resolver({alex.user_id: alex.profile_id}))
+    fake_fga.tuples.add(owner_tuple(alex.user_id, alex.profile_id))
+    configure_authz(fake_fga)
     agent_id = uuid4()
     await f2_hook("on_user_created")(user_id=alex.user_id)
     await f2_hook("on_agent_delegated")(
@@ -74,8 +69,9 @@ async def test_module_hooks_delegate_to_configured_hooks(fake_fga: FakeFga) -> N
     assert fake_fga.tuples == {
         owner_tuple(alex.user_id, alex.profile_id),
         acts_for_tuple(alex.user_id, alex.delegation_id),
-        owner_agent_tuple(alex.delegation_id, alex.profile_id),
+        delegate_tuple(alex.user_id, alex.delegation_id),
     }
+    assert await can_contribute(fake_fga, alex.as_agent(agent_id), alex.profile_id)
     await f2_hook("on_agent_disconnected")(
         user_id=alex.user_id, delegation_id=alex.delegation_id, agent_id=agent_id
     )
@@ -88,7 +84,7 @@ async def test_grant_hooks_warn_and_return_when_unconfigured(
 ) -> None:
     unconfigured = FakeFga(configured=False)
     if configured:
-        configure_authz(unconfigured, resolver({}))
+        configure_authz(unconfigured)
     caplog.set_level(logging.WARNING, logger="revel.auth.authz")
     user_id = uuid4()
     assert await f2_hook("on_user_created")(user_id=user_id) is None
@@ -113,18 +109,55 @@ async def test_revoke_hook_raises_when_unconfigured(configured: bool) -> None:
     assert unconfigured.calls == []
 
 
-@pytest.mark.parametrize("name", HOOK_NAMES)
-async def test_hooks_raise_when_configured_client_errors(name: str, fake_fga: FakeFga) -> None:
+def _hook_kwargs(name: str) -> dict[str, Any]:
     alex = make_person()
-    configure_authz(fake_fga, resolver({alex.user_id: alex.profile_id}))
-    fake_fga.error = RuntimeError("openfga unavailable")
     kwargs: dict[str, Any] = {"user_id": alex.user_id}
     if name != "on_user_created":
         kwargs["delegation_id"] = alex.delegation_id
     if name == "on_agent_delegated":
         kwargs["agent_id"] = uuid4()
+    return kwargs
+
+
+@pytest.mark.parametrize("name", ["on_agent_delegated", "on_agent_disconnected"])
+async def test_hooks_raise_when_configured_client_errors(name: str, fake_fga: FakeFga) -> None:
+    configure_authz(fake_fga)
+    fake_fga.error = RuntimeError("openfga unavailable")
     with pytest.raises(RuntimeError, match="openfga unavailable"):
-        await f2_hook(name)(**kwargs)
+        await f2_hook(name)(**_hook_kwargs(name))
+
+
+async def test_user_created_makes_no_openfga_call(fake_fga: FakeFga) -> None:
+    configure_authz(fake_fga)
+    fake_fga.error = RuntimeError("openfga unavailable")
+    await f2_hook("on_user_created")(**_hook_kwargs("on_user_created"))
+    assert fake_fga.calls == []
+
+
+class SlowFga(FakeFga):
+    async def _slow(self) -> None:
+        await anyio.sleep(30)
+
+    async def write_tuples(self, tuples: Any) -> None:
+        await self._slow()
+
+    async def read_tuples(self, **kwargs: Any) -> list[Any]:
+        await self._slow()
+        return []
+
+
+@pytest.mark.parametrize("name", ["on_agent_delegated", "on_agent_disconnected"])
+async def test_hooks_time_out_promptly(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(authz, "HOOK_TIMEOUT_SECONDS", 0.2)
+    configure_authz(SlowFga())
+    started = anyio.current_time()
+    with pytest.raises(TimeoutError):
+        await f2_hook(name)(**_hook_kwargs(name))
+    assert anyio.current_time() - started < 2
+
+
+def test_default_hook_timeout_is_three_seconds() -> None:
+    assert authz.HOOK_TIMEOUT_SECONDS == 3.0
 
 
 # --- Checks fail closed when unconfigured -----------------------------------------------------
@@ -184,43 +217,25 @@ def test_ui_with_delegation_is_denied() -> None:
 # --- Disconnect ordering ----------------------------------------------------------------------
 
 
-async def test_disconnect_deletes_all_acts_for_on_the_delegation(fake_fga: FakeFga) -> None:
+async def test_disconnect_deletes_all_acts_for_and_delegate_of_the_delegation(
+    fake_fga: FakeFga,
+) -> None:
     alex, other = make_person(), make_person()
-    # A stray acts_for on alex's delegation object from another user must be revoked too.
+    # Stray tuples on alex's delegation object naming another user must be revoked too.
     fake_fga.tuples |= {
         acts_for_tuple(alex.user_id, alex.delegation_id),
         acts_for_tuple(other.user_id, alex.delegation_id),
-        owner_agent_tuple(alex.delegation_id, alex.profile_id),
+        delegate_tuple(alex.user_id, alex.delegation_id),
+        delegate_tuple(other.user_id, alex.delegation_id),
         acts_for_tuple(other.user_id, other.delegation_id),
+        delegate_tuple(other.user_id, other.delegation_id),
     }
     configure_authz(fake_fga)
     await authz.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
-    assert fake_fga.tuples == {acts_for_tuple(other.user_id, other.delegation_id)}
-
-
-async def test_disconnect_deletes_before_resolver_and_survives_its_failure(
-    fake_fga: FakeFga, caplog: pytest.LogCaptureFixture
-) -> None:
-    alex = make_person()
-    fake_fga.tuples |= {
-        acts_for_tuple(alex.user_id, alex.delegation_id),
-        owner_agent_tuple(alex.delegation_id, alex.profile_id),
+    assert fake_fga.tuples == {
+        acts_for_tuple(other.user_id, other.delegation_id),
+        delegate_tuple(other.user_id, other.delegation_id),
     }
-    calls_at_resolve: list[list[str]] = []
-
-    async def broken(user_id: UUID) -> UUID | None:
-        calls_at_resolve.append(list(fake_fga.calls))
-        raise RuntimeError("profiles db down")
-
-    configure_authz(fake_fga, broken)
-    caplog.set_level(logging.WARNING, logger="revel.auth.authz")
-    result = await authz.on_agent_disconnected(
-        user_id=alex.user_id, delegation_id=alex.delegation_id
-    )
-    assert fake_fga.tuples == set()
-    assert calls_at_resolve == [["read", "read", "delete"]]
-    assert len(result.deleted) == 2
-    assert "Profile lookup failed" in caplog.text
 
 
 # --- Consistency ------------------------------------------------------------------------------
