@@ -143,8 +143,8 @@ async def test_concurrent_first_sign_ins_on_app_pool(
     assert errors == []
     assert len(results) == CONCURRENT_SIGN_INS
     assert elapsed < TIME_BOUND_SECONDS, f"{CONCURRENT_SIGN_INS} sign-ins took {elapsed:.2f}s"
-    # Every delegation hook wrote its two tuples; hooks made no DB checkout of their own.
-    assert len(fake_fga.tuples) == 2 * CONCURRENT_SIGN_INS
+    # Every delegation hook wrote its three tuples; hooks made no DB checkout of their own.
+    assert len(fake_fga.tuples) == 3 * CONCURRENT_SIGN_INS
     assert hook_checkouts == []
     print(f"{CONCURRENT_SIGN_INS} concurrent first sign-ins: {elapsed:.2f}s")
 

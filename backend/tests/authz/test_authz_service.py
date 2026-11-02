@@ -11,7 +11,7 @@ from revel.auth.authz import (
     ViewerTier,
     acts_for_tuple,
     can_contribute,
-    delegate_tuple,
+    delegation_tuples,
     owner_tuple,
     reconcile_agent_tuples,
     reconcile_owner_tuples,
@@ -69,7 +69,7 @@ async def test_user_created_writes_nothing(fake_fga: FakeFga) -> None:
     assert fake_fga.calls == []
 
 
-async def test_agent_delegated_writes_acts_for_and_delegate_idempotently(
+async def test_agent_delegated_writes_delegation_tuples_idempotently(
     fake_fga: FakeFga,
 ) -> None:
     alex = make_person()
@@ -80,8 +80,7 @@ async def test_agent_delegated_writes_acts_for_and_delegate_idempotently(
             user_id=alex.user_id, agent_id=agent_id, delegation_id=alex.delegation_id
         )
     assert fake_fga.tuples == {
-        acts_for_tuple(alex.user_id, alex.delegation_id),
-        delegate_tuple(alex.user_id, alex.delegation_id),
+        *delegation_tuples(alex.user_id, alex.delegation_id),
     }
     assert all(str(agent_id) not in t.user + t.object for t in fake_fga.tuples)
 
@@ -110,12 +109,12 @@ async def test_reconcile_backfills(fake_fga: FakeFga) -> None:
     alex = make_person()
     pairs = [(alex.user_id, alex.delegation_id)]
     assert await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)]) == 1
-    assert await reconcile_agent_tuples(fake_fga, pairs) == 2
-    assert await reconcile_agent_tuples(fake_fga, pairs) == 2  # rerun is harmless
+    assert await reconcile_agent_tuples(fake_fga, pairs) == 3
+    assert await reconcile_agent_tuples(fake_fga, pairs) == 3  # rerun is harmless
     assert await can_contribute(fake_fga, alex.as_agent(uuid4()), alex.profile_id)
 
 
-async def test_disconnect_deletes_acts_for_and_delegate(fake_fga: FakeFga) -> None:
+async def test_disconnect_deletes_every_delegation_tuple(fake_fga: FakeFga) -> None:
     alex = make_person()
     agent_id = uuid4()
     hooks = TupleHooks(fake_fga)
@@ -129,8 +128,7 @@ async def test_disconnect_deletes_acts_for_and_delegate(fake_fga: FakeFga) -> No
         user_id=alex.user_id, delegation_id=alex.delegation_id, agent_id=agent_id
     )
     assert set(result.deleted) == {
-        acts_for_tuple(alex.user_id, alex.delegation_id),
-        delegate_tuple(alex.user_id, alex.delegation_id),
+        *delegation_tuples(alex.user_id, alex.delegation_id),
     }
     assert fake_fga.tuples == {owner_tuple(alex.user_id, alex.profile_id)}
     assert not await can_contribute(fake_fga, alex.as_agent(agent_id), alex.profile_id)
@@ -173,7 +171,7 @@ async def test_cross_user_same_client_is_denied(fake_fga: FakeFga) -> None:
         await require_contribute(fake_fga, sams_muse, alex.profile_id)
 
 
-async def test_resolve_viewer_tier_uses_one_call(fake_fga: FakeFga) -> None:
+async def test_resolve_viewer_tier_uses_one_call_for_the_owner(fake_fga: FakeFga) -> None:
     alex = make_person()
     await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)])
     fake_fga.calls.clear()
@@ -181,9 +179,10 @@ async def test_resolve_viewer_tier_uses_one_call(fake_fga: FakeFga) -> None:
         await resolve_viewer_tier(fake_fga, alex.as_user(), alex.profile_id) is ViewerTier.only_me
     )
     assert fake_fga.calls == ["check"]
+    # A non-owner walks the tiers highest first: at most four checks.
     fake_fga.calls.clear()
     assert await resolve_viewer_tier(fake_fga, alex.as_user(), uuid4()) is ViewerTier.none
-    assert fake_fga.calls == ["check"]
+    assert fake_fga.calls == ["check"] * 4
 
 
 async def test_require_helpers(fake_fga: FakeFga) -> None:

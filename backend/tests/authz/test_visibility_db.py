@@ -11,7 +11,7 @@ by F3's upcoming composite FKs); most facts are owner UI edits with no delegatio
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -28,6 +28,7 @@ from revel.auth.authz import (
     acts_for_tuple,
     configure_authz,
     delegate_tuple,
+    delegation_tuples,
     owner_tuple,
     reset_authz,
 )
@@ -77,8 +78,9 @@ def factory(engine: Engine) -> sessionmaker[Session]:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE claim_events, claims, contribution_policies, profiles, "
-                "agent_delegations, agents, users CASCADE"
+                "TRUNCATE answer_evidence, answers, question_events, assignments, questions, "
+                "connection_requests, handles, claim_events, claims, contribution_policies, "
+                "profiles, agent_delegations, agents, users CASCADE"
             )
         )
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -137,13 +139,16 @@ def add_profile(session: Session, user: User) -> Profile:
     return profile
 
 
-def add_policy(session: Session, profile: Profile, version: int, *, share: bool) -> None:
+def add_policy(
+    session: Session, profile: Profile, version: int, *, share: bool = True, public: bool = False
+) -> None:
     session.add(
         ContributionPolicy(
             profile_id=profile.id,
             version=version,
             approved_by_user_id=profile.user_id,
             share_provisional=share,
+            public_opt_in=public,
         )
     )
     session.flush()
@@ -287,8 +292,11 @@ async def test_no_policy_defaults_to_sharing_provisional(
     profile = alex_world.profile
     add_claim(session, profile, "maybe", status=ClaimStatus.PROVISIONAL, audience=Audience.PUBLIC)
     session.commit()
-    shared = await _visible_claims_for_tier(session, profile.id, ViewerTier.public)
+    shared = await _visible_claims_for_tier(session, profile.id, ViewerTier.connections)
     assert statements(shared) == {"maybe"}
+    # ...but with no policy there is no Public opt-in (column default false).
+    public = await _visible_claims_for_tier(session, profile.id, ViewerTier.public)
+    assert statements(public) == set()
 
 
 @pytest.mark.parametrize(
@@ -315,6 +323,7 @@ async def test_audience_rank_filtering(
                 audience=audience,
                 status=status,
             )
+    add_policy(session, profile, 1, public=True)
     session.commit()
     result = await _visible_claims_for_tier(session, profile.id, tier)
     assert statements(result) == expected
@@ -386,6 +395,7 @@ async def test_other_profiles_claims_never_leak(
                 audience=audience,
             )
     add_claim(session, alex_world.profile, "alex-own", audience=Audience.PUBLIC)
+    add_policy(session, alex_world.profile, 1, public=True)
     session.commit()
     profile_id = alex_world.profile.id
     for principal in (ui(alex_world.alex), mcp(alex_world.alex_d)):
@@ -465,9 +475,16 @@ def _old(fga: FakeFga, *tuples: RelationTuple) -> None:
 
 
 async def _reconcile(
-    fga: FakeFga, factory: sessionmaker[Session], *, prune: bool
+    fga: FakeFga,
+    factory: sessionmaker[Session],
+    *,
+    prune: bool,
+    window: timedelta = timedelta(0),
 ) -> fga_reconcile.ReconcileSummary:
-    return await fga_reconcile.run(prune=prune, fga=fga, sessionmaker_provider=lambda: factory)
+    """Reconcile with no in-flight window by default (fixture rows were just written)."""
+    return await fga_reconcile.run(
+        prune=prune, fga=fga, sessionmaker_provider=lambda: factory, window=window
+    )
 
 
 async def test_reconcile_idempotent_revokes_and_prunes(
@@ -483,13 +500,11 @@ async def test_reconcile_idempotent_revokes_and_prunes(
 
     stray = uuid4()
     orphans = {acts_for_tuple(alex.id, stray), delegate_tuple(alex.id, stray)}
-    _old(fake_fga, acts_for_tuple(alex.id, gone.id), delegate_tuple(alex.id, gone.id), *orphans)
+    _old(fake_fga, *delegation_tuples(alex.id, gone.id), *orphans)
     expected = {
         owner_tuple(alex.id, profile.id),
-        acts_for_tuple(alex.id, active.id),
-        delegate_tuple(alex.id, active.id),
-        acts_for_tuple(newbie.id, newbie_d.id),
-        delegate_tuple(newbie.id, newbie_d.id),
+        *delegation_tuples(alex.id, active.id),
+        *delegation_tuples(newbie.id, newbie_d.id),
     }
 
     first = await _reconcile(fake_fga, factory, prune=False)
@@ -611,7 +626,9 @@ async def test_reconcile_then_visible_claims_on_real_openfga(
         add_claim(session, profile, "draft", status=ClaimStatus.PENDING_REVIEW)
         session.commit()
 
-        await fga_reconcile.run(prune=True, fga=fga, sessionmaker_provider=lambda: factory)
+        await fga_reconcile.run(
+            prune=True, fga=fga, sessionmaker_provider=lambda: factory, window=timedelta(0)
+        )
         result = await visible_claims(session, mcp(alex_d), profile.id, fga=fga)
         assert statements(result) == {"likes tea"}
         with pytest.raises(AuthorizationDenied):
@@ -621,7 +638,9 @@ async def test_reconcile_then_visible_claims_on_real_openfga(
         session.get(AgentDelegation, alex_d.id).status = DelegationStatus.DISCONNECTED.value
         session.get(AgentDelegation, alex_d.id).disconnected_at = datetime.now(UTC)
         session.commit()
-        await fga_reconcile.run(prune=False, fga=fga, sessionmaker_provider=lambda: factory)
+        await fga_reconcile.run(
+            prune=False, fga=fga, sessionmaker_provider=lambda: factory, window=timedelta(0)
+        )
         with pytest.raises(AuthorizationDenied):
             await visible_claims(session, mcp(alex_d), profile.id, fga=fga)
         remaining: list[RelationTuple] = await fga.read_tuples(

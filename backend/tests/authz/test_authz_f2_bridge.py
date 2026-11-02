@@ -16,10 +16,9 @@ from mcp.server.auth.provider import AccessToken
 from revel.auth.authz import (
     PrincipalLike,
     ViewerTier,
-    acts_for_tuple,
     can_contribute,
     configure_authz,
-    delegate_tuple,
+    delegation_tuples,
     owner_tuple,
     reset_authz,
     resolve_viewer_tier,
@@ -51,8 +50,7 @@ async def test_resolver_writes_tuples_through_module_hooks(fake_fga: FakeFga) ->
     principal = await resolver.resolve(token("user_alex", "client_muse"), "mcp")
     assert principal.delegation_id is not None
     assert fake_fga.tuples == {
-        acts_for_tuple(principal.user_id, principal.delegation_id),
-        delegate_tuple(principal.user_id, principal.delegation_id),
+        *delegation_tuples(principal.user_id, principal.delegation_id),
     }
     # Later profile creation writes only the owner tuple; the agent then gets access.
     profile_id = uuid4()

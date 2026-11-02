@@ -144,11 +144,26 @@ def test_model_body_ignores_server_defaults() -> None:
     assert fga_bootstrap.model_body(changed) != fga_bootstrap.model_body(model)
 
 
-def test_committed_model_json_matches_model_v1_relations() -> None:
+V1_RELATIONS = {
+    "user": {"delegate"},
+    "agent": {"acts_for"},
+    "profile": {"contribute", "owner", "owner_agent", "view_only_me"},
+}
+
+
+def test_committed_model_json_matches_model_v2_relations() -> None:
     model = fga_bootstrap.load_model(fga_bootstrap.MODEL_JSON_PATH)
-    relations = {t["type"]: sorted(t.get("relations", {})) for t in model["type_definitions"]}
+    relations = {t["type"]: set(t.get("relations", {})) for t in model["type_definitions"]}
+    # v2 is additive: every v1 relation is still there.
+    for type_name, names in V1_RELATIONS.items():
+        assert names <= relations[type_name]
     assert relations == {
-        "user": ["delegate"],
-        "agent": ["acts_for"],
-        "profile": ["contribute", "owner", "owner_agent", "view_only_me"],
+        "user": {"delegate"},
+        "agent": {"acts_for"},
+        "platform": {"connected_agent"},
+        "profile": V1_RELATIONS["profile"]
+        | {"trusted", "connection", "public_viewer", "blocked"}
+        | {"trusted_member", "connection_member", "blocked_any"}
+        | {"view_trusted", "view_connections", "view_public"},
+        "question": {"about", "requester", "requester_agent", "respond", "read_answer"},
     }

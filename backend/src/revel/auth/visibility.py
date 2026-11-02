@@ -3,13 +3,23 @@
 Every MCP/HTTP read of claims goes through one of these (a static test guards ``revel.api``
 and ``revel.mcp``):
 
-- ``visible_claims``: SHARED viewing. One OpenFGA call resolves the viewer tier, then SQL keeps
-  only live facts (``LIVE_CLAIM_STATUSES``) whose audience rank is at most the tier's rank.
-  ``pending_review``, ``superseded`` and ``removed`` are never returned. Provisional facts carry
-  a caveat flag, and are hidden from non-owner viewers when the profile's current contribution
-  policy (highest version) has ``share_provisional = false``. A viewer with tier ``none``
-  raises ``AuthorizationDenied`` (v1 has no other non-owner tier, so "no access" and "nothing
-  visible" are deliberately not distinguishable to the caller as an empty result).
+- ``visible_claims``: SHARED viewing, for the owner and for others. OpenFGA resolves the viewer
+  tier (``authz.resolve_viewer_tier``: owner/owner's agents ``only_me``, then Trusted Circle,
+  Connections, Public; a user's agents inherit the user's tier; blocks remove every tier), then
+  SQL keeps only live facts (``LIVE_CLAIM_STATUSES``) whose audience rank is at most the tier's
+  rank, so Only Me facts never reach a non-owner. ``pending_review``, ``superseded`` and
+  ``removed`` are never returned. A viewer with tier ``none`` raises ``AuthorizationDenied``.
+  Non-owner viewers additionally follow the profile's CURRENT contribution policy (the highest
+  ``version``), read in the same query, so tightening takes effect on the next read:
+
+  - provisional facts are returned (flagged, so callers show a caveat) only while
+    ``share_provisional`` is true;
+  - a viewer whose tier is only ``public`` sees Public facts only while ``public_opt_in`` is
+    true (Privacy: without the opt-in they stay at Connections). This is defence in depth on
+    top of the ``public_viewer`` tuples that ``on_public_opt_in_changed`` maintains.
+
+  Owners get ``VisibleClaim`` (the ORM ``Claim``); everyone else gets ``SharedClaim``, a
+  projection selected column by column that omits contributor, provenance and internal fields.
 - ``owner_claims``: MANAGEMENT reads (all statuses) for the owner and the owner's agents, e.g.
   F5's contribution summary and corrections. Requires ``view_only_me``.
 
@@ -17,20 +27,18 @@ The database layer is synchronous SQLAlchemy; queries run on the caller's ``Sess
 worker thread (the caller awaits, so the session is never used concurrently). Unconfigured
 OpenFGA raises ``FgaConfigurationError`` before any claim is read.
 
-v1 returns ORM ``Claim`` objects because the only viewers are the owner and the owner's agents.
-v2 non-owner reads must return a projection (only the fields a shared viewer may see), not the
-ORM ``Claim``.
-
 Also here: ``on_profile_created``, the grant hook F5 calls when it creates a profile.
 """
 
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import date
+from typing import Any
 from uuid import UUID
 
 import anyio.to_thread
-from sqlalchemy import ColumnElement, Select, and_, false, func, or_, select, true
+from sqlalchemy import ColumnElement, Select, and_, false, func, literal, or_, select, true
 from sqlalchemy.orm import Session
 
 from revel.auth import authz
@@ -78,16 +86,59 @@ async def _in_thread[T](fn: Callable[[], T]) -> T:
 
 @dataclass(frozen=True, slots=True)
 class VisibleClaim:
+    """An owner's (or owner's agent's) view of a fact: the full ORM ``Claim``."""
+
     claim: Claim
     # Provisional facts are shown with a caveat ("not yet confirmed by the owner").
     provisional: bool
 
 
 @dataclass(frozen=True, slots=True)
+class SharedClaim:
+    """What a non-owner viewer may see of a fact. Never the ORM ``Claim``.
+
+    Omitted on purpose: ``contributor_user_id``, ``contributor_delegation_id`` and
+    ``contributed_via`` (who or which assistant contributed is the owner's provenance, and may
+    name a third party); ``policy_version`` and ``supersedes_id`` (internal policy and edit
+    history); ``status`` (only ``provisional`` matters to a viewer); ``profile_id`` (on
+    ``VisibleClaims``); ``created_at`` / ``updated_at`` (when the owner or their assistant was
+    active). ``id`` is an opaque reference for answer evidence (Privacy: answers cite claims).
+    """
+
+    id: UUID
+    category: str
+    statement: str
+    details: dict[str, Any] | None
+    audience: str
+    evidence_type: str
+    confidence: str
+    observed_at: date | None
+    observed_precision: str
+    # Shown with a caveat ("not yet confirmed by the owner").
+    provisional: bool
+
+
+# Columns read for a SharedClaim (explicit, so no other column is ever loaded).
+_SHARED_COLUMNS = (
+    Claim.id,
+    Claim.category,
+    Claim.statement,
+    Claim.details,
+    Claim.audience,
+    Claim.evidence_type,
+    Claim.confidence,
+    Claim.observed_at,
+    Claim.observed_precision,
+    Claim.status,
+)
+
+
+@dataclass(frozen=True, slots=True)
 class VisibleClaims:
     profile_id: UUID
     tier: ViewerTier
-    claims: tuple[VisibleClaim, ...]
+    # ``VisibleClaim`` for the owner tier, ``SharedClaim`` for every other tier.
+    claims: tuple[VisibleClaim, ...] | tuple[SharedClaim, ...]
 
     @property
     def has_provisional(self) -> bool:
@@ -98,37 +149,52 @@ class VisibleClaims:
 _LIVE_VALUES = [s.value for s in LIVE_CLAIM_STATUSES]
 
 
-def _current_share_provisional(profile_id: UUID) -> ColumnElement[bool]:
-    """Scalar subquery: the latest policy's ``share_provisional`` (column default true if none)."""
+def _current_policy_flag(profile_id: UUID, column: Any, default: bool) -> ColumnElement[bool]:
+    """Scalar subquery: ``column`` of the profile's current policy (highest ``version``), or
+    the column's server default when the profile has no policy yet."""
     latest = (
-        select(ContributionPolicy.share_provisional)
+        select(column)
         .where(ContributionPolicy.profile_id == profile_id)
         .order_by(ContributionPolicy.version.desc())
         .limit(1)
         .scalar_subquery()
     )
-    return func.coalesce(latest, true())
+    return func.coalesce(latest, literal(default))
 
 
-def _visible_claims_query(profile_id: UUID, tier: ViewerTier) -> Select[tuple[Claim]]:
-    """SQL for the shared read path at ``tier``. Filtering happens entirely in the database."""
+def _current_share_provisional(profile_id: UUID) -> ColumnElement[bool]:
+    """The latest policy's ``share_provisional`` (column default true if none)."""
+    return _current_policy_flag(profile_id, ContributionPolicy.share_provisional, True)
+
+
+def _current_public_opt_in(profile_id: UUID) -> ColumnElement[bool]:
+    """The latest policy's ``public_opt_in`` (column default false if none)."""
+    return _current_policy_flag(profile_id, ContributionPolicy.public_opt_in, False)
+
+
+def _visible_claims_query(profile_id: UUID, tier: ViewerTier) -> Select[Any]:
+    """SQL for the shared read path at ``tier``. Filtering happens entirely in the database.
+
+    The owner tier selects the ORM ``Claim``; other tiers select only ``_SHARED_COLUMNS``.
+    """
     audiences = [a.value for a in audiences_for_tier(tier)]
-    provisional_allowed = true() if is_owner_tier(tier) else _current_share_provisional(profile_id)
+    owner = is_owner_tier(tier)
+    provisional_allowed = true() if owner else _current_share_provisional(profile_id)
     # Only live statuses; provisional additionally gated by policy for non-owners.
     status_filter = or_(
         and_(Claim.status.in_(_LIVE_VALUES), Claim.status != ClaimStatus.PROVISIONAL.value),
         and_(Claim.status == ClaimStatus.PROVISIONAL.value, provisional_allowed),
     )
-    return (
-        select(Claim)
-        .where(
-            Claim.profile_id == profile_id,
-            Claim.status.in_(_LIVE_VALUES),
-            status_filter,
-            Claim.audience.in_(audiences) if audiences else false(),
-        )
-        .order_by(Claim.category, Claim.created_at, Claim.id)
-    )
+    # A Public-only viewer sees Public facts only while the current policy opts in.
+    public_allowed = _current_public_opt_in(profile_id) if tier is ViewerTier.public else true()
+    stmt = select(Claim) if owner else select(*_SHARED_COLUMNS)
+    return stmt.where(
+        Claim.profile_id == profile_id,
+        Claim.status.in_(_LIVE_VALUES),
+        status_filter,
+        Claim.audience.in_(audiences) if audiences else false(),
+        public_allowed,
+    ).order_by(Claim.category, Claim.created_at, Claim.id)
 
 
 async def _visible_claims_for_tier(
@@ -138,12 +204,33 @@ async def _visible_claims_for_tier(
     if tier is ViewerTier.none:
         raise AuthorizationDenied()
     stmt = _visible_claims_query(profile_id, tier)
-    rows = await _in_thread(lambda: list(session.execute(stmt).scalars()))
+    if is_owner_tier(tier):
+        owned = await _in_thread(lambda: list(session.execute(stmt).scalars()))
+        return VisibleClaims(
+            profile_id=profile_id,
+            tier=tier,
+            claims=tuple(
+                VisibleClaim(claim=row, provisional=row.status == ClaimStatus.PROVISIONAL.value)
+                for row in owned
+            ),
+        )
+    rows = await _in_thread(lambda: list(session.execute(stmt).all()))
     return VisibleClaims(
         profile_id=profile_id,
         tier=tier,
         claims=tuple(
-            VisibleClaim(claim=row, provisional=row.status == ClaimStatus.PROVISIONAL.value)
+            SharedClaim(
+                id=row.id,
+                category=row.category,
+                statement=row.statement,
+                details=row.details,
+                audience=row.audience,
+                evidence_type=row.evidence_type,
+                confidence=row.confidence,
+                observed_at=row.observed_at,
+                observed_precision=row.observed_precision,
+                provisional=row.status == ClaimStatus.PROVISIONAL.value,
+            )
             for row in rows
         ),
     )
@@ -158,9 +245,10 @@ async def visible_claims(
 ) -> VisibleClaims:
     """THE shared read path for a profile's facts. Raises ``AuthorizationDenied`` for tier none.
 
-    ``fga=None`` uses the client installed by ``configure_authz``; unconfigured raises
-    ``FgaConfigurationError``. v2 adds tiers inside ``resolve_viewer_tier``; this signature and
-    the SQL filter (``TIER_RANK``) already cover them.
+    The owner and the owner's agents get ``VisibleClaim`` items; any other principal (a user,
+    or an agent through its active delegation) gets ``SharedClaim`` projections at the tier
+    OpenFGA grants. ``fga=None`` uses the client installed by ``configure_authz``; unconfigured
+    raises ``FgaConfigurationError``.
     """
     tier = await resolve_viewer_tier(fga, principal, profile_id)
     return await _visible_claims_for_tier(session, profile_id, tier)
