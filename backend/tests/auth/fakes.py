@@ -8,6 +8,7 @@ Usage from another test module (``tests/`` is on ``sys.path`` under pytest)::
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,6 +17,7 @@ import anyio
 from revel.auth.repository import (
     AgentRecord,
     DelegationRecord,
+    DelegationView,
     OnCreated,
     OnDisconnected,
     UserRecord,
@@ -29,6 +31,10 @@ class InMemoryIdentityRepository:
         self.users: dict[UUID, UserRecord] = {}
         self.agents: dict[UUID, AgentRecord] = {}
         self.delegations: dict[UUID, DelegationRecord] = {}
+        # Timestamps kept beside the records (``DelegationRecord`` has none); tests may set
+        # ``connected_at`` directly to control list ordering.
+        self.connected_at: dict[UUID, datetime] = {}
+        self.disconnected_at: dict[UUID, datetime] = {}
         self._lock = anyio.Lock()
 
     async def get_user_by_workos_id(self, workos_user_id: str) -> UserRecord | None:
@@ -39,6 +45,28 @@ class InMemoryIdentityRepository:
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
         return self.agents.get(agent_id)
+
+    def _view(self, record: DelegationRecord) -> DelegationView:
+        return DelegationView(
+            id=record.id,
+            user_id=record.user_id,
+            status=record.status,
+            connected_at=self.connected_at[record.id],
+            disconnected_at=self.disconnected_at.get(record.id),
+            agent=self.agents[record.agent_id],
+        )
+
+    async def list_delegations_for_user(self, user_id: UUID) -> list[DelegationView]:
+        views = [self._view(d) for d in self.delegations.values() if d.user_id == user_id]
+        return sorted(views, key=lambda v: (v.connected_at, v.id), reverse=True)
+
+    async def get_delegation_view(
+        self, user_id: UUID, delegation_id: UUID
+    ) -> DelegationView | None:
+        record = self.delegations.get(delegation_id)
+        if record is None or record.user_id != user_id:
+            return None
+        return self._view(record)
 
     async def ensure_user(
         self,
@@ -93,11 +121,13 @@ class InMemoryIdentityRepository:
                 return existing, False
             record = DelegationRecord(uuid4(), user_id, agent_id, "active")
             self.delegations[record.id] = record
+            self.connected_at[record.id] = datetime.now(UTC)
             try:
                 if on_created is not None:
                     await on_created(record)
             except BaseException:
                 del self.delegations[record.id]
+                del self.connected_at[record.id]
                 raise
             return record, True
 
@@ -114,11 +144,13 @@ class InMemoryIdentityRepository:
                 return False
             record = replace(existing, status="disconnected")
             self.delegations[delegation_id] = record
+            self.disconnected_at[delegation_id] = datetime.now(UTC)
             try:
                 if on_disconnected is not None:
                     await on_disconnected(record)
             except BaseException:
                 self.delegations[delegation_id] = existing
+                del self.disconnected_at[delegation_id]
                 raise
             return True
 
@@ -127,6 +159,7 @@ class InMemoryIdentityRepository:
         self.delegations[delegation_id] = replace(
             self.delegations[delegation_id], status="disconnected"
         )
+        self.disconnected_at[delegation_id] = datetime.now(UTC)
 
 
 class RecordingHooks:

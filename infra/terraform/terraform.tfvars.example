@@ -19,6 +19,15 @@ mcp_path          = "/mcp"
 # Empty uses public_base_url + /auth/callback (https://api.revel.gifts/auth/callback).
 # workos_redirect_uri = ""
 
+# Muse Spark (non-secret; each sets its env var on revel-app only when non-empty; empty uses app defaults).
+# FIREWORKS_API_KEY / META_API_KEY are secrets: add a version, then list them in app_secret_env.
+# Provider "meta" also needs a META_API_KEY secret version plus "META_API_KEY" in app_secret_env
+# before it works in production.
+# fireworks_model            = "accounts/fireworks/models/replace-with-model"
+# meta_model                 = ""
+# muse_spark_provider        = "fireworks" # or "meta"
+# muse_spark_timeout_seconds = ""          # app default 8.0
+
 # OpenFGA store and authorization model IDs (ULIDs, not secrets) printed by the revel-fga-admin
 # bootstrap run (infra/README.md, "OpenFGA bootstrap"). Each sets OPENFGA_STORE_ID /
 # OPENFGA_AUTHORIZATION_MODEL_ID on revel-app and revel-fga-admin only when non-empty.

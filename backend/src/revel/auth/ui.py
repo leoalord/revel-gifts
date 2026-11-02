@@ -33,8 +33,9 @@ sends the user through sign-in again, which AuthKit completes without re-enterin
 credentials while its session is alive.
 
 Cookies never authenticate ``/mcp`` or bearer-only routes such as ``GET /me``.
-A route that returns a ``Response`` object directly must copy the refreshed cookie
-itself; returning data (dict/model) lets FastAPI merge it automatically.
+A refreshed cookie reaches the browser whether the route returns data, returns its own
+``Response`` or raises ``HTTPException``: :mod:`revel.auth.session_cookie` appends it
+when FastAPI did not merge it (routes need not copy it themselves).
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ from revel.auth.browser import (
 )
 from revel.auth.identity import IdentityError, Principal
 from revel.auth.runtime import AuthNotConfigured, AuthRuntime, get_auth_runtime
+from revel.auth.session_cookie import record_refreshed_session_cookie
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -174,14 +176,21 @@ async def current_ui_principal(
         ) from None
     if session.refreshed:
         try:
-            set_session_cookie(
-                response, browser, browser.seal_session(session.tokens, session.session_id)
-            )
+            sealed_new = browser.seal_session(session.tokens, session.session_id)
         except WorkOSUnavailable:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Sign-in service unavailable",
             ) from None
+        # Merged by FastAPI when the route returns data. Also recorded for
+        # RefreshedSessionCookieMiddleware, which delivers it (once) when the route returns
+        # its own Response or raises: the rotated refresh token must reach the browser.
+        set_session_cookie(response, browser, sealed_new)
+        scratch = StarletteResponse()
+        set_session_cookie(scratch, browser, sealed_new)
+        record_refreshed_session_cookie(
+            request, browser.config.session_cookie_name, scratch.headers["set-cookie"]
+        )
     return principal
 
 

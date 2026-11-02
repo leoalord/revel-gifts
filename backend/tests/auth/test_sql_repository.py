@@ -239,3 +239,36 @@ async def test_concurrent_double_disconnect_sql(sql_repo):
     assert sorted(results) == [False] * 5 + [True]
     assert [name for name, _ in hooks.calls] == ["on_agent_disconnected"]
     assert _delegation_row(sql_repo, p.delegation_id)[0] == "disconnected"
+
+
+# --- delegation views (connected agents UI) ----------------------------------------------
+
+
+async def test_delegation_views_sql(sql_repo):
+    resolver = IdentityResolver(sql_repo, hooks=RecordingHooks())
+    old = await resolver.resolve(_token(client_id="client_old"), via="mcp")
+    new = await resolver.resolve(_token(client_id="client_new"), via="mcp")
+    bob = await resolver.resolve(_token(sub="user_bob", client_id="client_new"), via="mcp")
+    with sql_repo._session() as session, session.begin():
+        session.execute(
+            update(AgentDelegation)
+            .where(AgentDelegation.id == old.delegation_id)
+            .values(connected_at=func.now() - text("interval '1 day'"))
+        )
+    assert await resolver.disconnect_delegation(
+        user_id=old.user_id, delegation_id=old.delegation_id
+    )
+
+    views = await sql_repo.list_delegations_for_user(old.user_id)
+    assert [v.id for v in views] == [new.delegation_id, old.delegation_id]
+    assert [v.status for v in views] == ["active", "disconnected"]
+    assert views[0].disconnected_at is None and views[1].disconnected_at is not None
+    assert views[0].agent.oauth_client_id == "client_new" and views[0].agent.name is None
+    assert all(v.user_id == old.user_id for v in views)
+
+    assert await sql_repo.get_delegation_view(old.user_id, old.delegation_id) == views[1]
+    # Another user's delegation and unknown IDs read as absent.
+    assert await sql_repo.get_delegation_view(old.user_id, bob.delegation_id) is None
+    assert await sql_repo.get_delegation_view(old.user_id, uuid4()) is None
+    bob_views = await sql_repo.list_delegations_for_user(bob.user_id)
+    assert [v.id for v in bob_views] == [bob.delegation_id]
