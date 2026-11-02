@@ -183,6 +183,13 @@ locals {
   # WorkOS browser-session callback; defaults to https://api.revel.gifts/auth/callback.
   app_workos_redirect_uri = var.workos_redirect_uri != "" ? var.workos_redirect_uri : "${trimsuffix(var.public_base_url, "/")}/auth/callback"
 
+  # OpenFGA store/model IDs from revel.auth.fga_bootstrap (not secrets). Shared by revel-app and
+  # revel-fga-admin; each is set only when non-empty.
+  openfga_ids_env = merge(
+    var.openfga_store_id == "" ? {} : { OPENFGA_STORE_ID = var.openfga_store_id },
+    var.openfga_authorization_model_id == "" ? {} : { OPENFGA_AUTHORIZATION_MODEL_ID = var.openfga_authorization_model_id },
+  )
+
   app_env = merge(
     {
       APP_ENV               = "production"
@@ -200,6 +207,18 @@ locals {
     var.workos_authkit_domain == "" ? {} : { WORKOS_AUTHKIT_DOMAIN = var.workos_authkit_domain },
     # Public WorkOS client ID (not a secret), for the browser session.
     var.workos_client_id == "" ? {} : { WORKOS_CLIENT_ID = var.workos_client_id },
+    local.openfga_ids_env,
+  )
+
+  # revel-fga-admin runs F4's bootstrap/reconcile CLIs with the app's OpenFGA client settings.
+  fga_admin_env = merge(
+    {
+      APP_ENV             = "production"
+      PUBLIC_BASE_URL     = var.public_base_url
+      OPENFGA_API_URL     = google_cloud_run_v2_service.openfga.uri
+      OPENFGA_GOOGLE_AUTH = "true"
+    },
+    local.openfga_ids_env,
   )
 }
 
@@ -357,6 +376,92 @@ resource "google_cloud_run_v2_job" "app_migrate" {
   }
 
   lifecycle {
+    ignore_changes = [
+      template[0].template[0].containers[0].image,
+      client,
+      client_version,
+    ]
+  }
+
+  depends_on = [
+    google_secret_manager_secret_version.database_url,
+    google_secret_manager_secret_iam_member.app_database_url,
+    google_project_iam_member.app_sql_client,
+  ]
+}
+
+# OpenFGA store/model administration (F4's revel.auth.fga_bootstrap / fga_reconcile), run
+# explicitly with per-execution args (see infra/README.md, "OpenFGA bootstrap"):
+#   gcloud run jobs execute revel-fga-admin --region us-central1 --wait
+# The default args are the read-only `--check` probe. Originally created with gcloud; adopted by
+# the import block below.
+import {
+  to = google_cloud_run_v2_job.fga_admin
+  id = "projects/${var.project_id}/locations/${var.region}/jobs/revel-fga-admin"
+}
+
+resource "google_cloud_run_v2_job" "fga_admin" {
+  name                = "revel-fga-admin"
+  location            = var.region
+  deletion_protection = var.deletion_protection
+
+  template {
+    task_count = 1
+    template {
+      service_account = google_service_account.app.email
+      max_retries     = 0
+      timeout         = "300s"
+
+      containers {
+        image   = var.app_image
+        command = ["python"]
+        args    = ["-m", "revel.auth.fga_bootstrap", "--check"]
+
+        dynamic "env" {
+          for_each = local.fga_admin_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+        env {
+          name = "DATABASE_URL"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.database_url.secret_id
+              version = "latest"
+            }
+          }
+        }
+
+        resources {
+          limits = {
+            # Same as "1"; written as the API stores it for this gcloud-created job, so the
+            # import has no cosmetic diff.
+            cpu    = "1000m"
+            memory = "512Mi"
+          }
+        }
+
+        volume_mounts {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+      }
+
+      volumes {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [local.sql_connection_name]
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    # Image rolls out with `gcloud run jobs update --image`. Args are NOT ignored: Terraform keeps
+    # the job's default args at the read-only `--check`. Per-execution overrides
+    # (`gcloud run jobs execute --args`) do not change the job spec, so they are not drift.
     ignore_changes = [
       template[0].template[0].containers[0].image,
       client,

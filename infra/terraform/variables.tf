@@ -71,6 +71,28 @@ variable "workos_redirect_uri" {
   }
 }
 
+variable "openfga_store_id" {
+  description = "OpenFGA store ID (a 26-character ULID) printed by `revel.auth.fga_bootstrap`. Not a secret. Sets OPENFGA_STORE_ID on revel-app and revel-fga-admin only when non-empty."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.openfga_store_id == "" || can(regex("^[0-7][0-9A-HJKMNP-TV-Z]{25}$", var.openfga_store_id))
+    error_message = "openfga_store_id must be empty or an OpenFGA ULID: 26 uppercase Crockford base32 characters (no I, L, O or U), e.g. 01M6EH8A6JVN48ZKW179AHVMTC."
+  }
+}
+
+variable "openfga_authorization_model_id" {
+  description = "OpenFGA authorization model ID (a 26-character ULID) printed by `revel.auth.fga_bootstrap`. Not a secret. Sets OPENFGA_AUTHORIZATION_MODEL_ID on revel-app and revel-fga-admin only when non-empty."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.openfga_authorization_model_id == "" || can(regex("^[0-7][0-9A-HJKMNP-TV-Z]{25}$", var.openfga_authorization_model_id))
+    error_message = "openfga_authorization_model_id must be empty or an OpenFGA ULID: 26 uppercase Crockford base32 characters (no I, L, O or U), e.g. 01M6EH8A8D7R8Z89NBZSFV1YNC."
+  }
+}
+
 variable "app_extra_allowed_hosts" {
   description = "Extra Host values for revel-app's MCP transport allowlist, in addition to the PUBLIC_BASE_URL host and the computed deterministic run.app host. Use for the non-deterministic run.app hostname (from `terraform output app_urls`) after the first apply. Hostnames only, no scheme."
   type        = list(string)
