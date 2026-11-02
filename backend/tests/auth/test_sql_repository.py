@@ -145,3 +145,16 @@ async def test_existing_rows_take_read_only_path(sql_repo, monkeypatch):
     principal = await resolver.resolve(_token(), via="api")
     with real_session() as session:
         assert session.get(User, principal.user_id) is not None
+
+
+async def test_browser_and_mcp_resolve_to_same_user_row(sql_repo):
+    hooks = RecordingHooks()
+    resolver = IdentityResolver(sql_repo, hooks=hooks)
+    ui = await resolver.resolve_user("user_alice")
+    mcp = await resolver.resolve(_token(), via="mcp")
+    assert ui.user_id == mcp.user_id and ui.via == "ui" and ui.agent_id is None
+    bob_ui, bob_mcp = await asyncio.gather(
+        resolver.resolve_user("user_bob"), resolver.resolve(_token(sub="user_bob"), via="mcp")
+    )
+    assert bob_ui.user_id == bob_mcp.user_id
+    assert [name for name, _ in hooks.calls].count("on_user_created") == 2

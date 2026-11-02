@@ -17,7 +17,7 @@ from mcp.server.auth.provider import AccessToken
 
 from revel.auth.hooks import AuthzHooks, ModuleAuthzHooks
 from revel.auth.repository import DelegationRecord, IdentityRepository, UserRecord
-from revel.auth.workos_users import NullUserDirectory, UserDirectory
+from revel.auth.workos_users import NullUserDirectory, UserDirectory, UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -75,26 +75,35 @@ class IdentityResolver:
         self._directory = user_directory or NullUserDirectory()
         self._hooks = hooks or ModuleAuthzHooks()
 
+    async def _ensure_user(
+        self, workos_user_id: str, profile: UserProfile | None = None
+    ) -> UserRecord:
+        """Find or insert the ``users`` row keyed by the WorkOS user id (shared by all paths)."""
+        user = await self.repository.get_user_by_workos_id(workos_user_id)
+        if user is not None:
+            return user
+        if profile is None:
+            profile = await self._directory.fetch_profile(workos_user_id)
+
+        async def user_created(record: UserRecord) -> None:
+            await self._hooks.on_user_created(user_id=record.id)
+
+        user, _ = await self.repository.ensure_user(
+            workos_user_id,
+            email=profile.email if profile else None,
+            display_name=profile.display_name if profile else None,
+            on_created=user_created,
+        )
+        return user
+
     async def resolve(self, access_token: AccessToken, via: Via) -> Principal:
+        """Resolve an assistant bearer token (``mcp``/``api``) to a delegated principal."""
         workos_user_id = access_token.subject
         client_id = access_token.client_id
         if not workos_user_id or not client_id:
             raise InvalidIdentityClaims("token has no subject or client id")
 
-        user = await self.repository.get_user_by_workos_id(workos_user_id)
-        if user is None:
-            profile = await self._directory.fetch_profile(workos_user_id)
-
-            async def user_created(record: UserRecord) -> None:
-                await self._hooks.on_user_created(user_id=record.id)
-
-            user, _ = await self.repository.ensure_user(
-                workos_user_id,
-                email=profile.email if profile else None,
-                display_name=profile.display_name if profile else None,
-                on_created=user_created,
-            )
-
+        user = await self._ensure_user(workos_user_id)
         agent, _ = await self.repository.ensure_agent(client_id)
 
         async def delegation_created(record: DelegationRecord) -> None:
@@ -109,3 +118,17 @@ class IdentityResolver:
             raise DelegationDisconnected("assistant delegation is disconnected")
 
         return Principal(user_id=user.id, agent_id=agent.id, delegation_id=delegation.id, via=via)
+
+    async def resolve_user(
+        self, workos_user_id: str, *, profile: UserProfile | None = None
+    ) -> Principal:
+        """Resolve a verified browser session (the user acting directly) to a ``ui`` principal.
+
+        ``workos_user_id`` must come from a verified WorkOS access token's ``sub``. Uses the
+        same ``users`` row as :meth:`resolve`, so browser sign-in and MCP OAuth for one
+        WorkOS user are the same Revel user. Never creates or touches agents/delegations.
+        """
+        if not isinstance(workos_user_id, str) or not workos_user_id:
+            raise InvalidIdentityClaims("session has no subject")
+        user = await self._ensure_user(workos_user_id, profile)
+        return Principal(user_id=user.id, agent_id=None, delegation_id=None, via="ui")

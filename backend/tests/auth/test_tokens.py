@@ -212,6 +212,14 @@ async def test_jwks_non_object_body_fails_closed(make_token):
         "  ",
         "<your-authkit-domain>",
         "replace-with-authkit-domain",
+        "https://replace-with-authkit-domain.authkit.app",
+        "https://replace-with-authkit-domain.authkit.app/",
+        "HTTPS://Replace-With-AuthKit-Domain.authkit.app",
+        "http://replace-with-authkit-domain",
+        "replace-with-authkit-domain.authkit.app",
+        "https://tenant.replace-with-domain.example",
+        "https://<your-authkit-domain>",
+        "https://changeme",
         "changeme",
         "TODO",
     ],
@@ -224,7 +232,15 @@ async def test_unconfigured_domain_fails_closed(domain, make_token):
 
 
 @pytest.mark.parametrize(
-    "domain", ["todo-gifts.authkit.app", "your-tenant.authkit.app", "placeholder-co.authkit.app"]
+    "domain",
+    [
+        "todo-gifts.authkit.app",
+        "your-tenant.authkit.app",
+        "placeholder-co.authkit.app",
+        "https://todo-gifts.authkit.app",
+        "https://your-tenant.authkit.app/",
+        "https://tenant-replace-with.authkit.app",
+    ],
 )
 async def test_real_domains_containing_placeholder_words_accepted(domain):
     assert AuthConfig.from_settings(TestAuthKit.settings(workos_authkit_domain=domain)).configured
@@ -263,3 +279,22 @@ async def test_rejection_logs_category_only(verifier, make_token, caplog):
     assert token not in text
     assert token.split(".")[1] not in text
     assert "user_alice" not in text
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://replace-with-authkit-domain.authkit.app", True),
+        ("replace-with-workos-api-key", True),
+        ("replace-with-32+-char-random-string", True),
+        ("https://api.replace-with-host.example/path?x=1", True),
+        ("https://user@replace-with-host.example:443", True),
+        ("sk_test_realkey", False),
+        ("https://todo-gifts.authkit.app", False),
+        ("https://revel.gifts/replace-with-path", False),
+    ],
+)
+async def test_is_placeholder(value, expected):
+    from revel.auth.config import is_placeholder
+
+    assert is_placeholder(value) is expected

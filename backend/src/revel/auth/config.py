@@ -22,12 +22,29 @@ _DEV_APP_ENVS = ("development", "test")
 
 
 def is_placeholder(value: str) -> bool:
-    """True for template values such as ``<your-domain>`` or ``replace-with-...``."""
+    """True for template values such as ``<your-domain>`` or ``replace-with-...``.
+
+    Also catches URL-shaped templates such as
+    ``https://replace-with-authkit-domain.authkit.app``: after stripping any
+    ``scheme://``, a value whose host has a label starting with ``replace-with-`` (or
+    that is wrapped in ``<...>``) is a placeholder. Real hosts that merely contain
+    placeholder words (``todo-gifts.authkit.app``) are accepted.
+    """
     lowered = value.strip().lower()
-    return (
+    if (
         lowered in _PLACEHOLDER_VALUES
         or lowered.startswith(_PLACEHOLDER_PREFIX)
         or (lowered.startswith("<") and lowered.endswith(">"))
+    ):
+        return True
+    _, sep, rest = lowered.partition("://")
+    if not sep:
+        return False
+    if rest.startswith("<"):
+        return True
+    host = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0]
+    return host in _PLACEHOLDER_VALUES or any(
+        label.startswith(_PLACEHOLDER_PREFIX) for label in host.split(".")
     )
 
 
