@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Literal
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -21,10 +20,20 @@ from revel.auth.agent_disconnect import disconnect_agent
 from revel.auth.authz import AuthorizationDenied
 from revel.auth.identity import IdentityResolver, Principal
 from revel.auth.repository import DelegationView, IdentityRepository
+from revel.services.identity import DEFAULT_AGENT_LABEL, agent_label
+
+__all__ = [
+    "DEFAULT_AGENT_LABEL",
+    "AgentNotFound",
+    "AgentServiceUnavailable",
+    "ConnectedAgent",
+    "ConnectedAgentInfo",
+    "agent_label",
+    "disconnect_connected_agent",
+    "list_connected_agents",
+]
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_AGENT_LABEL = "Assistant"
 
 
 class ConnectedAgentInfo(BaseModel):
@@ -47,19 +56,6 @@ class AgentNotFound(LookupError):
 
 class AgentServiceUnavailable(RuntimeError):
     """Authorization could not be updated; nothing changed. Carries no internal detail."""
-
-
-def agent_label(name: str | None, client_id: str) -> str:
-    """Display label: the agent's non-blank name, else an ``https`` client ID's host
-    (CIMD client IDs are URLs), else ``"Assistant"``."""
-    if name is not None and name.strip():
-        return name.strip()
-    try:
-        parts = urlsplit(client_id.strip())
-        host = parts.hostname if parts.scheme.lower() == "https" else None
-    except ValueError:
-        host = None
-    return host or DEFAULT_AGENT_LABEL
 
 
 def _item(view: DelegationView) -> ConnectedAgent:

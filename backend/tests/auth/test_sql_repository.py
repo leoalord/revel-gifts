@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from revel.auth.identity import DelegationDisconnected, IdentityResolver
 from revel.auth.repository import SqlAlchemyIdentityRepository
 from revel.db.enums import DelegationStatus
-from revel.db.models import AgentDelegation, User
+from revel.db.models import Agent, AgentDelegation, User
 
 from .conftest import RecordingHooks
 
@@ -272,3 +272,51 @@ async def test_delegation_views_sql(sql_repo):
     assert await sql_repo.get_delegation_view(old.user_id, uuid4()) is None
     bob_views = await sql_repo.list_delegations_for_user(bob.user_id)
     assert [v.id for v in bob_views] == [bob.delegation_id]
+
+
+async def test_set_agent_name_if_empty_sql(sql_repo):
+    agent, _ = await sql_repo.ensure_agent("client_named")
+    session = sql_repo._session()
+    with session:
+        before = session.get(Agent, agent.id).updated_at
+    assert await sql_repo.set_agent_name_if_empty(agent.id, "Muse") is True
+    assert await sql_repo.set_agent_name_if_empty(agent.id, "Impostor") is False
+    stored = await sql_repo.get_agent(agent.id)
+    assert stored is not None and stored.name == "Muse"
+    with sql_repo._session() as session:
+        assert session.get(Agent, agent.id).updated_at >= before
+    # Unknown agent: no-op.
+    assert await sql_repo.set_agent_name_if_empty(uuid4(), "Muse") is False
+
+
+async def test_set_agent_name_if_empty_treats_empty_string_as_unset_sql(sql_repo):
+    agent, _ = await sql_repo.ensure_agent("client_blank")
+    with sql_repo._session() as session, session.begin():
+        session.execute(update(Agent).where(Agent.id == agent.id).values(name=""))
+    assert await sql_repo.set_agent_name_if_empty(agent.id, "Claude") is True
+    assert (await sql_repo.get_agent(agent.id)).name == "Claude"
+
+
+async def test_concurrent_agent_name_writes_first_wins_sql(sql_repo):
+    agent, _ = await sql_repo.ensure_agent("client_race")
+    names = [f"Name {i}" for i in range(8)]
+    results = await asyncio.gather(
+        *(sql_repo.set_agent_name_if_empty(agent.id, name) for name in names)
+    )
+    assert sum(results) == 1
+    winner = names[results.index(True)]
+    assert (await sql_repo.get_agent(agent.id)).name == winner
+
+
+async def test_resolve_captures_name_without_touching_delegations_sql(sql_repo):
+    class Clients:
+        async def fetch_client_name(self, client_id: str) -> str | None:
+            return "Muse" if client_id == "client_muse" else None
+
+    resolver = IdentityResolver(sql_repo, hooks=RecordingHooks(), client_directory=Clients())
+    principal = await resolver.resolve(_token(), via="mcp")
+    assert (await sql_repo.get_agent(principal.agent_id)).name == "Muse"
+    with sql_repo._session() as session:
+        row = session.get(AgentDelegation, principal.delegation_id)
+        assert row.status == DelegationStatus.ACTIVE.value
+        assert row.created_at == row.updated_at
