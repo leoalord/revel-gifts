@@ -15,6 +15,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 import jwt
@@ -55,6 +56,14 @@ class RelationTuple:
     object: str
 
 
+@dataclass(frozen=True, slots=True)
+class StoredTuple:
+    """A tuple as read back from OpenFGA, with the time it was written."""
+
+    tuple: RelationTuple
+    written_at: datetime
+
+
 class FgaClient(Protocol):
     """Operations the authorization service needs from OpenFGA.
 
@@ -71,6 +80,8 @@ class FgaClient(Protocol):
     async def read_tuples(
         self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]: ...
+
+    async def read_stored_tuples(self) -> list["StoredTuple"]: ...
 
     @property
     def configured(self) -> bool:
@@ -218,12 +229,19 @@ class OpenFgaServiceClient:
     async def read_tuples(
         self, *, relation: str | None = None, object: str | None = None, user: str | None = None
     ) -> list[RelationTuple]:
-        """OpenFGA Read. ``object`` is ``type:id``, or ``type:`` (all of a type; needs ``user``).
+        """OpenFGA Read. ``object`` is ``type:id``, or ``type:`` (all of a type; needs ``user``)."""
+        stored = await self._read(user=user, relation=relation, object=object)
+        return [s.tuple for s in stored]
 
-        With no arguments, reads every tuple in the store (used by ``fga_reconcile --prune``).
-        """
+    async def read_stored_tuples(self) -> list[StoredTuple]:
+        """Every tuple in the store with its write time (``fga_reconcile --prune``)."""
+        return await self._read(user=None, relation=None, object=None)
+
+    async def _read(
+        self, *, user: str | None, relation: str | None, object: str | None
+    ) -> list[StoredTuple]:
         self._require_configured()
-        found: list[RelationTuple] = []
+        found: list[StoredTuple] = []
         continuation: str | None = None
         while True:
             extra: dict[str, Any] = {"consistency": ConsistencyPreference.HIGHER_CONSISTENCY}
@@ -235,7 +253,9 @@ class OpenFgaServiceClient:
             )
             for item in response.tuples or []:
                 key = item.key
-                found.append(RelationTuple(key.user, key.relation, key.object))
+                found.append(
+                    StoredTuple(RelationTuple(key.user, key.relation, key.object), item.timestamp)
+                )
             continuation = response.continuation_token or None
             if not continuation:
                 return found

@@ -148,7 +148,7 @@ def test_committed_model_json_matches_model_v1_relations() -> None:
     model = fga_bootstrap.load_model(fga_bootstrap.MODEL_JSON_PATH)
     relations = {t["type"]: sorted(t.get("relations", {})) for t in model["type_definitions"]}
     assert relations == {
-        "user": [],
+        "user": ["delegate"],
         "agent": ["acts_for"],
         "profile": ["contribute", "owner", "owner_agent", "view_only_me"],
     }

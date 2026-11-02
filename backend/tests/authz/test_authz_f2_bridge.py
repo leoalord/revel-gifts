@@ -1,15 +1,15 @@
 """F2 -> F4 integration: the real IdentityResolver and hook bridge driving revel.auth.authz.
 
-Uses F2's in-memory identity repository from ``tests/auth/conftest.py`` (imported, not copied;
-``tests/`` is on ``sys.path`` via the root conftest) and the F4 in-memory OpenFGA fake.
+Uses F2's in-memory identity repository from ``tests/auth/fakes.py`` and the F4 in-memory
+OpenFGA fake.
 """
 
 import logging
 from collections.abc import Iterator
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
-from auth.conftest import InMemoryIdentityRepository
+from auth.fakes import InMemoryIdentityRepository
 from authz_fakes import FakeFga
 from mcp.server.auth.provider import AccessToken
 
@@ -19,7 +19,7 @@ from revel.auth.authz import (
     acts_for_tuple,
     can_contribute,
     configure_authz,
-    owner_agent_tuple,
+    delegate_tuple,
     owner_tuple,
     reset_authz,
     resolve_viewer_tier,
@@ -45,22 +45,18 @@ def token(sub: str, client_id: str) -> AccessToken:
 
 
 async def test_resolver_writes_tuples_through_module_hooks(fake_fga: FakeFga) -> None:
-    profile_id = uuid4()
-    repo = InMemoryIdentityRepository()
-
-    async def resolve_profile(user_id: UUID) -> UUID | None:
-        return profile_id
-
-    configure_authz(fake_fga, resolve_profile)
-    resolver = IdentityResolver(repo, hooks=ModuleAuthzHooks())
+    configure_authz(fake_fga)
+    resolver = IdentityResolver(InMemoryIdentityRepository(), hooks=ModuleAuthzHooks())
 
     principal = await resolver.resolve(token("user_alex", "client_muse"), "mcp")
     assert principal.delegation_id is not None
     assert fake_fga.tuples == {
-        owner_tuple(principal.user_id, profile_id),
         acts_for_tuple(principal.user_id, principal.delegation_id),
-        owner_agent_tuple(principal.delegation_id, profile_id),
+        delegate_tuple(principal.user_id, principal.delegation_id),
     }
+    # Later profile creation writes only the owner tuple; the agent then gets access.
+    profile_id = uuid4()
+    fake_fga.tuples.add(owner_tuple(principal.user_id, profile_id))
     assert await can_contribute(fake_fga, principal, profile_id)
     assert await resolve_viewer_tier(fake_fga, principal, profile_id) is ViewerTier.only_me
 
@@ -74,18 +70,16 @@ async def test_resolver_writes_tuples_through_module_hooks(fake_fga: FakeFga) ->
 
 
 async def test_same_client_second_user_is_isolated(fake_fga: FakeFga) -> None:
-    profiles: dict[UUID, UUID] = {}
-
-    async def resolve_profile(user_id: UUID) -> UUID | None:
-        return profiles.setdefault(user_id, uuid4())
-
-    configure_authz(fake_fga, resolve_profile)
+    configure_authz(fake_fga)
     resolver = IdentityResolver(InMemoryIdentityRepository(), hooks=ModuleAuthzHooks())
     alex = await resolver.resolve(token("user_alex", "client_muse"), "mcp")
     sam = await resolver.resolve(token("user_sam", "client_muse"), "mcp")
     assert alex.agent_id == sam.agent_id  # one global agents row per OAuth client
     assert alex.delegation_id != sam.delegation_id
-    assert not await can_contribute(fake_fga, sam, profiles[alex.user_id])
+    alex_profile = uuid4()
+    fake_fga.tuples.add(owner_tuple(alex.user_id, alex_profile))
+    assert await can_contribute(fake_fga, alex, alex_profile)
+    assert not await can_contribute(fake_fga, sam, alex_profile)
 
 
 async def test_sign_in_succeeds_with_warning_when_unconfigured(
@@ -101,17 +95,16 @@ async def test_sign_in_succeeds_with_warning_when_unconfigured(
     assert "OpenFGA is not configured" in caplog.text
 
 
-async def test_sign_in_rolls_back_when_configured_fga_errors(fake_fga: FakeFga) -> None:
-    async def resolve_profile(user_id: UUID) -> UUID | None:
-        return uuid4()
-
-    configure_authz(fake_fga, resolve_profile)
+async def test_delegation_rolls_back_when_configured_fga_errors(fake_fga: FakeFga) -> None:
+    configure_authz(fake_fga)
     fake_fga.error = RuntimeError("openfga unavailable")
     repo = InMemoryIdentityRepository()
     resolver = IdentityResolver(repo, hooks=ModuleAuthzHooks())
     with pytest.raises(RuntimeError):
         await resolver.resolve(token("user_alex", "client_muse"), "mcp")
-    assert repo.users == {}
+    # on_user_created makes no OpenFGA call, so the user insert stands; the delegation does not.
+    assert len(repo.users) == 1
+    assert repo.delegations == {}
 
 
 def test_real_principal_satisfies_principal_like() -> None:

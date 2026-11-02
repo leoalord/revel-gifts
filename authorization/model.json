@@ -2,6 +2,22 @@
   "schema_version": "1.1",
   "type_definitions": [
     {
+      "metadata": {
+        "relations": {
+          "delegate": {
+            "directly_related_user_types": [
+              {
+                "type": "agent"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "delegate": {
+          "this": {}
+        }
+      },
       "type": "user"
     },
     {
@@ -34,13 +50,7 @@
               }
             ]
           },
-          "owner_agent": {
-            "directly_related_user_types": [
-              {
-                "type": "agent"
-              }
-            ]
-          },
+          "owner_agent": {},
           "view_only_me": {}
         }
       },
@@ -65,7 +75,14 @@
           "this": {}
         },
         "owner_agent": {
-          "this": {}
+          "tupleToUserset": {
+            "computedUserset": {
+              "relation": "delegate"
+            },
+            "tupleset": {
+              "relation": "owner"
+            }
+          }
         },
         "view_only_me": {
           "union": {

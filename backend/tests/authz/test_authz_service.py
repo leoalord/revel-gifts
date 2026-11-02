@@ -1,18 +1,17 @@
-"""Unit tests for revel.auth.authz against the in-memory model-v1 fake."""
+"""Unit tests for revel.auth.authz against the in-memory model-v1 fake (delegate model)."""
 
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from authz_fakes import FakeFga, Principal, make_person
 
-from revel.auth import authz
 from revel.auth.authz import (
     AuthorizationDenied,
     TupleHooks,
     ViewerTier,
     acts_for_tuple,
     can_contribute,
-    owner_agent_tuple,
+    delegate_tuple,
     owner_tuple,
     reconcile_agent_tuples,
     reconcile_owner_tuples,
@@ -23,13 +22,6 @@ from revel.auth.authz import (
 )
 
 pytestmark = pytest.mark.anyio
-
-
-def resolver(mapping: dict[UUID, UUID]) -> authz.ProfileResolver:
-    async def resolve(user_id: UUID) -> UUID | None:
-        return mapping.get(user_id)
-
-    return resolve
 
 
 # --- Subject mapping --------------------------------------------------------------------------
@@ -70,77 +62,64 @@ def test_viewer_tier_values_are_forward_compatible() -> None:
 # --- Hooks ------------------------------------------------------------------------------------
 
 
-async def test_user_created_writes_owner_and_is_idempotent(fake_fga: FakeFga) -> None:
-    alex = make_person()
-    hooks = TupleHooks(fake_fga, resolver({alex.user_id: alex.profile_id}))
-    first = await hooks.on_user_created(user_id=alex.user_id)
-    second = await hooks.on_user_created(user_id=alex.user_id)
-    assert first == second
-    assert first.written == (owner_tuple(alex.user_id, alex.profile_id),)
-    assert fake_fga.tuples == {
-        authz.RelationTuple(f"user:{alex.user_id}", "owner", f"profile:{alex.profile_id}")
-    }
-
-
-async def test_user_created_without_profile_defers(fake_fga: FakeFga) -> None:
-    hooks = TupleHooks(fake_fga)  # default resolver: no profiles yet
-    result = await hooks.on_user_created(user_id=uuid4())
-    assert result.profile_deferred
+async def test_user_created_writes_nothing(fake_fga: FakeFga) -> None:
+    result = await TupleHooks(fake_fga).on_user_created(user_id=uuid4())
     assert result.written == ()
     assert fake_fga.tuples == set()
+    assert fake_fga.calls == []
 
 
-async def test_agent_delegated_writes_all_tuples_idempotently(fake_fga: FakeFga) -> None:
+async def test_agent_delegated_writes_acts_for_and_delegate_idempotently(
+    fake_fga: FakeFga,
+) -> None:
     alex = make_person()
     agent_id = uuid4()
-    hooks = TupleHooks(fake_fga, resolver({alex.user_id: alex.profile_id}))
+    hooks = TupleHooks(fake_fga)
     for _ in range(2):
-        result = await hooks.on_agent_delegated(
+        await hooks.on_agent_delegated(
             user_id=alex.user_id, agent_id=agent_id, delegation_id=alex.delegation_id
         )
-        assert not result.profile_deferred
     assert fake_fga.tuples == {
         acts_for_tuple(alex.user_id, alex.delegation_id),
-        owner_tuple(alex.user_id, alex.profile_id),
-        owner_agent_tuple(alex.delegation_id, alex.profile_id),
+        delegate_tuple(alex.user_id, alex.delegation_id),
     }
     assert all(str(agent_id) not in t.user + t.object for t in fake_fga.tuples)
 
 
-async def test_agent_delegated_without_profile_writes_acts_for_only(fake_fga: FakeFga) -> None:
+async def test_delegation_before_profile_then_owner_grants_agent(fake_fga: FakeFga) -> None:
     alex = make_person()
-    hooks = TupleHooks(fake_fga)
-    result = await hooks.on_agent_delegated(
+    agent = alex.as_agent(uuid4())
+    await TupleHooks(fake_fga).on_agent_delegated(
         user_id=alex.user_id, agent_id=uuid4(), delegation_id=alex.delegation_id
     )
-    assert result.profile_deferred
-    assert fake_fga.tuples == {acts_for_tuple(alex.user_id, alex.delegation_id)}
-    # acts_for alone grants nothing on the (future) profile.
+    assert not await can_contribute(fake_fga, agent, alex.profile_id)
+    # Profile creation writes only the owner tuple; owner_agent follows via delegate.
+    await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)])
+    assert await can_contribute(fake_fga, agent, alex.profile_id)
+    assert await can_contribute(fake_fga, alex.as_user(), alex.profile_id)
+
+
+async def test_acts_for_alone_grants_nothing(fake_fga: FakeFga) -> None:
+    alex = make_person()
+    await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)])
+    await fake_fga.write_tuples([acts_for_tuple(alex.user_id, alex.delegation_id)])
     assert not await can_contribute(fake_fga, alex.as_agent(uuid4()), alex.profile_id)
 
 
-async def test_reconcile_backfills_deferred_tuples(fake_fga: FakeFga) -> None:
+async def test_reconcile_backfills(fake_fga: FakeFga) -> None:
     alex = make_person()
-    agent = alex.as_agent(uuid4())
-    hooks = TupleHooks(fake_fga)
-    await hooks.on_user_created(user_id=alex.user_id)
-    await hooks.on_agent_delegated(
-        user_id=alex.user_id, agent_id=uuid4(), delegation_id=alex.delegation_id
-    )
-    assert not await can_contribute(fake_fga, alex.as_user(), alex.profile_id)
-
+    pairs = [(alex.user_id, alex.delegation_id)]
     assert await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)]) == 1
-    triples = [(alex.user_id, alex.delegation_id, alex.profile_id)]
-    assert await reconcile_agent_tuples(fake_fga, triples) == 2
-    assert await reconcile_agent_tuples(fake_fga, triples) == 2  # rerun is harmless
-    assert await can_contribute(fake_fga, alex.as_user(), alex.profile_id)
-    assert await can_contribute(fake_fga, agent, alex.profile_id)
+    assert await reconcile_agent_tuples(fake_fga, pairs) == 2
+    assert await reconcile_agent_tuples(fake_fga, pairs) == 2  # rerun is harmless
+    assert await can_contribute(fake_fga, alex.as_agent(uuid4()), alex.profile_id)
 
 
-async def test_disconnect_deletes_acts_for_and_owner_agent(fake_fga: FakeFga) -> None:
+async def test_disconnect_deletes_acts_for_and_delegate(fake_fga: FakeFga) -> None:
     alex = make_person()
     agent_id = uuid4()
-    hooks = TupleHooks(fake_fga, resolver({alex.user_id: alex.profile_id}))
+    hooks = TupleHooks(fake_fga)
+    await reconcile_owner_tuples(fake_fga, [(alex.user_id, alex.profile_id)])
     await hooks.on_agent_delegated(
         user_id=alex.user_id, agent_id=agent_id, delegation_id=alex.delegation_id
     )
@@ -151,7 +130,7 @@ async def test_disconnect_deletes_acts_for_and_owner_agent(fake_fga: FakeFga) ->
     )
     assert set(result.deleted) == {
         acts_for_tuple(alex.user_id, alex.delegation_id),
-        owner_agent_tuple(alex.delegation_id, alex.profile_id),
+        delegate_tuple(alex.user_id, alex.delegation_id),
     }
     assert fake_fga.tuples == {owner_tuple(alex.user_id, alex.profile_id)}
     assert not await can_contribute(fake_fga, alex.as_agent(agent_id), alex.profile_id)
@@ -160,20 +139,12 @@ async def test_disconnect_deletes_acts_for_and_owner_agent(fake_fga: FakeFga) ->
     await hooks.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
 
 
-async def test_disconnect_finds_owner_agent_without_resolver(fake_fga: FakeFga) -> None:
-    alex = make_person()
-    await reconcile_agent_tuples(fake_fga, [(alex.user_id, alex.delegation_id, alex.profile_id)])
-    hooks = TupleHooks(fake_fga)  # resolver knows no profile
-    await hooks.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
-    assert fake_fga.tuples == set()
-
-
 async def test_disconnect_leaves_other_delegations(fake_fga: FakeFga) -> None:
     alex, sam = make_person(), make_person()
-    profiles = {alex.user_id: alex.profile_id, sam.user_id: sam.profile_id}
-    hooks = TupleHooks(fake_fga, resolver(profiles))
+    hooks = TupleHooks(fake_fga)
     shared_client = uuid4()  # same OAuth client (agents.id) for both users
     for person in (alex, sam):
+        await reconcile_owner_tuples(fake_fga, [(person.user_id, person.profile_id)])
         await hooks.on_agent_delegated(
             user_id=person.user_id, agent_id=shared_client, delegation_id=person.delegation_id
         )
@@ -187,11 +158,10 @@ async def test_disconnect_leaves_other_delegations(fake_fga: FakeFga) -> None:
 
 async def test_cross_user_same_client_is_denied(fake_fga: FakeFga) -> None:
     alex, sam = make_person(), make_person()
-    profiles = {alex.user_id: alex.profile_id, sam.user_id: sam.profile_id}
-    hooks = TupleHooks(fake_fga, resolver(profiles))
+    hooks = TupleHooks(fake_fga)
     shared_client = uuid4()
     for person in (alex, sam):
-        await hooks.on_user_created(user_id=person.user_id)
+        await reconcile_owner_tuples(fake_fga, [(person.user_id, person.profile_id)])
         await hooks.on_agent_delegated(
             user_id=person.user_id, agent_id=shared_client, delegation_id=person.delegation_id
         )

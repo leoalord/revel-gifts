@@ -17,8 +17,11 @@ The database layer is synchronous SQLAlchemy; queries run on the caller's ``Sess
 worker thread (the caller awaits, so the session is never used concurrently). Unconfigured
 OpenFGA raises ``FgaConfigurationError`` before any claim is read.
 
-Also here: ``resolve_profile_for_user`` (the profile resolver installed by the app lifespan) and
-``on_profile_created`` (the grant hook F5 calls when it creates a profile).
+v1 returns ORM ``Claim`` objects because the only viewers are the owner and the owner's agents.
+v2 non-owner reads must return a projection (only the fields a shared viewer may see), not the
+ORM ``Claim``.
+
+Also here: ``on_profile_created``, the grant hook F5 calls when it creates a profile.
 """
 
 import logging
@@ -28,7 +31,7 @@ from uuid import UUID
 
 import anyio.to_thread
 from sqlalchemy import ColumnElement, Select, and_, false, func, or_, select, true
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from revel.auth import authz
 from revel.auth.authz import (
@@ -36,14 +39,12 @@ from revel.auth.authz import (
     PrincipalLike,
     TupleSync,
     ViewerTier,
-    acts_for_tuple,
-    owner_agent_tuple,
     owner_tuple,
     resolve_viewer_tier,
 )
-from revel.auth.fga import FgaClient, RelationTuple
-from revel.db.enums import LIVE_CLAIM_STATUSES, Audience, ClaimStatus, DelegationStatus
-from revel.db.models import AgentDelegation, Claim, ContributionPolicy, Profile
+from revel.auth.fga import FgaClient
+from revel.db.enums import LIVE_CLAIM_STATUSES, Audience, ClaimStatus
+from revel.db.models import Claim, ContributionPolicy, Profile
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def _current_share_provisional(profile_id: UUID) -> ColumnElement[bool]:
     return func.coalesce(latest, true())
 
 
-def visible_claims_query(profile_id: UUID, tier: ViewerTier) -> Select[tuple[Claim]]:
+def _visible_claims_query(profile_id: UUID, tier: ViewerTier) -> Select[tuple[Claim]]:
     """SQL for the shared read path at ``tier``. Filtering happens entirely in the database."""
     audiences = [a.value for a in audiences_for_tier(tier)]
     provisional_allowed = true() if is_owner_tier(tier) else _current_share_provisional(profile_id)
@@ -130,13 +131,13 @@ def visible_claims_query(profile_id: UUID, tier: ViewerTier) -> Select[tuple[Cla
     )
 
 
-async def visible_claims_for_tier(
+async def _visible_claims_for_tier(
     session: Session, profile_id: UUID, tier: ViewerTier
 ) -> VisibleClaims:
-    """Claims visible at an already-resolved tier. Use ``visible_claims`` from adapters."""
+    """Claims visible at an already-resolved tier. Private: adapters use ``visible_claims``."""
     if tier is ViewerTier.none:
         raise AuthorizationDenied()
-    stmt = visible_claims_query(profile_id, tier)
+    stmt = _visible_claims_query(profile_id, tier)
     rows = await _in_thread(lambda: list(session.execute(stmt).scalars()))
     return VisibleClaims(
         profile_id=profile_id,
@@ -162,7 +163,7 @@ async def visible_claims(
     the SQL filter (``TIER_RANK``) already cover them.
     """
     tier = await resolve_viewer_tier(fga, principal, profile_id)
-    return await visible_claims_for_tier(session, profile_id, tier)
+    return await _visible_claims_for_tier(session, profile_id, tier)
 
 
 # --- Owner management reads -------------------------------------------------------------------
@@ -190,46 +191,6 @@ async def owner_claims(
     return await _in_thread(lambda: list(session.execute(stmt).scalars()))
 
 
-# --- Profile resolver -------------------------------------------------------------------------
-
-
-def _default_sessionmaker() -> sessionmaker[Session]:
-    from revel.db.session import get_sessionmaker
-
-    return get_sessionmaker()
-
-
-def make_profile_resolver(
-    sessionmaker_provider: Callable[[], sessionmaker[Session]] = _default_sessionmaker,
-) -> authz.ProfileResolver:
-    """Profile resolver on its own short read-only session.
-
-    Safe inside F2's open identity transaction: it reads only ``profiles`` (plain SELECT, no
-    locks; a just-inserted user simply has no profile yet) and never touches users, agents or
-    agent_delegations.
-    """
-
-    def lookup(user_id: UUID) -> UUID | None:
-        with sessionmaker_provider()() as session, session.begin():
-            session.connection().exec_driver_sql("SET TRANSACTION READ ONLY")
-            return session.execute(
-                select(Profile.id).where(Profile.user_id == user_id)
-            ).scalar_one_or_none()
-
-    async def resolve(user_id: UUID) -> UUID | None:
-        return await _in_thread(lambda: lookup(user_id))
-
-    return resolve
-
-
-async def resolve_profile_for_user(user_id: UUID) -> UUID | None:
-    """Default profile resolver: ``profiles.id`` for ``profiles.user_id``, or ``None``."""
-    return await _resolver(user_id)
-
-
-_resolver = make_profile_resolver()
-
-
 # --- Profile creation hook (F5) ---------------------------------------------------------------
 
 
@@ -238,36 +199,23 @@ async def on_profile_created(
 ) -> TupleSync | None:
     """Grant hook F5 calls in its profile-creating transaction, with that transaction's session.
 
-    Writes ``owner`` plus ``acts_for`` and ``owner_agent`` for each of the user's ACTIVE
-    delegations (read through the caller's session: no second connection). Grant semantics:
-    warns and returns ``None`` only while OpenFGA is unconfigured; raises otherwise (including
-    when the profile does not belong to ``user_id``).
+    Verifies through the caller's session (no second connection) that the profile belongs to
+    ``user_id``, then writes only ``profile:<p>#owner@user:<u>``: every current and future
+    delegation of the user reaches it through ``user#delegate`` (owner_agent is computed).
+    Grant semantics: warns and returns ``None`` only while OpenFGA is unconfigured; raises
+    otherwise, including on a wrong owner or after ``authz.HOOK_TIMEOUT_SECONDS``.
     """
     fga = authz.configured_client_or_none()
     if fga is None:
         return None
 
-    def read() -> list[UUID]:
-        owner = session.execute(
+    def owner_of_profile() -> UUID | None:
+        return session.execute(
             select(Profile.user_id).where(Profile.id == profile_id)
         ).scalar_one_or_none()
-        if owner != user_id:
-            raise ValueError("profile does not belong to user")
-        return list(
-            session.execute(
-                select(AgentDelegation.id).where(
-                    AgentDelegation.user_id == user_id,
-                    AgentDelegation.status == DelegationStatus.ACTIVE.value,
-                )
-            ).scalars()
-        )
 
-    delegation_ids = await _in_thread(read)
-    writes: list[RelationTuple] = [owner_tuple(user_id, profile_id)]
-    for delegation_id in delegation_ids:
-        writes += [
-            acts_for_tuple(user_id, delegation_id),
-            owner_agent_tuple(delegation_id, profile_id),
-        ]
-    await fga.write_tuples(writes)
-    return TupleSync(written=tuple(writes))
+    if await _in_thread(owner_of_profile) != user_id:
+        raise ValueError("profile does not belong to user")
+    writes = (owner_tuple(user_id, profile_id),)
+    await authz.bounded(fga.write_tuples(writes))
+    return TupleSync(written=writes)
