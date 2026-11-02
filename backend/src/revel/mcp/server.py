@@ -11,7 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from revel.mcp import identity_tools, profile_tools
+from revel.mcp import identity_tools, profile_tools, question_tools
 from revel.settings import Settings
 
 
@@ -26,6 +26,7 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
 
     identity_tools.register(server, settings)
     profile_tools.register(server, settings)
+    question_tools.register(server, settings)
     return server
 
 
