@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (gitignored). No secret values belong here.
+project_id = "revel-gifts"
+region     = "us-central1"
+
+# Placeholder until the first real image is pushed; later rollouts use gcloud.
+app_image = "us-docker.pkg.dev/cloudrun/container/hello"
+
+openfga_image_tag = "v1.22.1"
+public_base_url   = "https://api.revel.gifts"
+mcp_path          = "/mcp"
+migrate_command   = ["alembic", "upgrade", "head"]
+
+# Add secret IDs here only after `gcloud secrets versions add` has created a version.
+app_secret_env = []
+
+db_tier               = "db-f1-micro"
+app_max_instances     = 3
+deletion_protection   = true
+enable_domain_mapping = false
+domain_name           = "api.revel.gifts"
