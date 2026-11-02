@@ -229,6 +229,13 @@ class FactInput(BaseModel):
     supersedes_id: UUID | None = Field(
         default=None, description="A live fact this one corrects or replaces."
     )
+    involves_others: bool = Field(
+        default=False,
+        description=(
+            "True when the fact involves other people (e.g. a partner's plans). Defaults the "
+            "audience to only_me and always holds an assistant's contribution for review."
+        ),
+    )
 
 
 Outcome = Literal["accepted", "pending_review", "rejected"]
@@ -785,7 +792,8 @@ def _plan_fact(
     except CategoryError as exc:
         raise _Rejected(exc.reason_code, exc.message) from None
     effective = policy.effective_audience(spec)
-    audience = fact.audience or effective
+    # Facts involving other people: tightest plausible audience unless one is given.
+    audience = fact.audience or (Audience.ONLY_ME if fact.involves_others else effective)
     if not policy.audience_allowed(spec, audience):
         raise _Rejected(
             "invalid_field",
@@ -809,7 +817,12 @@ def _plan_fact(
         # The owner's own entry is explicitly accepted.
         status, acceptance = _accepted_status(fact), AcceptanceMode.EXPLICIT
     else:
-        if not policy.approved or audience.rank < effective.rank or policy.requires_review(spec):
+        if (
+            fact.involves_others
+            or not policy.approved
+            or audience.rank < effective.rank
+            or policy.requires_review(spec)
+        ):
             status, acceptance = ClaimStatus.PENDING_REVIEW, None
         else:
             status, acceptance = _accepted_status(fact), AcceptanceMode.AUTOMATIC
@@ -853,7 +866,8 @@ async def add_facts(
         results: list[FactOutcome] = []
         for index, raw in enumerate(facts):
             try:
-                planned = _plan_fact(principal, policy, _coerce(raw))
+                item = _coerce(raw)
+                planned = _plan_fact(principal, policy, item)
             except _Rejected as exc:
                 results.append(_rejected(index, exc.reason_code, exc.message))
                 continue
@@ -885,7 +899,7 @@ async def add_facts(
                     claim_id=claim.id,
                     status=status,
                     audience=Audience(claim.audience),
-                    message=_outcome_message(status),
+                    message=_outcome_message(status, involves_others=item.involves_others),
                 )
             )
         session.commit()
@@ -902,7 +916,9 @@ def _rejected(index: int, reason_code: str, message: str) -> FactOutcome:
     return FactOutcome(index=index, outcome="rejected", reason_code=reason_code, message=message)
 
 
-def _outcome_message(status: ClaimStatus) -> str | None:
+def _outcome_message(status: ClaimStatus, *, involves_others: bool = False) -> str | None:
+    if status is ClaimStatus.PENDING_REVIEW and involves_others:
+        return "Awaits the owner's review because it involves other people; not shared until then."
     if status is ClaimStatus.PENDING_REVIEW:
         return "Held for the owner's review; not shared until approved."
     if status is ClaimStatus.PROVISIONAL:
