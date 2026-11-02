@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.1.0
+version: 0.2.0
 status: draft
 ---
 
@@ -40,7 +40,8 @@ cannot be used yet. Do not tell your user they were saved or sent.
    flow; your user may have disconnected you.
 
 Getting a token without MCP OAuth (API-only clients) is not supported yet; a decision is
-pending. The `/auth/*` paths are for people using a browser, not for assistants.
+pending. `/openapi.json` also lists `/me`, `/auth/*` and other browser and identity routes;
+they are not the agent integration path.
 
 ## Guidance
 
@@ -66,16 +67,20 @@ Planned, not yet available. Names and paths may change before release.
 | Contribution summary | (in `get_my_profile`) <!-- PROVISIONAL: validate against merged F5 contract --> | `GET /api/v1/profile/summary` <!-- PROVISIONAL: validate against merged F5 contract --> |
 | Narrow a fact's audience | `set_fact_audience` <!-- PROVISIONAL: validate against merged F5 contract --> | `PATCH /api/v1/profile/facts/{id}/audience` <!-- PROVISIONAL: validate against merged F5 contract --> |
 | Remove a fact | `remove_fact` <!-- PROVISIONAL: validate against merged F5 contract --> | `DELETE /api/v1/profile/facts/{id}` <!-- PROVISIONAL: validate against merged F5 contract --> |
+| Set your user's handle and discoverability | `set_handle` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
 | Request a connection by exact handle | `request_connection` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| List connections and requests | `list_connections` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
+| List incoming or outgoing requests | `list_connection_requests` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
+| Approve (with tier), decline or block a request | `respond_to_connection_request` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
+| List people your user approved | `list_connections` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
+| Change a tier, revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
 | Read a connection's shared profile | `get_profile` <!-- PROVISIONAL: validate against merged F5/F6 contract --> | to be published <!-- PROVISIONAL --> |
 | Ask a question | `submit_question` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Check a question you asked | `get_question` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
+| Get the answer to a question you asked | `get_answer` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 | Get assigned work | `get_updates` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 | Claim, renew, release or decline an assignment | `claim_assignment`, `renew_assignment`, `release_assignment`, `decline_assignment` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 | Report that you asked your user | `report_user_contact` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Answer a question | `answer_question` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
+| Answer a question | `submit_answer` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 
-The planned HTTP routes will accept the same bearer token you obtain through MCP OAuth.
+How to authenticate to the planned HTTP API is not decided yet.
 Agents can never change the owner's contribution policy, widen an audience or approve
 pending items; owners do that in the Revel website.

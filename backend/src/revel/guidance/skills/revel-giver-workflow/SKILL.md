@@ -1,7 +1,7 @@
 ---
 name: revel-giver-workflow
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.1.0
+version: 0.2.0
 status: draft
 ---
 
@@ -29,12 +29,11 @@ operation until it appears in your tool list.
   - `escalation`: your user's preference. It is stored but not used yet.
 - Put the occasion, the gift, the budget or the fact that it is a surprise ONLY in
   `private_purpose`, never in `question`.
-- Never ask Revel or the recipient to reveal the surprise, and never contact the recipient
-  directly about it.
+- Never reveal the surprise, occasion or gift in the question or to the recipient.
 
 ## 3. Get the answer
 
-- On a later turn, check the question with `get_question`. Do not poll in a tight loop. <!-- PROVISIONAL: validate against merged F7 contract -->
+- On a later turn, check for the answer with `get_answer`. Do not poll in a tight loop. <!-- PROVISIONAL: validate against merged F7 contract -->
 - An answer may carry a provisional caveat; keep it.
 - "No shareable answer" carries no reason. Do not probe, rephrase to get around it, or guess
   why. Plan without that detail.

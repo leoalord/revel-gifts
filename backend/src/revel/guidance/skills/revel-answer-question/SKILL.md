@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.1.0
+version: 0.2.0
 status: draft
 ---
 
@@ -24,7 +24,7 @@ operation until it appears in your tool list.
 
 - First answer from authorized knowledge you already have, including your user's Revel profile.
   Do not contact your user if you can answer without them.
-- Call `answer_question` with the answer and an `evidence` list. Each evidence item is either: <!-- PROVISIONAL: validate against merged F7 contract -->
+- Call `submit_answer` with the answer and an `evidence` list. Each evidence item is either: <!-- PROVISIONAL: validate against merged F7 contract -->
   - a reference to an existing profile fact id, or
   - inline evidence with only `category`, proposed `audience`, `evidence_type` and an
     approximate observed date (a month is enough).
@@ -34,8 +34,9 @@ operation until it appears in your tool list.
   Never propose an audience wider than the owner's policy.
 - If you learned a new durable fact, contribute it separately with `add_facts` under the <!-- PROVISIONAL: validate against merged F5 contract -->
   owner's policy (see `revel-profile-discovery`).
-- If the question is inappropriate or unsafe to answer, call `decline_assignment`. Do not <!-- PROVISIONAL: validate against merged F7 contract -->
-  explain your user's reasons.
+- If the question is inappropriate or unsafe to answer, or the context you were given is not <!-- PROVISIONAL: validate against merged F7 contract -->
+  enough to answer it appropriately, call `decline_assignment`. Do not explain your user's <!-- PROVISIONAL: validate against merged F7 contract -->
+  reasons.
 
 ## 3. Asking your user: the lease
 

@@ -62,6 +62,27 @@ FIELDS_AND_VALUES = frozenset(
         "type",
         "evidence",
         "waiting_for_user",
+        # F5 additions at 935dfde / announced by F5 (provisional)
+        "sensitive",
+        "only_me",
+        "sensitive_not_explicit",
+        "involves_others",
+        # F6 parameters and values at PR #23 @ 93da408 (provisional)
+        "handle",
+        "direction",
+        "incoming",
+        "outgoing",
+        "request_id",
+        "action",
+        "approve",
+        "decline",
+        "block",
+        "tier",
+        "connections",
+        "true",
+        "invalid_field",
+        "invalid_details",
+        "enrichment_disabled",
     }
 )
 ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS)
@@ -124,9 +145,18 @@ def test_provisional_names_are_not_implemented() -> None:
     assert not (set(PROVISIONAL_OPERATIONS) & (IMPLEMENTED_MCP_TOOLS | IMPLEMENTED_HTTP))
 
 
-def test_get_me_is_not_presented_to_agents() -> None:
+def test_me_and_auth_routes_are_not_presented_to_agents() -> None:
+    # /me and /auth/* may only be mentioned to say they are not the agent path.
     for name in DOC_NAMES:
-        assert "/me`" not in documents()[name].body and "GET /me" not in documents()[name].body
+        text = documents()[name].body
+        assert "GET /me" not in text
+        lines = text.split("\n")
+        for number, line in enumerate(lines):
+            if "`/me`" in line or "/auth/" in line:
+                window = " ".join(lines[number : number + 2])
+                assert "not the agent" in window or "not for assistants" in window, (
+                    f"{name}:{number + 1}: /me or /auth/* presented to agents"
+                )
 
 
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
