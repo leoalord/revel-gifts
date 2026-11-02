@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.2.1
+version: 0.3.0
 status: draft
 ---
 
@@ -32,7 +32,7 @@ operation until it appears in your tool list.
   than the answer requires.
 - The answer can be no more visible than its evidence: Revel uses the most restrictive audience.
   Never propose an audience wider than the owner's policy.
-- If you learned a new durable fact, contribute it separately with `add_facts` under the <!-- PROVISIONAL: validate against merged F5 contract -->
+- If you learned a new durable fact, contribute it separately with `add_facts` under the
   owner's policy (see `revel-profile-discovery`).
 - If the question is inappropriate or unsafe to answer, or the context you were given is not <!-- PROVISIONAL: validate against merged F7 contract -->
   enough to answer it appropriately, call `decline_assignment`. Do not explain your user's <!-- PROVISIONAL: validate against merged F7 contract -->

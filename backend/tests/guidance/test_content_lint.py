@@ -12,6 +12,8 @@ from revel.guidance.operations import (
     PROVISIONAL_OPERATIONS,
 )
 
+from .test_discovery_f5 import F5_VOCABULARY
+
 DOC_NAMES = list(documents())
 BACKTICK = re.compile(r"`([^`\n]+)`")
 HTTP_ROUTE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE) (/\S*)$")
@@ -89,6 +91,7 @@ ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS)
 DOC_NAME_TOKENS = frozenset(DOC_NAMES)
 
 
+API_PATH = re.compile(r"/api/[^\s`|]*")
 PROVISIONAL_PATTERNS = {
     op: re.compile(rf"(?<![\w/]){re.escape(op)}(?![\w/])") for op in PROVISIONAL_OPERATIONS
 }
@@ -103,19 +106,26 @@ def unknown_tokens(text: str) -> list[str]:
                 if token not in IMPLEMENTED_HTTP and token not in PROVISIONAL_OPERATIONS:
                     found.append(f"{number}: route {token!r}")
             elif IDENT.match(token) and token not in (
-                ALL_OPERATIONS | FIELDS_AND_VALUES | DOC_NAME_TOKENS
+                ALL_OPERATIONS | FIELDS_AND_VALUES | DOC_NAME_TOKENS | F5_VOCABULARY
             ):
                 found.append(f"{number}: {token!r}")
     return found
 
 
 def unmarked_provisional(text: str) -> list[str]:
-    """Lines mentioning a provisional operation (or an /api/ route) without the marker."""
+    """Lines mentioning a provisional operation, or an /api/ path that is not implemented,
+    without the marker."""
     found = []
     for number, line in enumerate(text.split("\n"), start=1):
         mentioned = [op for op, p in PROVISIONAL_PATTERNS.items() if p.search(line)]
-        if (mentioned or "/api/" in line) and PROVISIONAL_MARKER not in line:
-            found.append(f"{number}: {mentioned or '/api/ route'}")
+        unlisted_api = [
+            path
+            for path in API_PATH.findall(line)
+            if not any(route.endswith(" " + path) for route in IMPLEMENTED_HTTP)
+            and path != "/api/v1/profile"
+        ]
+        if (mentioned or unlisted_api) and PROVISIONAL_MARKER not in line:
+            found.append(f"{number}: {mentioned or unlisted_api}")
     return found
 
 
@@ -132,9 +142,11 @@ def test_provisional_operations_are_marked(name: str) -> None:
 
 
 def test_lint_catches_violations() -> None:
-    assert unmarked_provisional("Call `add_facts` now.") == ["1: ['add_facts']"]
-    assert unmarked_provisional("Call `add_facts`. <!-- PROVISIONAL: x -->") == []
-    assert unmarked_provisional("Use `GET /api/v1/x`.") == ["1: /api/ route"]
+    assert unmarked_provisional("Call `get_updates` now.") == ["1: ['get_updates']"]
+    assert unmarked_provisional("Call `get_updates`. <!-- PROVISIONAL: x -->") == []
+    assert unmarked_provisional("Use `GET /api/v1/x`.") == ["1: ['/api/v1/x']"]
+    assert unmarked_provisional("Use `GET /api/v1/profile/policy`.") == []
+    assert unmarked_provisional("Call `add_facts`.") == []
     assert unmarked_provisional("Call `whoami`.") == []
     assert unknown_tokens("Call `delete_everything`.") == ["1: 'delete_everything'"]
     assert unknown_tokens("Call `POST /api/v1/secret`.") == ["1: route 'POST /api/v1/secret'"]
@@ -189,3 +201,19 @@ def test_no_forbidden_content(name: str) -> None:
     # Only the placeholder form of a bearer credential may appear.
     for match in re.finditer(r"Bearer\s+(\S+)", text):
         assert match.group(1).startswith(("<access", "error=")), f"{name}: {match.group(0)}"
+
+
+def test_no_stale_f5_markers() -> None:
+    # F5 #9 is merged: its operations are live and must not be marked provisional any more.
+    for name in DOC_NAMES:
+        assert "validate against merged F5 contract" not in documents()[name].body, name
+
+
+@pytest.mark.anyio
+async def test_implemented_tools_are_registered() -> None:
+    from revel.mcp.server import create_mcp_server
+    from revel.settings import Settings
+
+    settings = Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    registered = {t.name for t in await create_mcp_server(settings).list_tools()}
+    assert registered >= IMPLEMENTED_MCP_TOOLS

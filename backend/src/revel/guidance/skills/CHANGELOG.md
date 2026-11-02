@@ -1,11 +1,24 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.2.1
+version: 0.3.0
 status: draft
 ---
 
 # Revel agent guidance changelog
+
+## 0.3.0 (2026-11-02)
+
+- F5 profile tools are live: `get_contribution_policy`, `add_facts`, `get_my_profile`,
+  `set_fact_audience` and `remove_fact`, plus their `/api/v1/profile` routes.
+  `revel-profile-discovery` is now `active` and matches F5's merged contract: category ids,
+  enums, `involves_others`, the `sensitive` category, outcomes and reason codes. Its JSON
+  examples are checked against F5's input model and, with a database, the real service.
+- Discovery: `remove_fact` is not idempotent, so re-read the profile instead of retrying;
+  HTTP returns `422` for structural errors and `400` for semantic ones.
+- Index: "What works today" and the route catalog list the live profile operations.
+  Connections, shared profiles and questions remain planned (PROVISIONAL), and the other three
+  skills remain drafts.
 
 ## 0.2.1 (draft, 2026-11-02)
 

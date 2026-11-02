@@ -7,30 +7,36 @@ to the implemented sets only after its owning contract is merged and the operati
 
 PROVISIONAL_MARKER = "<!-- PROVISIONAL"
 
-IMPLEMENTED_MCP_TOOLS = frozenset({"ping", "whoami"})
+IMPLEMENTED_MCP_TOOLS = frozenset(
+    {
+        "ping",
+        "whoami",
+        # F5 #9, merged (PR #25, 763c4e5): docs/contracts/f5-profiles.md
+        "get_contribution_policy",
+        "add_facts",
+        "get_my_profile",
+        "set_fact_audience",
+        "remove_fact",
+    }
+)
 IMPLEMENTED_HTTP = frozenset(
     {
         "GET /.well-known/oauth-protected-resource",
         "GET /.well-known/oauth-protected-resource/mcp",
         "GET /guidance",
         "GET /openapi.json",
+        # F5 #9, merged
+        "GET /api/v1/profile/policy",
+        "POST /api/v1/profile/facts",
+        "GET /api/v1/profile",
+        "GET /api/v1/profile/summary",
+        "PATCH /api/v1/profile/facts/{id}/audience",
+        "DELETE /api/v1/profile/facts/{id}",
     }
 )
 
 # Operation -> owning feature. None of these are merged yet.
 PROVISIONAL_OPERATIONS: dict[str, str] = {
-    # F5 #9: docs/contracts/f5-profiles.md v1 (provisional)
-    "get_contribution_policy": "F5",
-    "add_facts": "F5",
-    "get_my_profile": "F5",
-    "set_fact_audience": "F5",
-    "remove_fact": "F5",
-    "GET /api/v1/profile/policy": "F5",
-    "POST /api/v1/profile/facts": "F5",
-    "GET /api/v1/profile": "F5",
-    "GET /api/v1/profile/summary": "F5",
-    "PATCH /api/v1/profile/facts/{id}/audience": "F5",
-    "DELETE /api/v1/profile/facts/{id}": "F5",
     # F5 follow-up (get_profile) and F6 #15 (PR #23 @ 93da408, in review)
     "get_profile": "F5/F6",
     "set_handle": "F6",

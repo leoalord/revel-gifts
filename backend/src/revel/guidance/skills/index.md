@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.2.1
+version: 0.3.0
 status: draft
 ---
 
@@ -16,12 +16,14 @@ and can ask surprise-safe questions.
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
 - MCP tools: `ping` (connectivity check) and `whoami` (which Revel user and assistant you are
   connected as).
+- Your user's own profile: `get_contribution_policy`, `add_facts`, `get_my_profile`,
+  `set_fact_audience` and `remove_fact` (see `revel-profile-discovery`).
 - This guidance: as MCP prompts and resources (`revel://guidance/<name>`) and as Markdown at
   `https://api.revel.gifts/guidance`.
 - API reference: `https://api.revel.gifts/openapi.json`.
 
-Everything else below is **planned, not yet available**. Profiles, connections and questions
-cannot be used yet. Do not tell your user they were saved or sent.
+Connections, reading other people's profiles and questions are **planned, not yet available**.
+Do not tell your user a request or question was sent. Use only the tools in your tool list.
 
 ## Connecting (MCP OAuth)
 
@@ -57,16 +59,25 @@ the same name. Changes are listed in `https://api.revel.gifts/guidance/CHANGELOG
 
 ## Route catalog
 
+Live now (your user's own profile; MCP tool and HTTP route):
+
+| Purpose | MCP tool | HTTP |
+| --- | --- | --- |
+| Read categories and the owner's contribution policy | `get_contribution_policy` | `GET /api/v1/profile/policy` |
+| Contribute facts (and corrections with `supersedes_id`) | `add_facts` | `POST /api/v1/profile/facts` |
+| Read your user's own profile and summary | `get_my_profile` | `GET /api/v1/profile` |
+| Contribution summary | (in `get_my_profile`) | `GET /api/v1/profile/summary` |
+| Narrow a fact's audience | `set_fact_audience` | `PATCH /api/v1/profile/facts/{id}/audience` |
+| Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{id}` |
+
+The HTTP routes take a bearer token, but how assistants obtain one for the HTTP API is not
+decided yet; use MCP. HTTP returns `422` for structural problems and `400` for semantic field
+errors.
+
 Planned, not yet available. Names and paths may change before release.
 
 | Purpose | MCP tool | HTTP (bearer) |
 | --- | --- | --- |
-| Read categories and the owner's contribution policy | `get_contribution_policy` <!-- PROVISIONAL: validate against merged F5 contract --> | `GET /api/v1/profile/policy` <!-- PROVISIONAL: validate against merged F5 contract --> |
-| Contribute facts (and corrections) | `add_facts` <!-- PROVISIONAL: validate against merged F5 contract --> | `POST /api/v1/profile/facts` <!-- PROVISIONAL: validate against merged F5 contract --> |
-| Read your own profile and summary | `get_my_profile` <!-- PROVISIONAL: validate against merged F5 contract --> | `GET /api/v1/profile` <!-- PROVISIONAL: validate against merged F5 contract --> |
-| Contribution summary | (in `get_my_profile`) <!-- PROVISIONAL: validate against merged F5 contract --> | `GET /api/v1/profile/summary` <!-- PROVISIONAL: validate against merged F5 contract --> |
-| Narrow a fact's audience | `set_fact_audience` <!-- PROVISIONAL: validate against merged F5 contract --> | `PATCH /api/v1/profile/facts/{id}/audience` <!-- PROVISIONAL: validate against merged F5 contract --> |
-| Remove a fact | `remove_fact` <!-- PROVISIONAL: validate against merged F5 contract --> | `DELETE /api/v1/profile/facts/{id}` <!-- PROVISIONAL: validate against merged F5 contract --> |
 | Set your user's handle and discoverability | `set_handle` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
 | Request a connection by exact handle | `request_connection` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
 | List incoming or outgoing requests | `list_connection_requests` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
@@ -81,6 +92,5 @@ Planned, not yet available. Names and paths may change before release.
 | Report that you asked your user | `report_user_contact` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 | Answer a question | `submit_answer` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
 
-How to authenticate to the planned HTTP API is not decided yet.
 Agents can never change the owner's contribution policy, widen an audience or approve
 pending items; owners do that in the Revel website.
