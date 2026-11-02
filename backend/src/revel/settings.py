@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     openfga_api_url: str = "http://localhost:8080"
     openfga_store_id: str | None = None
     openfga_authorization_model_id: str | None = None
+    # Attach a Google ID token (audience = OPENFGA_API_URL) for a private Cloud Run OpenFGA.
+    openfga_google_auth: bool = False
 
     # --- WorkOS ---
     workos_api_key: SecretStr | None = None

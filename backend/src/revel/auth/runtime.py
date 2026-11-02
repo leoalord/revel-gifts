@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 from fastapi import Request
 
+from revel.auth.browser import BrowserAuthConfig, BrowserSessionManager
 from revel.auth.config import AuthConfig
 from revel.auth.hooks import AuthzHooks
 from revel.auth.identity import IdentityResolver
@@ -38,12 +39,18 @@ class AuthRuntime:
     verifier: WorkOSTokenVerifier
     resolver: IdentityResolver | None
     http_client: httpx.AsyncClient | None = None
+    browser: BrowserSessionManager | None = None
     _as_metadata: dict[str, Any] | None = field(default=None, repr=False)
     _as_metadata_at: float = field(default=0.0, repr=False)
 
     @property
     def repository(self) -> IdentityRepository:
         return self.require_resolver().repository
+
+    def require_browser(self) -> BrowserSessionManager:
+        if self.browser is None:
+            raise AuthNotConfigured("browser sessions are not configured")
+        return self.browser
 
     def require_resolver(self) -> IdentityResolver:
         if self.resolver is None:
@@ -126,8 +133,15 @@ def configure_auth(
         if repository is not None
         else None
     )
+    browser = BrowserSessionManager(
+        BrowserAuthConfig.from_settings(settings), http_client=http_client
+    )
     runtime = AuthRuntime(
-        config=config, verifier=verifier, resolver=resolver, http_client=http_client
+        config=config,
+        verifier=verifier,
+        resolver=resolver,
+        http_client=http_client,
+        browser=browser,
     )
     _runtimes[id(settings)] = (settings, runtime)
     return runtime

@@ -1,0 +1,23 @@
+# Revel Gifts authorization model v1.
+# Traces to "Authorization granularity" (rooms and keys) on the main project page:
+# https://app.notion.com/p/4092bade7f31805191e7c4c884960908
+# OpenFGA stores relationships only; claim audience filtering happens in PostgreSQL.
+# Object IDs: user:<users.id>; agent:<agent_delegations.id> (one object per user and
+# OAuth client pair, never the global agents.id); profile:<profiles.id>.
+# v2 extends this model additively; do not rename v1 types or relations.
+model
+  schema 1.1
+
+type user
+
+type agent
+  relations
+    define acts_for: [user]
+
+type profile
+  relations
+    define owner: [user]
+    # Written when the owner connects an agent; deleted on disconnect.
+    define owner_agent: [agent]
+    define contribute: owner or owner_agent
+    define view_only_me: owner or owner_agent

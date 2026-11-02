@@ -37,6 +37,11 @@ variable "workos_authkit_domain" {
     condition     = var.workos_authkit_domain == "" || can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$", var.workos_authkit_domain))
     error_message = "workos_authkit_domain must be empty or an https URL with a hostname only (no path, query or fragment), e.g. https://example-tenant.authkit.app."
   }
+
+  validation {
+    condition     = !strcontains(lower(var.workos_authkit_domain), "replace-with")
+    error_message = "workos_authkit_domain still contains the example placeholder (replace-with-...). Set the real AuthKit domain from the WorkOS dashboard, or leave it empty."
+  }
 }
 
 variable "workos_client_id" {
@@ -47,6 +52,11 @@ variable "workos_client_id" {
   validation {
     condition     = var.workos_client_id == "" || can(regex("^[A-Za-z0-9_]+$", var.workos_client_id))
     error_message = "workos_client_id must be empty or a WorkOS client ID (letters, digits and underscores), e.g. client_01ABC."
+  }
+
+  validation {
+    condition     = !strcontains(lower(var.workos_client_id), "replace-with")
+    error_message = "workos_client_id still contains the example placeholder (replace-with-...). Set the real WorkOS client ID, or leave it empty."
   }
 }
 

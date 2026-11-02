@@ -1,0 +1,179 @@
+name: Revel Gifts authorization model v1
+model_file: ../model.fga
+# agent:<id> is an agent_delegations.id (one per user and OAuth client pair).
+
+tests:
+  - name: owner and connected agent
+    description: Owner and the owner's connected agent can use the profile; other users and their agents cannot.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-claude
+      - user: agent:deleg-alex-claude
+        relation: owner_agent
+        object: profile:alex
+      - user: user:bob
+        relation: owner
+        object: profile:bob
+      - user: user:bob
+        relation: acts_for
+        object: agent:deleg-bob-claude
+      - user: agent:deleg-bob-claude
+        relation: owner_agent
+        object: profile:bob
+    check:
+      - user: user:alex
+        object: profile:alex
+        assertions:
+          owner: true
+          contribute: true
+          view_only_me: true
+      - user: agent:deleg-alex-claude
+        object: profile:alex
+        assertions:
+          owner_agent: true
+          contribute: true
+          view_only_me: true
+      - user: user:bob
+        object: profile:alex
+        assertions:
+          owner: false
+          contribute: false
+          view_only_me: false
+      - user: agent:deleg-bob-claude
+        object: profile:alex
+        assertions:
+          owner_agent: false
+          contribute: false
+          view_only_me: false
+    list_objects:
+      - user: user:alex
+        type: profile
+        assertions:
+          view_only_me:
+            - profile:alex
+          contribute:
+            - profile:alex
+      - user: agent:deleg-alex-claude
+        type: profile
+        assertions:
+          view_only_me:
+            - profile:alex
+          contribute:
+            - profile:alex
+      - user: agent:deleg-bob-claude
+        type: profile
+        assertions:
+          view_only_me:
+            - profile:bob
+
+  - name: two delegations of the same client
+    description: Alex and Sam both connect the same Muse client; each delegation is its own agent object, so Sam's cannot use Alex's profile.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-muse
+      - user: agent:deleg-alex-muse
+        relation: owner_agent
+        object: profile:alex
+      - user: user:sam
+        relation: owner
+        object: profile:sam
+      - user: user:sam
+        relation: acts_for
+        object: agent:deleg-sam-muse
+      - user: agent:deleg-sam-muse
+        relation: owner_agent
+        object: profile:sam
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          contribute: true
+          view_only_me: true
+      - user: agent:deleg-sam-muse
+        object: profile:alex
+        assertions:
+          owner_agent: false
+          contribute: false
+          view_only_me: false
+      - user: agent:deleg-sam-muse
+        object: profile:sam
+        assertions:
+          contribute: true
+          view_only_me: true
+    list_objects:
+      - user: agent:deleg-sam-muse
+        type: profile
+        assertions:
+          view_only_me:
+            - profile:sam
+          contribute:
+            - profile:sam
+
+  - name: agent disconnected
+    description: Without the owner_agent tuple (disconnect deletes it) the agent is denied even though acts_for remains; the owner keeps access.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-muse
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          owner_agent: false
+          contribute: false
+          view_only_me: false
+      - user: user:alex
+        object: profile:alex
+        assertions:
+          contribute: true
+          view_only_me: true
+    list_objects:
+      - user: agent:deleg-alex-muse
+        type: profile
+        assertions:
+          view_only_me: []
+          contribute: []
+
+  - name: owner_agent is scoped to one profile
+    description: An agent that acts_for alex but is owner_agent only of another profile cannot use alex's profile.
+    tuples:
+      - user: user:alex
+        relation: owner
+        object: profile:alex
+      - user: user:alex
+        relation: owner
+        object: profile:alex-other
+      - user: user:alex
+        relation: acts_for
+        object: agent:deleg-alex-muse
+      - user: agent:deleg-alex-muse
+        relation: owner_agent
+        object: profile:alex-other
+    check:
+      - user: agent:deleg-alex-muse
+        object: profile:alex
+        assertions:
+          contribute: false
+          view_only_me: false
+      - user: agent:deleg-alex-muse
+        object: profile:alex-other
+        assertions:
+          contribute: true
+          view_only_me: true
+    list_objects:
+      - user: agent:deleg-alex-muse
+        type: profile
+        assertions:
+          view_only_me:
+            - profile:alex-other
