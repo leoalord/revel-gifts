@@ -9,13 +9,11 @@ from uuid import UUID, uuid4
 
 import anyio
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from revel.app import create_app
 from revel.auth.repository import AgentRecord, DelegationRecord, OnCreated, UserRecord
 from revel.auth.runtime import AuthRuntime, reset_auth_runtimes
-from revel.mcp import identity_tools
 from revel.settings import Settings
 
 from .authkit import ISSUER, TestAuthKit
@@ -177,18 +175,9 @@ def make_token(auth_settings: Settings) -> TokenFactory:
     return factory
 
 
-def build_app(settings: Settings) -> FastAPI:
-    """F1's real ``create_app``; registers whoami only if ``create_mcp_server`` did not."""
-    app = create_app(settings)
-    server = app.state.mcp_server
-    if "whoami" not in {tool.name for tool in server._tool_manager.list_tools()}:
-        identity_tools.register(server, settings)
-    return app
-
-
 @pytest.fixture
 def auth_client(runtime: AuthRuntime, auth_settings: Settings) -> Iterator[TestClient]:
-    app = build_app(auth_settings)
+    app = create_app(auth_settings)
     # Entering the TestClient context runs the app lifespan (MCP session manager).
     with TestClient(app, base_url=PUBLIC_BASE_URL) as client:
         yield client

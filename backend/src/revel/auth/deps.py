@@ -91,6 +91,12 @@ CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
 async def principal_from_mcp_context(runtime: AuthRuntime) -> Principal:
     """Resolve the principal for the current MCP request.
 
+    **Every MCP tool that reads or writes user data must call this first** and act
+    only as the returned principal. The SDK middleware only verifies the token; it
+    does not check the delegation, so a disconnected assistant's still-valid token
+    passes it. This call is what rejects disconnected delegations (only data-free
+    tools such as ``ping`` may skip it).
+
     Raises :class:`ToolError` (returned to the client as a tool error) when the
     request is unauthenticated or the delegation is disconnected.
     """

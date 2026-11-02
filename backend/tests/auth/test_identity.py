@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from mcp.server.auth.provider import AccessToken
 
-from revel.auth.hooks import ModuleAuthzHooks
+from revel.auth.hooks import AuthzHookMissing, ModuleAuthzHooks
 from revel.auth.identity import DelegationDisconnected, IdentityResolver, Principal
 from revel.auth.runtime import AuthRuntime
 from revel.services.identity import whoami
@@ -27,13 +27,43 @@ def _token(sub: str = "user_alice", client_id: str = "client_muse") -> AccessTok
     )
 
 
-async def test_principal_invariant():
-    Principal(user_id=uuid4(), agent_id=None, delegation_id=None, via="ui")
-    Principal(user_id=uuid4(), agent_id=uuid4(), delegation_id=uuid4(), via="mcp")
+@pytest.mark.parametrize(
+    ("via", "agent", "delegation"),
+    [("ui", False, False), ("mcp", True, True), ("api", True, True)],
+)
+async def test_principal_valid_combinations(via, agent, delegation):
+    Principal(
+        user_id=uuid4(),
+        agent_id=uuid4() if agent else None,
+        delegation_id=uuid4() if delegation else None,
+        via=via,
+    )
+
+
+@pytest.mark.parametrize(
+    ("via", "agent", "delegation"),
+    [
+        ("mcp", False, False),  # bearer transport without a delegation
+        ("api", False, False),  # bearer transport without a delegation
+        ("ui", True, True),  # browser user acting directly must not carry an agent
+        ("mcp", True, False),  # partial: agent without delegation
+        ("api", False, True),  # partial: delegation without agent
+        ("ui", True, False),  # partial on ui
+    ],
+)
+async def test_principal_invalid_combinations(via, agent, delegation):
     with pytest.raises(ValueError):
-        Principal(user_id=uuid4(), agent_id=uuid4(), delegation_id=None, via="mcp")
+        Principal(
+            user_id=uuid4(),
+            agent_id=uuid4() if agent else None,
+            delegation_id=uuid4() if delegation else None,
+            via=via,
+        )
+
+
+async def test_principal_rejects_unknown_via():
     with pytest.raises(ValueError):
-        Principal(user_id=uuid4(), agent_id=None, delegation_id=uuid4(), via="api")
+        Principal(user_id=uuid4(), agent_id=None, delegation_id=None, via="cli")  # type: ignore[arg-type]
 
 
 async def test_first_call_creates_rows_and_calls_hooks_once(
@@ -184,6 +214,23 @@ async def test_module_hooks_noop_without_authz_module(monkeypatch):
     hooks = ModuleAuthzHooks()
     await hooks.on_user_created(user_id=uuid4())
     await hooks.on_agent_delegated(user_id=uuid4(), agent_id=uuid4(), delegation_id=uuid4())
+
+
+async def test_module_hooks_missing_function_fails_loud(monkeypatch):
+    module = types.ModuleType("partial_authz")
+
+    async def on_user_created(*, user_id):
+        return None
+
+    module.on_user_created = on_user_created  # on_agent_delegated deliberately missing
+    monkeypatch.setitem(sys.modules, "revel.auth._partial_authz_for_tests", module)
+    monkeypatch.setattr("revel.auth.hooks.AUTHZ_MODULE", "revel.auth._partial_authz_for_tests")
+
+    repo = InMemoryIdentityRepository()
+    with pytest.raises(AuthzHookMissing):
+        await IdentityResolver(repo).resolve(_token(), via="mcp")
+    # The delegation insert was rolled back, so a fixed hook gets another chance.
+    assert repo.delegations == {}
 
 
 async def test_module_hooks_call_authz_functions_keyword_only(monkeypatch):

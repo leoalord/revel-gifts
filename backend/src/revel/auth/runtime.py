@@ -76,22 +76,25 @@ class AuthRuntime:
 _runtimes: dict[int, tuple[Any, AuthRuntime]] = {}
 
 
-def _default_repository(settings: Any) -> IdentityRepository | None:
-    """Build the SQLAlchemy repository from ``settings.database_url`` (no connection yet)."""
-    url = getattr(settings, "database_url", None)
-    if hasattr(url, "get_secret_value"):
-        url = url.get_secret_value()
-    if not url:
-        logger.warning("No database_url configured; identity resolution unavailable")
-        return None
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+def _default_repository(settings: Any) -> IdentityRepository:
+    """SQLAlchemy repository over F3's ``revel.db.session`` (resolved lazily, on first use).
 
-    url = str(url)
-    if url.startswith(("postgresql://", "postgres://")):
-        url = "postgresql+psycopg://" + url.split("://", 1)[1]
-    engine = create_engine(url, pool_pre_ping=True)
-    return SqlAlchemyIdentityRepository(sessionmaker(engine, expire_on_commit=False))
+    The process settings use F3's shared engine/sessionmaker. A different settings
+    object (e.g. ``create_app(custom_settings)``) gets its own engine built by F3's
+    ``create_db_engine`` from that object's ``database_url``.
+    """
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from revel.db.session import create_db_engine, get_sessionmaker
+    from revel.settings import get_settings
+
+    def provider() -> sessionmaker[Session]:
+        if settings is get_settings():
+            return get_sessionmaker()
+        engine = create_db_engine(settings.database_url)
+        return sessionmaker(bind=engine, expire_on_commit=False)
+
+    return SqlAlchemyIdentityRepository(provider)
 
 
 def configure_auth(

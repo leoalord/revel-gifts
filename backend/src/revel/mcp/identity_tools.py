@@ -1,4 +1,10 @@
-"""MCP identity tools (F2). Registered by ``revel.mcp.server.create_mcp_server``."""
+"""MCP identity tools (F2). Registered by ``revel.mcp.server.create_mcp_server``.
+
+Pattern for every data-bearing MCP tool: resolve the caller with
+``revel.auth.deps.principal_from_mcp_context(runtime_for(settings))`` before doing
+anything else; the SDK's bearer middleware alone does not reject disconnected
+delegations.
+"""
 
 from __future__ import annotations
 

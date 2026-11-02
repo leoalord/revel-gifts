@@ -45,6 +45,9 @@ async def protected_resource_metadata_mcp(runtime: Runtime) -> dict[str, Any]:
 @router.get("/.well-known/oauth-authorization-server", include_in_schema=False)
 async def authorization_server_metadata(runtime: Runtime) -> dict[str, Any]:
     """AuthKit's metadata, for clients that skip protected-resource discovery."""
+    # WorkOS recommends serving this for older MCP clients. Caveat: the document's
+    # ``issuer`` is the AuthKit domain, not this origin, so strictly RFC 8414-validating
+    # clients will reject it and must use protected-resource metadata (RFC 9728) instead.
     try:
         return await runtime.authorization_server_metadata()
     except AuthNotConfigured:

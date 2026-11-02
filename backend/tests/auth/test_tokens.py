@@ -164,8 +164,57 @@ async def test_jwks_unavailable_fails_closed(auth_settings, make_token):
         assert await _rejected(verifier, make_token()) == "jwks_unavailable"
 
 
+async def test_jwks_outage_backs_off_and_serves_cached_keys(make_token):
+    """After a failed refresh, at most one fetch per interval; cached keys keep working."""
+    state = {"up": True, "requests": 0}
+    published = TestAuthKit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state["requests"] += 1
+        if not state["up"]:
+            return httpx.Response(503)
+        return published.handler(request)
+
+    config = AuthConfig.from_settings(TestAuthKit.settings())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        # ttl=0: every request finds the cache stale and would refetch without backoff.
+        jwks = JWKSCache(config.jwks_url, http_client=http, ttl_seconds=0)
+        verifier = WorkOSTokenVerifier(config, jwks=jwks)
+        assert await verifier.verify_token(make_token()) is not None
+        assert state["requests"] == 1
+
+        state["up"] = False
+        for _ in range(6):
+            assert await verifier.verify_token(make_token()) is not None  # cached key
+        assert state["requests"] == 2  # one failed refetch, then backoff
+
+        # Unknown kid during backoff fails closed without another fetch.
+        token = make_token(key=rsa_key("other"), kid="kid-new")
+        assert await _rejected(verifier, token) == "jwks_unavailable"
+        assert state["requests"] == 2
+
+
+async def test_jwks_non_object_body_fails_closed(make_token):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"kty": "RSA"}])
+
+    config = AuthConfig.from_settings(TestAuthKit.settings())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        verifier = WorkOSTokenVerifier(config, jwks=JWKSCache(config.jwks_url, http_client=http))
+        assert await _rejected(verifier, make_token()) == "jwks_unavailable"
+
+
 @pytest.mark.parametrize(
-    "domain", [None, "", "  ", "<your-authkit-domain>", "placeholder.authkit.app"]
+    "domain",
+    [
+        None,
+        "",
+        "  ",
+        "<your-authkit-domain>",
+        "replace-with-authkit-domain",
+        "changeme",
+        "TODO",
+    ],
 )
 async def test_unconfigured_domain_fails_closed(domain, make_token):
     config = AuthConfig.from_settings(TestAuthKit.settings(workos_authkit_domain=domain))
@@ -175,16 +224,34 @@ async def test_unconfigured_domain_fails_closed(domain, make_token):
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    "domain", ["todo-gifts.authkit.app", "your-tenant.authkit.app", "placeholder-co.authkit.app"]
+)
+async def test_real_domains_containing_placeholder_words_accepted(domain):
+    assert AuthConfig.from_settings(TestAuthKit.settings(workos_authkit_domain=domain)).configured
+
+
+@pytest.mark.parametrize(
+    ("raw", "allow_local", "expected"),
     [
-        ("tenant.authkit.app", "https://tenant.authkit.app"),
-        ("https://tenant.authkit.app/", "https://tenant.authkit.app"),
-        ("http://tenant.authkit.app", None),
-        ("http://localhost:9000", "http://localhost:9000"),
+        ("tenant.authkit.app", False, "https://tenant.authkit.app"),
+        ("https://tenant.authkit.app/", False, "https://tenant.authkit.app"),
+        ("http://tenant.authkit.app", True, None),
+        ("http://localhost:9000", False, None),
+        ("http://localhost:9000", True, "http://localhost:9000"),
     ],
 )
-async def test_normalize_authkit_issuer(raw, expected):
-    assert normalize_authkit_issuer(raw) == expected
+async def test_normalize_authkit_issuer(raw, allow_local, expected):
+    assert normalize_authkit_issuer(raw, allow_http_localhost=allow_local) == expected
+
+
+@pytest.mark.parametrize(("app_env", "allowed"), [("production", False), ("development", True)])
+async def test_http_localhost_issuer_only_in_dev(app_env, allowed):
+    settings = TestAuthKit.settings(
+        app_env=app_env,
+        public_base_url="https://api.revel.test",
+        workos_authkit_domain="http://localhost:9000",
+    )
+    assert AuthConfig.from_settings(settings).configured is allowed
 
 
 async def test_rejection_logs_category_only(verifier, make_token, caplog):

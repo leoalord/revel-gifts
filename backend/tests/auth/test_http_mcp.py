@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp.server.mcpserver import MCPServer
 
+from revel.app import create_app
 from revel.auth.mcp_auth import mcp_auth_kwargs
 from revel.auth.runtime import AuthRuntime
 from revel.mcp.server import build_mcp_asgi_app
@@ -81,9 +82,7 @@ def test_served_prm_is_ours_and_matches_sdk(runtime: AuthRuntime, auth_settings:
     with TestClient(sdk_app, base_url="http://localhost:8000") as sdk_client:
         sdk_prm = sdk_client.get("/.well-known/oauth-protected-resource/mcp").json()
 
-    from .conftest import build_app
-
-    with TestClient(build_app(auth_settings), base_url="http://localhost:8000") as client:
+    with TestClient(create_app(auth_settings), base_url="http://localhost:8000") as client:
         ours = client.get("/.well-known/oauth-protected-resource/mcp").json()
 
     assert ours["resource_name"] == "Revel Gifts"  # only our route sets this

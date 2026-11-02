@@ -34,7 +34,12 @@ class TokenRejected(Exception):
 
 
 class JWKSCache:
-    """Async JWKS fetcher with TTL and rate-limited refresh on unknown ``kid``."""
+    """Async JWKS fetcher with TTL and rate-limited refresh on unknown ``kid``.
+
+    After a failed fetch it waits ``min_refresh_interval_seconds`` before trying again,
+    serving any previously cached keys meanwhile, so an AuthKit outage does not turn
+    into one serialized fetch (and timeout) per request.
+    """
 
     def __init__(
         self,
@@ -53,6 +58,7 @@ class JWKSCache:
         self._keys: dict[str, jwt.PyJWK] = {}
         self._fetched_at: float | None = None
         self._forced_refresh_at: float | None = None
+        self._failed_at: float | None = None
         self._lock = asyncio.Lock()
         self.fetch_count = 0
 
@@ -66,6 +72,11 @@ class JWKSCache:
             or time.monotonic() - self._forced_refresh_at >= self._min_refresh
         )
 
+    def _in_failure_backoff(self) -> bool:
+        return (
+            self._failed_at is not None and time.monotonic() - self._failed_at < self._min_refresh
+        )
+
     async def _fetch(self) -> None:
         self.fetch_count += 1
         if self._client is not None:
@@ -74,8 +85,11 @@ class JWKSCache:
             async with httpx.AsyncClient() as client:
                 response = await client.get(self._url, timeout=self._timeout)
         response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("keys", []), list):
+            raise ValueError("JWKS document is not an object with a keys list")
         keys: dict[str, jwt.PyJWK] = {}
-        for jwk in response.json().get("keys", []):
+        for jwk in body.get("keys", []):
             if not isinstance(jwk, dict) or jwk.get("kty") != "RSA" or not jwk.get("kid"):
                 continue
             if jwk.get("use", "sig") != "sig":
@@ -86,18 +100,24 @@ class JWKSCache:
                 continue
         self._keys = keys
         self._fetched_at = time.monotonic()
+        self._failed_at = None
 
     async def get_key(self, kid: str) -> jwt.PyJWK:
         async with self._lock:
             stale = self._stale()
             forced = not stale and kid not in self._keys and self._may_force_refresh()
-            if stale or forced:
+            if (stale or forced) and self._in_failure_backoff():
+                # Recent fetch failure: don't refetch yet; use cached keys if any.
+                if kid not in self._keys:
+                    raise TokenRejected("jwks_unavailable")
+            elif stale or forced:
                 if forced:
                     self._forced_refresh_at = time.monotonic()
                 try:
                     await self._fetch()
                 except (httpx.HTTPError, ValueError) as exc:
                     # Keep any previously cached keys; fail only if the kid is unknown.
+                    self._failed_at = time.monotonic()
                     logger.warning("JWKS fetch failed: %s", type(exc).__name__)
                     if kid not in self._keys:
                         raise TokenRejected("jwks_unavailable") from None

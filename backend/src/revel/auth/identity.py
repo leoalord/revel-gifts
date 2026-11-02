@@ -38,10 +38,17 @@ class Principal:
     via: Via
 
     def __post_init__(self) -> None:
-        if (self.agent_id is None) != (self.delegation_id is None):
-            raise ValueError("agent_id and delegation_id must both be set or both be None")
         if self.via not in ("mcp", "api", "ui"):
             raise ValueError("invalid via")
+        if (self.agent_id is None) != (self.delegation_id is None):
+            raise ValueError("agent_id and delegation_id must both be set or both be None")
+        has_agent = self.agent_id is not None
+        # Bearer-token transports always act through an assistant delegation; the
+        # browser UI is the user acting directly.
+        if self.via in ("mcp", "api") and not has_agent:
+            raise ValueError(f"via={self.via!r} requires agent_id and delegation_id")
+        if self.via == "ui" and has_agent:
+            raise ValueError("via='ui' must not carry agent_id or delegation_id")
 
 
 class IdentityError(Exception):

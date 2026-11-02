@@ -1,103 +1,66 @@
-"""SqlAlchemyIdentityRepository against real PostgreSQL.
+"""SqlAlchemyIdentityRepository against real PostgreSQL with F3's Alembic migrations.
 
 Runs only when ``REVEL_TEST_DATABASE_URL`` points at a disposable PostgreSQL
-database (e.g. ``postgresql+psycopg://postgres@127.0.0.1:55432/revel_test``).
-Until F3's models (#3) merge, it uses test-local stand-in tables matching the
-agreed schema; after #3 it should switch to ``revel.db.models`` + migrations.
+database (see backend/README.md "Database migrations"). The database is reset to
+Alembic base and upgraded to head once per session; tables are truncated per test.
 """
 
 from __future__ import annotations
 
 import asyncio
-import enum
 import os
-import uuid
-from datetime import datetime
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
-from sqlalchemy import (
-    DateTime,
-    Enum,
-    ForeignKey,
-    String,
-    UniqueConstraint,
-    create_engine,
-    func,
-    update,
-)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from mcp.server.auth.provider import AccessToken
+from sqlalchemy import Engine, create_engine, func, pool, select, text, update
+from sqlalchemy.orm import sessionmaker
 
 from revel.auth.identity import DelegationDisconnected, IdentityResolver
 from revel.auth.repository import SqlAlchemyIdentityRepository
+from revel.db.enums import DelegationStatus
+from revel.db.models import AgentDelegation, User
 
 from .conftest import RecordingHooks
 
 DATABASE_URL = os.environ.get("REVEL_TEST_DATABASE_URL")
+ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+
 pytestmark = [
     pytest.mark.anyio,
     pytest.mark.skipif(not DATABASE_URL, reason="REVEL_TEST_DATABASE_URL not set"),
 ]
 
 
-class Base(DeclarativeBase):
-    pass
+@pytest.fixture(scope="module")
+def migrated_engine() -> Iterator[Engine]:
+    from alembic import command
+    from alembic.config import Config
 
-
-class DelegationStatus(enum.StrEnum):
-    active = "active"
-    disconnected = "disconnected"
-
-
-class User(Base):
-    __tablename__ = "f2_test_users"
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    workos_user_id: Mapped[str] = mapped_column(String, unique=True)
-    email: Mapped[str | None]
-    display_name: Mapped[str | None]
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class Agent(Base):
-    __tablename__ = "f2_test_agents"
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    oauth_client_id: Mapped[str] = mapped_column(String, unique=True)
-    name: Mapped[str | None]
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class AgentDelegation(Base):
-    __tablename__ = "f2_test_agent_delegations"
-    __table_args__ = (UniqueConstraint("user_id", "agent_id"),)
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("f2_test_users.id"))
-    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("f2_test_agents.id"))
-    status: Mapped[DelegationStatus] = mapped_column(
-        Enum(DelegationStatus, name="f2_test_delegation_status"), default=DelegationStatus.active
-    )
-    connected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-MODELS = (User, Agent, AgentDelegation, DelegationStatus)
+    engine = create_engine(DATABASE_URL, poolclass=pool.NullPool)
+    for action, target in ((command.downgrade, "base"), (command.upgrade, "head")):
+        config = Config(str(ALEMBIC_INI))
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            action(config, target)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture
-def sql_repo():
-    engine = create_engine(DATABASE_URL)
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    yield SqlAlchemyIdentityRepository(sessionmaker(engine, expire_on_commit=False), models=MODELS)
-    Base.metadata.drop_all(engine)
-    engine.dispose()
+def sql_repo(migrated_engine: Engine) -> SqlAlchemyIdentityRepository:
+    with migrated_engine.begin() as conn:
+        conn.execute(text("TRUNCATE agent_delegations, agents, users"))
+    # Pooled engine so concurrent worker threads get separate connections.
+    engine = create_engine(DATABASE_URL, pool_size=10)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    return SqlAlchemyIdentityRepository(lambda: factory)
 
 
-def _token(sub="user_alice", client_id="client_muse"):
-    from mcp.server.auth.provider import AccessToken
-
+def _token(sub: str = "user_alice", client_id: str = "client_muse") -> AccessToken:
     return AccessToken(
         token="opaque", client_id=client_id, scopes=[], subject=sub, claims={"iss": "x"}
     )
@@ -116,7 +79,8 @@ async def test_insert_if_absent_and_hooks_once(sql_repo):
     assert [name for name, _ in hooks.calls] == ["on_user_created", "on_agent_delegated"]
 
     bob = await resolver.resolve(_token(sub="user_bob"), via="mcp")
-    assert bob.agent_id == first.agent_id and bob.delegation_id != first.delegation_id
+    assert bob.agent_id == first.agent_id
+    assert bob.delegation_id != first.delegation_id
 
 
 async def test_concurrent_first_calls_create_once(sql_repo):
@@ -131,17 +95,23 @@ async def test_disconnected_delegation_stays_disconnected(sql_repo):
     hooks = RecordingHooks()
     resolver = IdentityResolver(sql_repo, hooks=hooks)
     principal = await resolver.resolve(_token(), via="mcp")
-    with sql_repo._session_factory() as session, session.begin():
+    with sql_repo._session() as session, session.begin():
         session.execute(
             update(AgentDelegation)
             .where(AgentDelegation.id == principal.delegation_id)
-            .values(status=DelegationStatus.disconnected, disconnected_at=func.now())
+            .values(
+                status=DelegationStatus.DISCONNECTED.value,
+                disconnected_at=func.now(),
+                updated_at=func.now(),
+            )
         )
     with pytest.raises(DelegationDisconnected):
         await resolver.resolve(_token(), via="mcp")
-    with sql_repo._session_factory() as session:
-        row = session.get(AgentDelegation, principal.delegation_id)
-        assert row.status == DelegationStatus.disconnected
+    with sql_repo._session() as session:
+        rows = session.execute(select(AgentDelegation)).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].status == DelegationStatus.DISCONNECTED.value
+        assert rows[0].disconnected_at is not None
     assert len(hooks.calls) == 2
 
 
@@ -154,3 +124,24 @@ async def test_hook_failure_rolls_back_insert(sql_repo):
     assert await sql_repo.get_user_by_workos_id("user_alice") is None
     await resolver.resolve(_token(), via="mcp")
     assert await sql_repo.get_user_by_workos_id("user_alice") is not None
+
+
+async def test_existing_rows_take_read_only_path(sql_repo, monkeypatch):
+    resolver = IdentityResolver(sql_repo, hooks=RecordingHooks())
+    await resolver.resolve(_token(), via="mcp")
+
+    def no_insert(*args, **kwargs):
+        raise AssertionError("insert path used for existing rows")
+
+    # The insert path is the only place that opens a write transaction (session.begin()).
+    real_session = sql_repo._session
+
+    def guarded_session():
+        session = real_session()
+        session.begin = no_insert  # type: ignore[method-assign]
+        return session
+
+    monkeypatch.setattr(sql_repo, "_session", guarded_session)
+    principal = await resolver.resolve(_token(), via="api")
+    with real_session() as session:
+        assert session.get(User, principal.user_id) is not None
