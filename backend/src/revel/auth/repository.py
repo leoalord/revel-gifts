@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
 from uuid import UUID
 
 import anyio
 import anyio.from_thread
 import anyio.to_thread
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -52,6 +53,18 @@ class DelegationRecord:
     user_id: UUID
     agent_id: UUID
     status: DelegationStatusValue
+
+
+@dataclass(frozen=True)
+class DelegationView:
+    """A delegation joined with its agent, for listing a user's connected assistants."""
+
+    id: UUID
+    user_id: UUID
+    status: DelegationStatusValue
+    connected_at: datetime
+    disconnected_at: datetime | None
+    agent: AgentRecord
 
 
 R = TypeVar("R")
@@ -93,6 +106,12 @@ class IdentityRepository(Protocol):
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None: ...
 
+    async def list_delegations_for_user(self, user_id: UUID) -> list[DelegationView]: ...
+
+    async def get_delegation_view(
+        self, user_id: UUID, delegation_id: UUID
+    ) -> DelegationView | None: ...
+
 
 def _status_value(status: Any) -> DelegationStatusValue:
     value = getattr(status, "value", status)
@@ -117,6 +136,17 @@ def _agent(row: Agent) -> AgentRecord:
 def _delegation(row: AgentDelegation) -> DelegationRecord:
     return DelegationRecord(
         id=row.id, user_id=row.user_id, agent_id=row.agent_id, status=_status_value(row.status)
+    )
+
+
+def _delegation_view(row: AgentDelegation, agent: Agent) -> DelegationView:
+    return DelegationView(
+        id=row.id,
+        user_id=row.user_id,
+        status=_status_value(row.status),
+        connected_at=row.connected_at,
+        disconnected_at=row.disconnected_at,
+        agent=_agent(agent),
     )
 
 
@@ -186,6 +216,35 @@ class SqlAlchemyIdentityRepository:
                 )
             ).scalar_one_or_none()
             return _delegation(row) if row is not None else None
+
+    def _delegation_views(
+        self, user_id: UUID, delegation_id: UUID | None = None
+    ) -> list[DelegationView]:
+        with self._session() as session, session.begin():
+            session.execute(text("SET TRANSACTION READ ONLY"))
+            stmt = (
+                select(AgentDelegation, Agent)
+                .join(Agent, Agent.id == AgentDelegation.agent_id)
+                .where(AgentDelegation.user_id == user_id)
+                .order_by(AgentDelegation.connected_at.desc(), AgentDelegation.id.desc())
+            )
+            if delegation_id is not None:
+                stmt = stmt.where(AgentDelegation.id == delegation_id)
+            return [_delegation_view(row, agent) for row, agent in session.execute(stmt).all()]
+
+    def _get_delegation_view(self, user_id: UUID, delegation_id: UUID) -> DelegationView | None:
+        views = self._delegation_views(user_id, delegation_id)
+        return views[0] if views else None
+
+    async def list_delegations_for_user(self, user_id: UUID) -> list[DelegationView]:
+        """All of ``user_id``'s delegations (any status), newest ``connected_at`` first."""
+        return await anyio.to_thread.run_sync(self._delegation_views, user_id)
+
+    async def get_delegation_view(
+        self, user_id: UUID, delegation_id: UUID
+    ) -> DelegationView | None:
+        """``delegation_id`` if it belongs to ``user_id`` (any status), else ``None``."""
+        return await anyio.to_thread.run_sync(self._get_delegation_view, user_id, delegation_id)
 
     async def get_user_by_workos_id(self, workos_user_id: str) -> UserRecord | None:
         return await anyio.to_thread.run_sync(self._get_user_by_workos_id, workos_user_id)
