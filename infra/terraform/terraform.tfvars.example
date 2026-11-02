@@ -9,6 +9,16 @@ openfga_image_tag = "v1.22.1"
 public_base_url   = "https://api.revel.gifts"
 mcp_path          = "/mcp"
 
+# Public WorkOS AuthKit domain (not a secret). Until set, /mcp and /me return 401 (fail closed).
+# Sets WORKOS_AUTHKIT_DOMAIN on revel-app. WORKOS_TOKEN_AUDIENCE is derived as
+# public_base_url + mcp_path (https://api.revel.gifts/mcp) and must match the WorkOS resource indicator.
+# workos_authkit_domain = "https://replace-with-authkit-domain.authkit.app"
+
+# Public WorkOS client ID (not a secret) for the browser session; sets WORKOS_CLIENT_ID when non-empty.
+# workos_client_id = "replace-with-workos-client-id"
+# Empty uses public_base_url + /auth/callback (https://api.revel.gifts/auth/callback).
+# workos_redirect_uri = ""
+
 # The deterministic run.app host is computed automatically. After the first apply, add the
 # non-deterministic run.app host from `terraform output app_urls` here if you use that URL.
 app_extra_allowed_hosts = []
@@ -16,6 +26,8 @@ app_extra_allowed_hosts = []
 migrate_command   = ["alembic", "upgrade", "head"]
 
 # Add secret IDs here only after `gcloud secrets versions add` has created a version.
+# For example, once both have versions:
+# app_secret_env = ["WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD"]
 app_secret_env = []
 
 db_tier               = "db-f1-micro"
