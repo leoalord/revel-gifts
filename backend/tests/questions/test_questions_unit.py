@@ -270,6 +270,7 @@ def test_identity_wording_detected_in_model_output() -> None:
         ("Muse", "https://muse.example/client.json", "Muse"),
         (None, "https://muse.example/oauth/client.json", "muse.example"),
         ("  ", "https://muse.example/x", "muse.example"),
+        (None, "https://claude.ai/oauth/mcp-oauth-client-metadata", "claude.ai"),
         (None, "client_01ABC", "Assistant"),
         (None, "http://insecure.example/x", "Assistant"),
         (None, None, "Assistant"),

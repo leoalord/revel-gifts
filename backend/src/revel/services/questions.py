@@ -56,7 +56,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
-from urllib.parse import urlsplit
 from uuid import UUID
 
 import anyio.to_thread
@@ -91,6 +90,7 @@ from revel.db.models import (
     QuestionEvent,
     User,
 )
+from revel.services.identity import agent_label
 from revel.services.muse_spark import MuseSparkClient
 from revel.services.question_routing import (
     REQUESTED_INFORMATION_MAX_LENGTH,
@@ -355,19 +355,10 @@ async def respond_allowed(
 
 
 def acting_agent_label(name: str | None, client_id: str | None) -> str:
-    """Display label for an assistant: its name, else the host of an https client id (DCR
-    clients such as Muse register without a name), else "Assistant".
-
-    Single seam: F2 is adding ``revel.services.identity.agent_label`` with the same behavior;
-    swap this body for it once merged.
-    """
-    if name and name.strip():
-        return name.strip()
-    if client_id:
-        parts = urlsplit(client_id)
-        if parts.scheme == "https" and parts.hostname:
-            return parts.hostname
-    return "Assistant"
+    """The assistant app's registered name as plain display text (NOT verified identity): F2's
+    ``agent_label`` (name, else an https client id's host, else "Assistant"). The single seam
+    every question surface uses (inbox ``acting_agent``, candidate labels, identity terms)."""
+    return agent_label(name, client_id or "")
 
 
 def _respondent_principal(owner_user_id: UUID, candidate: Candidate) -> Principal:

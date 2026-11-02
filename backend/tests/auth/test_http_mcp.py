@@ -177,6 +177,7 @@ def test_me_returns_whoami(
             "delegation_id": str(delegation.id),
             "client_id": "client_muse",
             "name": None,
+            "label": "Assistant",
         },
         "via": "api",
     }
