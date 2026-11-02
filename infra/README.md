@@ -17,7 +17,7 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
 | `iam.tf` | Service accounts `revel-app`, `revel-openfga`; `cloudsql.client`; invoker bindings |
 | `database.tf` | Cloud SQL PostgreSQL 16 `revel-db` (db-f1-micro, Enterprise, zonal, 10 GB SSD), databases `revel` and `openfga`, users `revel_app` and `openfga` |
 | `secrets.tf` | `DATABASE_URL`, `OPENFGA_DATASTORE_URI` (generated) and empty placeholders `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `FIREWORKS_API_KEY`, `META_API_KEY`; per-secret accessor grants. `WORKOS_CLIENT_ID` is not a secret (plain variable, see [WorkOS configuration](#workos-configuration)) |
-| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`; optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
+| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`, `revel-fga-admin` (adopted with an `import` block); optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
 | `outputs.tf` | URLs, connection name, repository path, service accounts, DNS record |
 
 ### Network and access design
@@ -75,9 +75,10 @@ A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to abou
    gcloud run jobs execute revel-openfga-migrate --region us-central1 --wait
    ```
 3. Build and push the app image, then run the app migration and deploy it (below).
-4. Add secret versions, then list those secret IDs in `app_secret_env` and `terraform apply`.
-5. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401.
-6. Custom domain (below).
+4. Bootstrap the OpenFGA store and model with `revel-fga-admin`, set `openfga_store_id` and `openfga_authorization_model_id`, and `terraform apply` ([OpenFGA bootstrap](#openfga-bootstrap)).
+5. Add secret versions, then list those secret IDs in `app_secret_env` and `terraform apply`.
+6. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401.
+7. Custom domain (below).
 
 ## Images
 
@@ -103,17 +104,63 @@ docker stop revel-test
 
 With `APP_ENV=production` the app refuses to start unless `PUBLIC_BASE_URL` is `https://`.
 
-Terraform ignores image changes on `revel-app` and `revel-migrate` after creation, so roll out with gcloud (other settings stay as Terraform set them):
+Terraform ignores image changes on `revel-app`, `revel-migrate` and `revel-fga-admin` after creation, so roll out with gcloud (other settings stay as Terraform set them):
 
 ```sh
 gcloud run jobs update revel-migrate --region us-central1 --image "$IMAGE"
 gcloud run jobs execute revel-migrate --region us-central1 --wait     # explicit migration step
 gcloud run deploy revel-app --region us-central1 --image "$IMAGE"
+gcloud run jobs update revel-fga-admin --region us-central1 --image "$IMAGE"
 ```
 
 Change the migration command through the `migrate_command` variable (default `alembic upgrade head`; F3 owns the final command). Migrations never run on replica start.
 
 **OpenFGA** uses `openfga/openfga:v1.22.1` through the `dockerhub` remote repository (`us-central1-docker.pkg.dev/revel-gifts/dockerhub/openfga/openfga:v1.22.1`). Artifact Registry pulls and caches it from Docker Hub on first use, so no manual mirror step is needed. To upgrade, change `openfga_image_tag` (keep it in step with `docker-compose.yml`), apply, then re-run `revel-openfga-migrate`.
+
+## OpenFGA bootstrap
+
+`revel-fga-admin` is a Cloud Run job that runs F4's OpenFGA admin CLIs in the app image:
+- It runs as the `revel-app` service account, the only OpenFGA invoker.
+- It uses the app's OpenFGA settings: `OPENFGA_API_URL` and `OPENFGA_GOOGLE_AUTH=true`.
+- `DATABASE_URL` comes from Secret Manager over the Cloud SQL socket.
+- `OPENFGA_STORE_ID` and `OPENFGA_AUTHORIZATION_MODEL_ID` are set once the variables are.
+
+The job's command is `python`. Its default args are the read-only `--check` probe. Pass other args per execution with `--args`, which replaces the job's args for that run only. Terraform ignores args drift on this job. It was first created with gcloud and is adopted through the `import` block in `run.tf`.
+
+Every run writes only IDs, counts or a health word to the logs, never tokens, tuples or credentials. Run these after `revel-openfga-migrate` and with the current app image (see [Images](#images)).
+
+1. **Bootstrap** creates or finds the store (`revel-gifts`) and writes the model when it differs. The model is `/app/authorization/model.json` in the image, which is found by default.
+
+   ```sh
+   gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+     --args="-m,revel.auth.fga_bootstrap"
+   ```
+
+   stdout is just `OPENFGA_STORE_ID=…` and `OPENFGA_AUTHORIZATION_MODEL_ID=…`, and stderr notes whether each was created, written or unchanged. Read the IDs from the execution's logs:
+
+   ```sh
+   gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="revel-fga-admin"' \
+     --limit 20 --format='value(textPayload)'
+   ```
+
+   Put both IDs (26-character ULIDs, not secrets) in `terraform.tfvars` as `openfga_store_id` and `openfga_authorization_model_id`. Then plan and apply after approval. This sets them on `revel-app` and `revel-fga-admin`. Re-running the bootstrap is idempotent. A new model ID appears only when `model.json` changed, and then the variable must be updated and applied again.
+
+2. **Check** is a read-only probe and the default args:
+
+   ```sh
+   gcloud run jobs execute revel-fga-admin --region us-central1 --wait
+   ```
+
+   It prints `unconfigured` while either ID is unset and `healthy` when both exist on the server. Otherwise it exits non-zero and the execution fails.
+
+3. **Reconcile** backfills and repairs owner and delegation tuples from PostgreSQL. It is idempotent and needs both IDs configured. Add `--prune` to delete orphan agent tuples.
+
+   ```sh
+   gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+     --args="-m,revel.auth.fga_reconcile"
+   ```
+
+   It prints a count summary on stderr.
 
 ## Secrets
 

@@ -19,6 +19,12 @@ mcp_path          = "/mcp"
 # Empty uses public_base_url + /auth/callback (https://api.revel.gifts/auth/callback).
 # workos_redirect_uri = ""
 
+# OpenFGA store and authorization model IDs (ULIDs, not secrets) printed by the revel-fga-admin
+# bootstrap run (infra/README.md, "OpenFGA bootstrap"). Each sets OPENFGA_STORE_ID /
+# OPENFGA_AUTHORIZATION_MODEL_ID on revel-app and revel-fga-admin only when non-empty.
+# openfga_store_id               = ""
+# openfga_authorization_model_id = ""
+
 # The deterministic run.app host is computed automatically. After the first apply, add the
 # non-deterministic run.app host from `terraform output app_urls` here if you use that URL.
 app_extra_allowed_hosts = []
