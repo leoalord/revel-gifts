@@ -121,6 +121,10 @@ def test_profile_schema_after_upgrade(migrated_engine: Engine) -> None:
         "require_review_all",
         "category_settings",
         "created_at",
+        # Added by 0003_connections_questions.
+        "enrichment_enabled",
+        "questions_enabled",
+        "question_settings",
     }
     assert policy_cols["public_opt_in"]["default"] == "false"
     assert policy_cols["share_provisional"]["default"] == "true"
@@ -634,4 +638,7 @@ def test_downgrade_to_identity_and_reupgrade(
     run_alembic(command.upgrade, "head")
     assert set(inspect(migrated_engine).get_table_names()) >= PROFILE_TABLES | IDENTITY_TABLES
     with migrated_engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == "0002_profile"
+        assert (
+            MigrationContext.configure(connection).get_current_revision()
+            == "0003_connections_questions"
+        )
