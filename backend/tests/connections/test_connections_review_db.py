@@ -2,6 +2,8 @@
 unblock Tx2 race (O2), target-inserted blocks outside the requester's quota (O3) and
 ``resolve_handle`` recording only misses (O6)."""
 
+import asyncio
+
 import anyio
 import pytest
 from authz_fakes import FakeFga
@@ -88,7 +90,21 @@ async def test_target_inserted_blocks_do_not_use_the_blocked_users_quota(
         session.commit()
         await svc.block(b.ui, req.request.id, sessions=sessions)
     assert sum(r.status == "blocked" for r in rows(session)) == 3
+    # Block -> unblock cycles: unblock keeps responded_at (blocked -> revoked), and each
+    # re-block inserts another target-made row. None of them is Sam's.
+    for _ in range(2):
+        for b in blockers:
+            (entry,) = await svc.list_blocked(b.ui, sessions=sessions)
+            await svc.unblock(b.ui, entry.request_id, sessions=sessions)
+            await svc.block(b.ui, entry.request_id, sessions=sessions)
+    statuses = [r.status for r in rows(session)]
+    assert statuses.count("blocked") == 3 and statuses.count("revoked") == 6
+    # Sam's whole quota (2) is untouched: two new requests, then the limit.
+    add_person(session, "cal")
     assert (await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)).created
+    assert (await svc.lookup_and_request(sam.ui, handle="cal_demo", sessions=sessions)).created
+    with pytest.raises(svc.RateLimited):
+        await svc.lookup_and_request(sam.ui, handle="nobody_here", sessions=sessions)
 
     # A request the requester created that was blocked later still counts.
     sam2 = add_person(session, "sam2")
@@ -201,3 +217,27 @@ async def test_unblock_tx2_does_not_undo_a_reblock(
     assert sorted(r.status for r in rows(session)) == ["blocked", "revoked"]
     with pytest.raises(svc.TargetNotFound):
         await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
+
+
+async def test_resolve_handle_limit_holds_under_a_concurrent_burst(
+    session: Session, factory, fake_fga: FakeFga, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: reservations are atomic, so a burst of concurrent misses cannot exceed the limit."""
+    sam = add_person(session, "sam")
+    add_person(session, "hidden", discoverable=False)
+    monkeypatch.setattr(svc, "LOOKUP_LIMIT", 3)
+    outcomes: list[type[Exception]] = []
+
+    async def miss(i: int) -> None:
+        with factory() as own:  # one session per concurrent call
+            try:
+                await svc.resolve_handle(own, sam.ui, handle=f"nobody_{i}")
+            except svc.ConnectionsError as exc:
+                outcomes.append(type(exc))
+
+    await asyncio.gather(*(miss(i) for i in range(10)))
+    assert outcomes.count(svc.TargetNotFound) == 3
+    assert outcomes.count(svc.RateLimited) == 7
+    # Exhausted: hits are refused too (whatever the handle).
+    with pytest.raises(svc.RateLimited):
+        await svc.resolve_handle(session, sam.ui, handle="sam_demo")

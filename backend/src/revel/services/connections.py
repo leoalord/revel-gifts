@@ -83,7 +83,8 @@ the requester's and do not count. ``LOOKUP_LIMIT`` per ``LOOKUP_WINDOW`` is an i
 window (no table exists for failed lookups; per instance, reset on restart) that slows handle
 enumeration: every ``lookup_and_request`` and every ``set_handle`` that supplies a handle (its
 "unavailable" answer reveals occupancy) records an attempt before any database work;
-``resolve_handle`` checks the limit first but records only not-found results.
+``resolve_handle`` reserves an attempt atomically up front and refunds it on success, so only
+not-found results cost quota.
 """
 
 from __future__ import annotations
@@ -105,7 +106,7 @@ from uuid import UUID
 import anyio.from_thread
 import anyio.to_thread
 from pydantic import BaseModel
-from sqlalchemy import and_, exists, func, insert, or_, select, text, update
+from sqlalchemy import exists, func, insert, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -411,25 +412,27 @@ class _SlidingWindow:
             hits.popleft()
         return hits
 
-    def hit(self, key: UUID, limit: int, window: timedelta) -> bool:
-        """Record one attempt; ``False`` when ``limit`` attempts already fall in ``window``."""
+    def reserve(self, key: UUID, limit: int, window: timedelta) -> float | None:
+        """Atomically check and record one attempt; ``None`` (nothing recorded) when ``limit``
+        attempts already fall in ``window``. Returns a token for :meth:`release`."""
         now = time.monotonic()
         with self._lock:
             hits = self._current(key, window, now)
             if len(hits) >= limit:
-                return False
+                return None
             hits.append(now)
-            return True
+            return now
 
-    def exceeded(self, key: UUID, limit: int, window: timedelta) -> bool:
-        """Whether ``limit`` attempts already fall in ``window`` (records nothing)."""
-        with self._lock:
-            return len(self._current(key, window, time.monotonic())) >= limit
+    def hit(self, key: UUID, limit: int, window: timedelta) -> bool:
+        """Record one attempt; ``False`` when ``limit`` attempts already fall in ``window``."""
+        return self.reserve(key, limit, window) is not None
 
-    def record(self, key: UUID) -> None:
-        """Record one attempt without checking (the caller checked ``exceeded`` first)."""
+    def release(self, key: UUID, token: float) -> None:
+        """Refund one reservation (an attempt that turned out not to count)."""
         with self._lock:
-            self._hits.setdefault(key, deque()).append(time.monotonic())
+            hits = self._hits.get(key)
+            if hits is not None and token in hits:  # may already be outside the window
+                hits.remove(token)
 
     def reset(self) -> None:
         with self._lock:
@@ -586,14 +589,16 @@ async def resolve_handle(
     handle resolves (to themselves). Creates nothing; access to the target's profile is still
     decided by F4 (``visible_claims``).
 
-    Rate limit: the lookup limit is checked first (``RateLimited`` once exhausted, whatever the
-    handle), but only a ``TargetNotFound`` result records an attempt. Successful resolves (e.g.
-    F5's repeated reads of a connection's profile) cost nothing, while enumerating handles,
-    which produces mostly not-found results, spends the quota. Every hidden case takes the same
-    not-found path (one statement, then one record), so recording adds no difference between
-    them; a found handle is already distinguishable by its result.
+    Rate limit: every call atomically reserves one lookup attempt up front (``RateLimited`` once
+    exhausted, whatever the handle), so a concurrent burst can never exceed the limit; a
+    successful resolve then refunds its reservation. Misses cost, hits are free: F5's repeated
+    reads of a connection's profile are not throttled, while enumerating handles (mostly
+    not-found) spends the quota. Every hidden case takes the same not-found path (one
+    statement; the reservation is kept), so there is no difference between them; a found
+    handle is already distinguishable by its result.
     """
-    if lookup_limiter.exceeded(principal.user_id, LOOKUP_LIMIT, LOOKUP_WINDOW):
+    token = lookup_limiter.reserve(principal.user_id, LOOKUP_LIMIT, LOOKUP_WINDOW)
+    if token is None:
         raise RateLimited()
     normalized = normalize_handle(handle)
 
@@ -601,11 +606,9 @@ async def resolve_handle(
         _check_actor(session, principal)
         return _resolve_sync(session, principal.user_id, normalized, allow_self=True)
 
-    try:
-        return await _run(work)
-    except TargetNotFound:
-        lookup_limiter.record(principal.user_id)
-        raise
+    result = await _run(work)  # TargetNotFound (or any error) keeps the reservation
+    lookup_limiter.release(principal.user_id, token)
+    return result
 
 
 # --- Requests ---------------------------------------------------------------------------------
@@ -651,14 +654,13 @@ async def lookup_and_request(
                 .where(
                     ConnectionRequest.requester_user_id == me,
                     ConnectionRequest.created_at > func.now() - REQUEST_WINDOW,
-                    # Blocks the TARGET inserted (no live row to update) name this user as
-                    # requester but were not created by them: inserted already blocked, so
-                    # responded_at equals created_at (one transaction's now()). A request
-                    # blocked later was responded to in a later transaction.
-                    ~and_(
-                        ConnectionRequest.status == _BLOCKED,
-                        ConnectionRequest.responded_at == ConnectionRequest.created_at,
-                    ),
+                    # Rows the TARGET inserted (a block with no live row to update) name this
+                    # user as requester but were not created by them. They are inserted already
+                    # responded, so responded_at equals created_at (one transaction's now())
+                    # and keeps doing so through unblock (blocked -> revoked keeps
+                    # responded_at). A row the requester created is pending (NULL) or was
+                    # responded to in a later transaction, so it is always distinct.
+                    ConnectionRequest.responded_at.is_distinct_from(ConnectionRequest.created_at),
                 )
             ).scalar_one()
             if recent >= REQUEST_LIMIT:
