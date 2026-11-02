@@ -9,6 +9,7 @@ import {
   POLICY_V3,
   fact,
   jsonResponse,
+  legacyPolicyResponse,
   mockRoutes,
   policyResponse,
   profile,
@@ -334,6 +335,136 @@ describe("ContributionsScreen", () => {
     const statement = within(li).getByLabelText("Statement");
     await waitFor(() => expect(statement).toHaveAttribute("aria-invalid", "true"));
     expect(statement).toHaveAccessibleDescription("statement must be 1-500 characters");
+  });
+
+  it("does not resend details whose server key order differs", async () => {
+    facts = [{ ...PENDING, status: "active", details: { size: "M", item: "jacket" } }];
+    const { calls } = routes({
+      "PATCH /api/ui/profile/facts/f-2": () => jsonResponse(200, { ...PENDING, id: "f-12" }),
+    });
+    render(<ContributionsScreen />);
+    await screen.findByText("Wears a medium jacket");
+    const li = item("Wears a medium jacket");
+    await userEvent.click(within(li).getByRole("button", { name: "Correct" }));
+    await userEvent.type(within(li).getByLabelText("Statement"), "!");
+    await userEvent.click(within(li).getByRole("button", { name: "Save correction" }));
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({
+        statement: "Wears a medium jacket!",
+      }),
+    );
+  });
+
+  describe("per-fact audience (B3)", () => {
+    const optionValues = (li: HTMLElement) =>
+      within(within(li).getByLabelText("Who can see it"))
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value);
+
+    it("shows a fact outside its category's policy bounds with its current audience selected", async () => {
+      facts = [fact({ id: "f-8", category: "size", statement: "Shoe size 42", audience: "connections" })];
+      routes();
+      render(<ContributionsScreen />);
+      const li = (await screen.findByText("Shoe size 42")).closest("li")!;
+      const select = within(li).getByLabelText("Who can see it");
+      expect(select).toHaveValue("connections");
+      expect(within(select).getByRole("option", { selected: true })).toHaveTextContent("Connections");
+      // size's allowed_audiences lacks Public: the server's list without Public.
+      expect(optionValues(li)).toEqual(["only_me", "trusted_circle", "connections"]);
+    });
+
+    it.each([
+      ["only_me", "trusted_circle"],
+      ["trusted_circle", "connections"],
+    ])("widens a size fact from %s to %s with PATCH {audience}", async (from, to) => {
+      facts = [fact({ id: "f-9", category: "size", statement: "Hat size M", audience: from })];
+      const { calls } = routes({
+        "PATCH /api/ui/profile/facts/f-9": (call) => {
+          const updated = { ...facts[0]!, audience: to, updated_at: "2026-11-02T03:00:00Z" };
+          facts = [updated];
+          return jsonResponse(200, { ...updated, ...(call.body as object) });
+        },
+      });
+      render(<ContributionsScreen />);
+      const li = (await screen.findByText("Hat size M")).closest("li")!;
+      await userEvent.selectOptions(within(li).getByLabelText("Who can see it"), to);
+      await userEvent.click(within(li).getByRole("button", { name: "Change audience" }));
+      await screen.findByText(/^Audience changed to/);
+      expect(calls.filter((c) => c.method === "PATCH").map((c) => c.body)).toEqual([{ audience: to }]);
+    });
+
+    it("offers Public only when the category's allowed_audiences includes it", async () => {
+      const optedIn = CATEGORIES.map((c) =>
+        c.id === "interest" ? { ...c, allowed_audiences: [...c.allowed_audiences, "public"] } : c,
+      );
+      facts = [ACTIVE, PENDING];
+      mockRoutes({
+        "GET /api/ui/profile": () => jsonResponse(200, profile(facts)),
+        "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3, optedIn)),
+      });
+      render(<ContributionsScreen />);
+      await screen.findByText("Enjoys bouldering");
+      expect(optionValues(item("Enjoys bouldering"))).toContain("public");
+      expect(optionValues(item("Wears a medium jacket"))).not.toContain("public");
+    });
+
+    it("falls back to the category's allowed_audiences plus the current one without `audiences`", async () => {
+      facts = [fact({ id: "f-8", category: "size", statement: "Shoe size 42", audience: "connections" })];
+      mockRoutes({
+        "GET /api/ui/profile": () => jsonResponse(200, profile(facts)),
+        "GET /api/ui/profile/policy": () => jsonResponse(200, legacyPolicyResponse(POLICY_V3)),
+      });
+      render(<ContributionsScreen />);
+      const li = (await screen.findByText("Shoe size 42")).closest("li")!;
+      expect(within(li).getByLabelText("Who can see it")).toHaveValue("connections");
+      expect(optionValues(li)).toEqual(["only_me", "trusted_circle", "connections"]);
+    });
+
+    it("shows a server refusal inline and reverts the select", async () => {
+      facts = [
+        fact({
+          id: "f-10",
+          category: "sensitive",
+          statement: "Volunteered note",
+          audience: "only_me",
+          status: "active",
+        }),
+      ];
+      const { calls } = routes({
+        "PATCH /api/ui/profile/facts/f-10": () =>
+          jsonResponse(400, {
+            detail: [{ loc: ["body", "audience"], msg: "sensitive facts are always Only me" }],
+          }),
+      });
+      render(<ContributionsScreen />);
+      const li = (await screen.findByText("Volunteered note")).closest("li")!;
+      const select = within(li).getByLabelText("Who can see it");
+      // The server's list (minus Public): widening is offered and validated by the server.
+      expect(optionValues(li)).toEqual(["only_me", "trusted_circle", "connections"]);
+      await userEvent.selectOptions(select, "connections");
+      await userEvent.click(within(li).getByRole("button", { name: "Change audience" }));
+
+      const error = await within(li).findByText("sensitive facts are always Only me");
+      expect(select).toHaveValue("only_me");
+      expect(select).toHaveAttribute("aria-describedby", error.id);
+      expect(calls.filter((c) => c.method === "PATCH").map((c) => c.body)).toEqual([
+        { audience: "connections" },
+      ]);
+    });
+
+    it("shows a form-level (loc [body]) refusal on the audience control too", async () => {
+      facts = [fact({ id: "f-11", category: "sensitive", statement: "Note two", audience: "only_me" })];
+      routes({
+        "PATCH /api/ui/profile/facts/f-11": () =>
+          jsonResponse(400, { detail: [{ loc: ["body"], msg: "audience not allowed" }] }),
+      });
+      render(<ContributionsScreen />);
+      const li = (await screen.findByText("Note two")).closest("li")!;
+      await userEvent.selectOptions(within(li).getByLabelText("Who can see it"), "trusted_circle");
+      await userEvent.click(within(li).getByRole("button", { name: "Change audience" }));
+      expect(await within(li).findByText("audience not allowed")).toBeInTheDocument();
+      expect(within(li).getByLabelText("Who can see it")).toHaveValue("only_me");
+    });
   });
 
   it("uses server audience labels when the policy response carries them", async () => {

@@ -4,7 +4,13 @@ import type { FormEvent } from "react";
 import { UnauthorizedError } from "./api";
 import { formatObserved, formatTime, humanize } from "./format";
 import type { AudienceLabel } from "./format";
-import { OBSERVED_PRECISIONS, conflictFact, fieldErrorsOf, messageOf } from "./profileApi";
+import {
+  OBSERVED_PRECISIONS,
+  PUBLIC_AUDIENCE,
+  conflictFact,
+  fieldErrorsOf,
+  messageOf,
+} from "./profileApi";
 import type {
   Category,
   DetailsSchema,
@@ -32,6 +38,26 @@ interface Props {
   actions: FactActions;
   onOutcome: (outcome: FactOutcome) => void;
   audienceLabel?: AudienceLabel;
+  /** The server's `audiences` ids, narrowest first (absent with an older server). */
+  audienceIds?: readonly string[];
+}
+
+/**
+ * Owner per-fact audience options (F5 contract: a fact may sit outside its category's policy
+ * bounds). The server's audience list; Public only when the category's `allowed_audiences`
+ * includes it (the server's eligibility/opt-in signal); always the fact's current audience.
+ * The server validates every change; nothing else is decided here.
+ */
+function factAudienceOptions(
+  current: string,
+  allowed: readonly string[],
+  audienceIds: readonly string[] | undefined,
+): string[] {
+  const options = (audienceIds ?? allowed).filter(
+    (a) => a === current || a !== PUBLIC_AUDIENCE || allowed.includes(PUBLIC_AUDIENCE),
+  );
+  if (!options.includes(current)) options.push(current);
+  return options;
 }
 
 // Owner actions are offered for live and pending facts only (presentation; the server enforces).
@@ -123,6 +149,19 @@ function detailsFromStrings(
   return Object.keys(out).length ? out : null;
 }
 
+/** Key-order-independent comparison of flat details objects (null and {} are equal). */
+function sameDetails(
+  a: Record<string, unknown> | null,
+  b: Record<string, unknown> | null,
+): boolean {
+  const left = Object.entries(a ?? {});
+  const right = b ?? {};
+  return (
+    left.length === Object.keys(right).length &&
+    left.every(([key, value]) => Object.is(right[key], value))
+  );
+}
+
 function CorrectionForm({
   fact,
   category,
@@ -151,7 +190,7 @@ function CorrectionForm({
     if (statement !== fact.statement) patch.statement = statement;
     if (schema) {
       const next = detailsFromStrings(schema, details);
-      if (JSON.stringify(next) !== JSON.stringify(fact.details ?? null)) patch.details = next;
+      if (!sameDetails(next, fact.details)) patch.details = next;
     }
     const nextDate = observedAt || null;
     const nextPrecision = nextDate ? precision : "unknown";
@@ -247,6 +286,7 @@ export function FactItem({
   actions,
   onOutcome,
   audienceLabel = humanize,
+  audienceIds,
 }: Props) {
   const audienceId = useId();
   const editable = EDITABLE_STATUSES.includes(fact.status);
@@ -254,18 +294,21 @@ export function FactItem({
   const [mode, setMode] = useState<"view" | "correct" | "confirm-remove">("view");
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<FieldErrors>({});
+  const [audienceError, setAudienceError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const badge = statusBadge(fact);
-  const allowed = category?.allowed_audiences ?? [];
+  const options = factAudienceOptions(fact.audience, category?.allowed_audiences ?? [], audienceIds);
   const label = category?.label ?? humanize(fact.category);
 
+  /** Runs an action; returns field errors (400/422) when the server refused it that way. */
   const run = async (
     action: () => Promise<Fact>,
     notice: (result: Fact) => string,
     replaces = false,
-  ) => {
+  ): Promise<FieldErrors | null> => {
     setBusy(true);
     setErrors({});
+    setAudienceError(null);
     setMessage(null);
     try {
       const result = await action();
@@ -276,32 +319,40 @@ export function FactItem({
         notice: notice(result),
         replacedId: replaces && result.id !== fact.id ? fact.id : undefined,
       });
+      return null;
     } catch (error) {
-      if (error instanceof UnauthorizedError) return;
+      if (error instanceof UnauthorizedError) return null;
       const current = conflictFact(error);
       if (current) {
         setMode("view");
         onOutcome({ kind: "conflict", fact: current });
-        return;
+        return null;
       }
       if (error && typeof error === "object" && "status" in error && error.status === 404) {
         onOutcome({ kind: "gone" });
-        return;
+        return null;
       }
       const fields = fieldErrorsOf(error);
       if (fields) setErrors(fields);
       else setMessage(messageOf(error));
+      return fields;
     } finally {
       setBusy(false);
     }
   };
 
-  const changeAudience = (event: FormEvent<HTMLFormElement>) => {
+  const changeAudience = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    void run(
+    const fields = await run(
       () => actions.patch(fact.id, { audience }),
       (f) => `Audience changed to ${audienceLabel(f.audience)}.`,
     );
+    if (fields) {
+      // The server refused the change: show why on this fact and keep the current audience.
+      setErrors({});
+      setAudienceError(fields.audience ?? fields._ ?? fields.body ?? Object.values(fields)[0] ?? null);
+      setAudience(fact.audience);
+    }
   };
 
   return (
@@ -367,31 +418,29 @@ export function FactItem({
       )}
 
       {editable && (
-      <form className="audience-form" onSubmit={changeAudience} noValidate>
-        <label htmlFor={audienceId}>Who can see it</label>
-        <select
-          id={audienceId}
-          value={allowed.includes(audience) ? audience : ""}
-          onChange={(e) => setAudience(e.target.value)}
-          aria-invalid={errors.audience ? true : undefined}
-          aria-describedby={errors.audience ? `${audienceId}-error` : undefined}
-        >
-          {!allowed.includes(audience) && (
-            <option value="" disabled>
-              Choose an audience
-            </option>
-          )}
-          {allowed.map((a) => (
-            <option key={a} value={a}>
-              {audienceLabel(a)}
-            </option>
-          ))}
-        </select>
-        <button type="submit" disabled={busy || audience === fact.audience || !allowed.includes(audience)}>
-          Change audience
-        </button>
-        <FieldError id={`${audienceId}-error`} message={errors.audience} />
-      </form>
+        <form className="audience-form" onSubmit={(e) => void changeAudience(e)} noValidate>
+          <label htmlFor={audienceId}>Who can see it</label>
+          <select
+            id={audienceId}
+            value={audience}
+            onChange={(e) => {
+              setAudience(e.target.value);
+              setAudienceError(null);
+            }}
+            aria-invalid={audienceError ? true : undefined}
+            aria-describedby={audienceError ? `${audienceId}-error` : undefined}
+          >
+            {options.map((a) => (
+              <option key={a} value={a}>
+                {audienceLabel(a)}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={busy || audience === fact.audience}>
+            Change audience
+          </button>
+          <FieldError id={`${audienceId}-error`} message={audienceError ?? undefined} />
+        </form>
       )}
 
       {!editable ? null : mode === "correct" ? (

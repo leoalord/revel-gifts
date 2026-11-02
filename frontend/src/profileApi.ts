@@ -21,6 +21,12 @@ export const CLAIM_STATUSES: readonly ClaimStatus[] = [
 ];
 export const OBSERVED_PRECISIONS: readonly ObservedPrecision[] = ["day", "month", "year", "unknown"];
 
+/**
+ * The contract's Public audience id. Used only to follow server signals: Public is offered when
+ * a category's `allowed_audiences` includes it, and previewed for unsaved opt-in changes.
+ */
+export const PUBLIC_AUDIENCE: Audience = "public";
+
 export interface DetailsPropertySchema {
   type: "integer" | "string";
   minimum?: number;
@@ -80,7 +86,7 @@ export interface PolicyResponse {
   /** Server-provided caveat for provisional sharing (present in F5's draft implementation). */
   provisional_caveat?: string;
   /** Flag defaults while `policy` is null (agreed F5 follow-up; optional until it lands). */
-  defaults?: PolicyFlags;
+  defaults?: PolicyFlags | null;
   /** Audience ids with display labels (agreed F5 follow-up; optional until it lands). */
   audiences?: AudienceInfo[];
 }
@@ -134,7 +140,7 @@ export interface Profile {
   profile_id: string | null;
   policy_version: number | null;
   policy: Policy | null;
-  defaults?: PolicyFlags;
+  defaults?: PolicyFlags | null;
   facts: Fact[];
   summary: Summary;
 }

@@ -3,7 +3,14 @@ import type { FormEvent } from "react";
 
 import { UnauthorizedError } from "./api";
 import { audienceLabeler } from "./format";
-import { conflictPolicy, fieldErrorsOf, getPolicy, messageOf, putPolicy } from "./profileApi";
+import {
+  PUBLIC_AUDIENCE,
+  conflictPolicy,
+  fieldErrorsOf,
+  getPolicy,
+  messageOf,
+  putPolicy,
+} from "./profileApi";
 import type {
   Category,
   CategorySetting,
@@ -29,8 +36,6 @@ interface Draft {
   changes: Record<string, CategoryChange>;
 }
 
-/** The contract's Public audience id (F5). Only used for the opt-in preview below. */
-const PUBLIC_AUDIENCE = "public";
 
 /**
  * Before the first approval the server has no policy to read flags from. Prefer the server's
@@ -341,10 +346,14 @@ export function PolicyScreen() {
                   category.public_eligible &&
                   explicitAudience(data.policy, category.id) === null &&
                   change.audience === undefined;
+                // A saved explicit Public audience is dropped on withdrawal (contract rule).
+                const explicitPublic =
+                  explicitAudience(data.policy, category.id) === PUBLIC_AUDIENCE &&
+                  change.audience === undefined;
                 const marker =
                   implicit && enabling
                     ? "Public after saving"
-                    : implicit && withdrawing
+                    : (implicit || explicitPublic) && withdrawing
                       ? "No longer Public after saving"
                       : null;
                 const options = [...category.allowed_audiences];

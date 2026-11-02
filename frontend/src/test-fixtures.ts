@@ -65,7 +65,26 @@ export const POLICY_V3: Policy = {
 
 export const CAVEAT = "Provisional facts are shared with a caveat (server text).";
 
+/** F5's `audiences` (contract on main: every audience, narrowest first, with labels). */
+export const AUDIENCES = [
+  { id: "only_me", label: "Only me" },
+  { id: "trusted_circle", label: "Trusted Circle" },
+  { id: "connections", label: "Connections" },
+  { id: "public", label: "Public" },
+];
+
 export function policyResponse(policy: Policy | null, categories = CATEGORIES): PolicyResponse {
+  return {
+    policy,
+    categories,
+    provisional_caveat: CAVEAT,
+    audiences: AUDIENCES,
+    defaults: policy ? null : undefined,
+  };
+}
+
+/** The pre-follow-up shape (no `audiences` / `defaults`), to keep the fallbacks covered. */
+export function legacyPolicyResponse(policy: Policy | null, categories = CATEGORIES): PolicyResponse {
   return { policy, categories, provisional_caveat: CAVEAT };
 }
 

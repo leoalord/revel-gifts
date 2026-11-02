@@ -141,6 +141,7 @@ export function ContributionsScreen() {
   const byId = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
   const labels = useMemo(() => new Map(categories.map((c) => [c.id, c.label])), [categories]);
   const audienceLabel = useMemo(() => audienceLabeler(audiences), [audiences]);
+  const audienceIds = useMemo(() => audiences?.map((a) => a.id), [audiences]);
 
   const onOutcome = (outcome: FactOutcome) => {
     if (outcome.kind === "gone") {
@@ -218,6 +219,7 @@ export function ContributionsScreen() {
                 actions={ACTIONS}
                 onOutcome={onOutcome}
                 audienceLabel={audienceLabel}
+                audienceIds={audienceIds}
               />
             ))}
           </ul>

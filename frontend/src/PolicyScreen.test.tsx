@@ -390,6 +390,26 @@ describe("PolicyScreen opt-in preview", () => {
     );
   });
 
+  it("withdrawing also marks rows with an explicit saved Public audience", async () => {
+    const saved = { ...OPTED_IN, category_settings: { interest: { audience: "public" } } };
+    mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse(saved, OPTED_IN_CATEGORIES)),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    expect(screen.getByLabelText("Interests and hobbies")).toHaveAccessibleDescription(
+      "No longer Public after saving",
+    );
+    // Re-choosing an audience for that row removes the marker.
+    await userEvent.selectOptions(screen.getByLabelText("Interests and hobbies"), "connections");
+    expect(screen.getByLabelText("Interests and hobbies")).not.toHaveAccessibleDescription(
+      /Public after saving/,
+    );
+  });
+
   it("withdrawing shows the notice and marks implicitly Public rows", async () => {
     mockRoutes({
       "GET /api/ui/profile/policy": () =>
