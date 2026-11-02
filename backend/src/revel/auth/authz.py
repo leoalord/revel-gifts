@@ -8,8 +8,21 @@ stay thin. It implements model v1 (``authorization/model.fga``):
 - Subject of a check: ``agent:<delegation_id>`` when the principal acts through an active
   delegation, else ``user:<user_id>``.
 
-Tuple hooks (``TupleHooks``) are called by F2 on sign-in, agent connect and disconnect. They
-are idempotent; retries, duplicate writes and deletes of missing tuples are safe. Profiles are
+Tuple hooks (module-level ``on_*`` functions over a process-wide ``TupleHooks`` installed by
+``configure_authz``) are called by F2 on sign-in, agent connect and disconnect, inside its
+inserting transaction. They are idempotent; retries, duplicate writes and deletes of missing
+tuples are safe.
+
+Hook failure rule (follow it for every new hook, e.g. v2 revoke, block, tier downgrade):
+
+- GRANT hooks (``on_user_created``, ``on_agent_delegated``) log one warning and return ``None``
+  only while OpenFGA is unconfigured (``configure_authz`` not called, or store/model IDs unset):
+  a skipped grant only denies.
+- REVOKE hooks (anything that deletes tuples: ``on_agent_disconnected``) raise
+  ``FgaConfigurationError`` when unconfigured: a skipped delete would leave access in place.
+- Once configured, any OpenFGA error on a grant or a revoke propagates; never swallow it.
+- Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, later ``visible_claims``)
+  raise ``FgaConfigurationError`` when unconfigured; they never allow by default. Profiles are
 resolved through an injectable async resolver; when it returns ``None`` the profile tuples are
 deferred and later backfilled with ``reconcile_owner_tuples`` / ``reconcile_agent_tuples``.
 
@@ -23,7 +36,7 @@ from enum import StrEnum
 from typing import Literal, Protocol
 from uuid import UUID
 
-from revel.auth.fga import FgaClient, RelationTuple
+from revel.auth.fga import FgaClient, FgaConfigurationError, RelationTuple
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +105,14 @@ def agent_object(delegation_id: UUID) -> str:
 
 def subject_for(principal: PrincipalLike) -> str:
     """The OpenFGA user a check runs as: the delegation if active, else the human user."""
+    # Defence in depth (F2's Principal enforces the same): refuse inconsistent principals rather
+    # than silently falling back to the user. MCP and API access always acts through an active
+    # delegation; the human UI never does.
     if (principal.agent_id is None) != (principal.delegation_id is None):
-        # Inconsistent principal: refuse rather than silently fall back to the user.
+        raise AuthorizationDenied()
+    if principal.via in ("mcp", "api") and principal.delegation_id is None:
+        raise AuthorizationDenied()
+    if principal.via == "ui" and principal.delegation_id is not None:
         raise AuthorizationDenied()
     if principal.delegation_id is not None:
         return agent_object(principal.delegation_id)
@@ -133,7 +152,12 @@ class TupleSync:
 
 
 class TupleHooks:
-    """Lifecycle hooks F2 calls after the corresponding database change commits."""
+    """Tuple writes for identity lifecycle events, bound to one client and profile resolver.
+
+    F2 awaits these inside its inserting transaction, before commit: a raise rolls the identity
+    change back and the next request retries, so every method is idempotent. They never touch
+    users, agents or agent_delegations; the resolver may only read profiles.
+    """
 
     def __init__(self, fga: FgaClient, resolve_profile: ProfileResolver = no_profile_resolver):
         self._fga = fga
@@ -171,23 +195,115 @@ class TupleHooks:
     async def on_agent_disconnected(
         self, *, user_id: UUID, delegation_id: UUID, agent_id: UUID | None = None
     ) -> TupleSync:
-        """Agent disconnect: delete ``acts_for`` and every ``owner_agent`` tuple of the delegation.
+        """Agent disconnect: delete every ``acts_for`` and ``owner_agent`` tuple of the delegation.
 
-        Existing ``owner_agent`` tuples are read from OpenFGA, so deletion does not depend on the
-        profile resolver; the resolved profile is included too in case a read is stale.
+        Revocation must not depend on the profile database, so the tuples found by reading
+        OpenFGA (all ``acts_for`` on ``agent:<delegation_id>``, all its ``owner_agent`` grants)
+        are deleted first. The profile resolver is then consulted best-effort, in case a read
+        missed a tuple; its errors are logged, not raised.
         """
         del agent_id
         agent = agent_object(delegation_id)
         deletes: list[RelationTuple] = [acts_for_tuple(user_id, delegation_id)]
-        deletes += await self._fga.read_tuples(
-            user=agent, relation=OWNER_AGENT, object_type="profile"
-        )
-        profile_id = await self._resolve_profile(user_id)
-        if profile_id is not None:
-            deletes.append(owner_agent_tuple(delegation_id, profile_id))
+        deletes += await self._fga.read_tuples(relation=ACTS_FOR, object=agent)
+        deletes += await self._fga.read_tuples(user=agent, relation=OWNER_AGENT, object="profile:")
         deletes = list(dict.fromkeys(deletes))
         await self._fga.delete_tuples(deletes)
+
+        try:
+            profile_id = await self._resolve_profile(user_id)
+        except Exception:
+            logger.warning("Profile lookup failed during agent disconnect", exc_info=True)
+            profile_id = None
+        if profile_id is not None:
+            extra = owner_agent_tuple(delegation_id, profile_id)
+            if extra not in deletes:
+                await self._fga.delete_tuples([extra])
+                deletes.append(extra)
         return TupleSync(deleted=tuple(deletes))
+
+
+# --- Process-wide configuration and module-level hooks ----------------------------------------
+#
+# The app lifespan calls configure_authz() at startup and reset_authz() at shutdown. F2 looks the
+# hooks up by name (getattr(importlib.import_module("revel.auth.authz"), name)).
+
+
+@dataclass(slots=True)
+class _AuthzState:
+    fga: FgaClient
+    hooks: TupleHooks
+
+
+_state: _AuthzState | None = None
+_warned_unconfigured = False
+
+
+def configure_authz(fga: FgaClient, resolve_profile: ProfileResolver = no_profile_resolver) -> None:
+    """Install the process-wide client and resolver. No network calls or validation."""
+    global _state, _warned_unconfigured
+    _state = _AuthzState(fga=fga, hooks=TupleHooks(fga, resolve_profile))
+    _warned_unconfigured = False
+
+
+def reset_authz(fga: FgaClient | None = None) -> None:
+    """Forget the process-wide client (app shutdown, tests).
+
+    With ``fga``, reset only if that client is the one installed, so one app's shutdown cannot
+    clear another app's configuration.
+    """
+    global _state, _warned_unconfigured
+    if fga is not None and (_state is None or _state.fga is not fga):
+        return
+    _state = None
+    _warned_unconfigured = False
+
+
+def _hooks_or_none() -> TupleHooks | None:
+    """Configured hooks for a granting operation, or ``None`` (one warning) when unconfigured.
+
+    Skipping a grant never grants access, so sign-in keeps working before bootstrap.
+    """
+    global _warned_unconfigured
+    if _state is not None and _state.fga.configured:
+        return _state.hooks
+    if not _warned_unconfigured:
+        logger.warning("OpenFGA is not configured; skipping authorization tuple writes")
+        _warned_unconfigured = True
+    return None
+
+
+def _revoke_hooks() -> TupleHooks:
+    """Configured hooks for a revoking operation; raises when unconfigured (fail closed)."""
+    if _state is None or not _state.fga.configured:
+        raise FgaConfigurationError("OpenFGA is not configured; cannot revoke authorization")
+    return _state.hooks
+
+
+async def on_user_created(*, user_id: UUID) -> TupleSync | None:
+    hooks = _hooks_or_none()
+    return None if hooks is None else await hooks.on_user_created(user_id=user_id)
+
+
+async def on_agent_delegated(
+    *, user_id: UUID, agent_id: UUID, delegation_id: UUID
+) -> TupleSync | None:
+    hooks = _hooks_or_none()
+    if hooks is None:
+        return None
+    return await hooks.on_agent_delegated(
+        user_id=user_id, agent_id=agent_id, delegation_id=delegation_id
+    )
+
+
+async def on_agent_disconnected(
+    *, user_id: UUID, delegation_id: UUID, agent_id: UUID | None = None
+) -> TupleSync:
+    # Revoke hook: a skipped delete leaves access in place, so unconfigured raises.
+    hooks = _revoke_hooks()
+    return await hooks.on_agent_disconnected(
+        user_id=user_id, delegation_id=delegation_id, agent_id=agent_id
+    )
 
 
 async def reconcile_owner_tuples(fga: FgaClient, pairs: Iterable[tuple[UUID, UUID]]) -> int:
@@ -215,32 +331,45 @@ async def reconcile_agent_tuples(fga: FgaClient, triples: Iterable[tuple[UUID, U
 # --- Checks -----------------------------------------------------------------------------------
 
 
-async def can_contribute(fga: FgaClient, principal: PrincipalLike, profile_id: UUID) -> bool:
-    return await fga.check(
+def _check_client(fga: FgaClient | None) -> FgaClient:
+    """The client for a check: explicit, else the configured one. Never allow when unconfigured."""
+    client = fga if fga is not None else (_state.fga if _state is not None else None)
+    if client is None or not client.configured:
+        raise FgaConfigurationError("OpenFGA is not configured; authorization checks cannot run")
+    return client
+
+
+async def can_contribute(fga: FgaClient | None, principal: PrincipalLike, profile_id: UUID) -> bool:
+    """Whether the principal may contribute to the profile. ``fga=None`` uses the configured one."""
+    return await _check_client(fga).check(
         user=subject_for(principal), relation=CONTRIBUTE, object=profile_object(profile_id)
     )
 
 
-async def require_contribute(fga: FgaClient, principal: PrincipalLike, profile_id: UUID) -> None:
+async def require_contribute(
+    fga: FgaClient | None, principal: PrincipalLike, profile_id: UUID
+) -> None:
     if not await can_contribute(fga, principal, profile_id):
         raise AuthorizationDenied()
 
 
 async def resolve_viewer_tier(
-    fga: FgaClient, principal: PrincipalLike, profile_id: UUID
+    fga: FgaClient | None, principal: PrincipalLike, profile_id: UUID
 ) -> ViewerTier:
     """Highest tier the principal holds on the profile, in one OpenFGA call.
 
     Model v1 only has ``view_only_me``, so the result is ``only_me`` or ``none``. v2 adds the
     intermediate tiers (one batch check over all ``view_*`` relations).
     """
-    allowed = await fga.check(
+    allowed = await _check_client(fga).check(
         user=subject_for(principal), relation=VIEW_ONLY_ME, object=profile_object(profile_id)
     )
     return ViewerTier.only_me if allowed else ViewerTier.none
 
 
-async def require_viewer(fga: FgaClient, principal: PrincipalLike, profile_id: UUID) -> ViewerTier:
+async def require_viewer(
+    fga: FgaClient | None, principal: PrincipalLike, profile_id: UUID
+) -> ViewerTier:
     """Resolve the viewer tier, raising ``AuthorizationDenied`` when it is ``none``."""
     tier = await resolve_viewer_tier(fga, principal, profile_id)
     if tier is ViewerTier.none:
@@ -253,4 +382,9 @@ async def require_viewer(fga: FgaClient, principal: PrincipalLike, profile_id: U
 # visible_claims(fga, session, principal, profile_id) belongs here: it resolves the viewer tier
 # above and filters claims in PostgreSQL by status (pending_review, superseded and removed are
 # hidden) and audience <= tier. It is intentionally not implemented until F3's claims schema
-# (#7) is merged; do not read claims anywhere else.
+# (#7) is merged; do not read claims anywhere else. Like the checks above, it must raise
+# FgaConfigurationError when OpenFGA is unconfigured (use _check_client).
+#
+# Adapters (MCP/HTTP) must map AuthorizationDenied to a generic denial and OpenFGA SDK or
+# FgaConfigurationError exceptions to a generic 5xx, and never return their text: SDK errors
+# contain object IDs (UUIDs).

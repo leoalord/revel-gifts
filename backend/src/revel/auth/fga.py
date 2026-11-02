@@ -69,8 +69,13 @@ class FgaClient(Protocol):
     async def check(self, *, user: str, relation: str, object: str) -> bool: ...
 
     async def read_tuples(
-        self, *, user: str, relation: str, object_type: str
+        self, *, relation: str, object: str, user: str | None = None
     ) -> list[RelationTuple]: ...
+
+    @property
+    def configured(self) -> bool:
+        """Whether store and model IDs are set (checks and writes can run)."""
+        ...
 
     async def close(self) -> None: ...
 
@@ -171,8 +176,12 @@ class OpenFgaServiceClient:
             options["headers"] = {"Authorization": f"Bearer {token}"}
         return options
 
+    @property
+    def configured(self) -> bool:
+        return bool(self.store_id and self.authorization_model_id)
+
     def _require_configured(self) -> None:
-        if not self.store_id or not self.authorization_model_id:
+        if not self.configured:
             raise FgaConfigurationError(
                 "OPENFGA_STORE_ID and OPENFGA_AUTHORIZATION_MODEL_ID must be set"
             )
@@ -207,9 +216,9 @@ class OpenFgaServiceClient:
         return bool(response.allowed)
 
     async def read_tuples(
-        self, *, user: str, relation: str, object_type: str
+        self, *, relation: str, object: str, user: str | None = None
     ) -> list[RelationTuple]:
-        """Tuples ``user#relation@<object_type>:*`` (OpenFGA Read with a type-only object)."""
+        """OpenFGA Read. ``object`` is ``type:id``, or ``type:`` (all of a type; needs ``user``)."""
         self._require_configured()
         found: list[RelationTuple] = []
         continuation: str | None = None
@@ -218,7 +227,7 @@ class OpenFgaServiceClient:
             if continuation:
                 extra["continuation_token"] = continuation
             response = await self.sdk.read(
-                ReadRequestTupleKey(user=user, relation=relation, object=f"{object_type}:"),
+                ReadRequestTupleKey(user=user, relation=relation, object=object),
                 await self.request_options(**extra),
             )
             for item in response.tuples or []:

@@ -3,20 +3,35 @@
 Run explicitly, never at app startup::
 
     uv run python -m revel.auth.fga_bootstrap [--model PATH] [--store-name NAME]
+    uv run python -m revel.auth.fga_bootstrap --check
 
-Uses ``OPENFGA_API_URL`` (and ``OPENFGA_GOOGLE_AUTH``) from settings. The store is
-``OPENFGA_STORE_ID`` when set, otherwise the single store named ``revel-gifts`` (created if
-absent). The model is ``authorization/model.json``, the committed CLI transform of
-``authorization/model.fga`` (``authorization/scripts/generate-model-json.sh``; checked by
-``test-model.sh``), so this needs neither Docker nor a DSL parser. A new model version is
-written only when it differs from the store's latest. Prints the resulting
-``OPENFGA_STORE_ID`` and ``OPENFGA_AUTHORIZATION_MODEL_ID`` lines for configuration.
+Uses ``OPENFGA_API_URL`` (and ``OPENFGA_GOOGLE_AUTH``) from settings, through the same client
+and ID-token path as the app. The store is ``OPENFGA_STORE_ID`` when set, otherwise the single
+store named ``revel-gifts`` (created if absent). The model is ``model.json``, the committed CLI
+transform of ``authorization/model.fga`` (``authorization/scripts/generate-model-json.sh``;
+checked by ``test-model.sh``), so this needs neither Docker nor a DSL parser. A new model
+version is written only when it differs from the store's latest.
+
+Model path precedence: ``--model``, then ``OPENFGA_MODEL_PATH``, then
+``../authorization/model.json`` relative to the working directory (image layout: WORKDIR
+``/app/backend``, model at ``/app/authorization``), then the repository path next to this
+package. An explicit ``--model`` or ``OPENFGA_MODEL_PATH`` that does not exist is an error
+rather than a fallback, and so is finding no model at all.
+
+stdout carries only ``OPENFGA_STORE_ID=...`` and ``OPENFGA_AUTHORIZATION_MODEL_ID=...``;
+progress goes to stderr.
+
+``--check`` is a read-only probe: prints ``unconfigured`` (exit 0) when the store or model ID
+is unset, ``healthy`` (exit 0) when both exist on a reachable server, and exits non-zero
+otherwise.
 """
 
 import argparse
 import asyncio
 import json
+import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +43,7 @@ from revel.settings import Settings, get_settings
 
 STORE_NAME = "revel-gifts"
 MODEL_JSON_PATH = Path(__file__).resolve().parents[4] / "authorization" / "model.json"
+MODEL_PATH_ENV = "OPENFGA_MODEL_PATH"
 
 
 class BootstrapError(RuntimeError):
@@ -69,6 +85,31 @@ def model_body(model: dict[str, Any]) -> dict[str, Any]:
             "type_definitions": model.get("type_definitions"),
             "conditions": model.get("conditions") or None,
         }
+    )
+
+
+def resolve_model_path(
+    cli_path: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    """Pick the model JSON by precedence (see module docstring); raise if none exists."""
+    env = os.environ if env is None else env
+    explicit = cli_path or (Path(env[MODEL_PATH_ENV]) if env.get(MODEL_PATH_ENV) else None)
+    if explicit is not None:
+        if not explicit.is_file():
+            raise BootstrapError(f"Model file not found: {explicit}")
+        return explicit
+    candidates = [
+        (cwd or Path.cwd()) / ".." / "authorization" / "model.json",
+        MODEL_JSON_PATH,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise BootstrapError(
+        "authorization/model.json not found; pass --model or set " + MODEL_PATH_ENV
     )
 
 
@@ -137,15 +178,45 @@ async def bootstrap(
         await client.close()
 
 
+async def check(settings: Settings) -> str:
+    """Read-only probe: ``unconfigured`` or ``healthy``; raises if the store or model is missing."""
+    client = create_fga_client(settings)
+    try:
+        if not client.configured:
+            return "unconfigured"
+        await client.sdk.get_store(await client.request_options())
+        await client.sdk.read_authorization_model(
+            await client.request_options(authorization_model_id=client.authorization_model_id)
+        )
+        return "healthy"
+    finally:
+        await client.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m revel.auth.fga_bootstrap")
-    parser.add_argument("--model", type=Path, default=MODEL_JSON_PATH, help="model JSON path")
+    parser.add_argument("--model", type=Path, default=None, help="model JSON path")
     parser.add_argument("--store-name", default=STORE_NAME, help="store name to find or create")
+    parser.add_argument("--check", action="store_true", help="read-only health probe")
     args = parser.parse_args(argv)
+    settings = get_settings()
 
-    result = asyncio.run(
-        bootstrap(get_settings(), model_path=args.model, store_name=args.store_name)
-    )
+    if args.check:
+        try:
+            print(asyncio.run(check(settings)))
+        except Exception as exc:
+            # Exception text may carry IDs; the class name is enough for a probe.
+            print(f"unhealthy: {type(exc).__name__}", file=sys.stderr)
+            return 1
+        return 0
+
+    try:
+        model_path = resolve_model_path(args.model)
+    except BootstrapError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"# model {model_path}", file=sys.stderr)
+    result = asyncio.run(bootstrap(settings, model_path=model_path, store_name=args.store_name))
     store_note = "created" if result.store_created else "existing"
     model_note = "written" if result.model_written else "unchanged"
     print(f"# store {store_note}, model {model_note}", file=sys.stderr)

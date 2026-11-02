@@ -37,7 +37,9 @@ def resolver(mapping: dict[UUID, UUID]) -> authz.ProfileResolver:
 
 def test_subject_is_delegation_when_active() -> None:
     user_id, agent_id, delegation_id = uuid4(), uuid4(), uuid4()
-    principal = Principal(user_id=user_id, agent_id=agent_id, delegation_id=delegation_id)
+    principal = Principal(
+        user_id=user_id, agent_id=agent_id, delegation_id=delegation_id, via="mcp"
+    )
     assert subject_for(principal) == f"agent:{delegation_id}"
     # Never the global agents.id.
     assert str(agent_id) not in subject_for(principal)

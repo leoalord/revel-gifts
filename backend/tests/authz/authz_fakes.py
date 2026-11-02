@@ -15,7 +15,7 @@ class Principal:
     user_id: UUID
     agent_id: UUID | None = None
     delegation_id: UUID | None = None
-    via: Literal["mcp", "api", "ui"] = "api"
+    via: Literal["mcp", "api", "ui"] = "ui"
 
 
 class FakeFga:
@@ -24,21 +24,29 @@ class FakeFga:
     Mirrors the real client's idempotency: duplicate writes and missing deletes are ignored.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, configured: bool = True) -> None:
         self.tuples: set[RelationTuple] = set()
         self.calls: list[str] = []
         self.closed = False
+        self.configured = configured
+        # When set, every OpenFGA operation raises it (a configured but failing server).
+        self.error: Exception | None = None
+
+    def _call(self, name: str) -> None:
+        self.calls.append(name)
+        if self.error is not None:
+            raise self.error
 
     async def write_tuples(self, tuples: Iterable[RelationTuple]) -> None:
-        self.calls.append("write")
+        self._call("write")
         self.tuples.update(tuples)
 
     async def delete_tuples(self, tuples: Iterable[RelationTuple]) -> None:
-        self.calls.append("delete")
+        self._call("delete")
         self.tuples.difference_update(tuples)
 
     async def check(self, *, user: str, relation: str, object: str) -> bool:
-        self.calls.append("check")
+        self._call("check")
         if relation in ("contribute", "view_only_me"):
             return RelationTuple(user, "owner", object) in self.tuples or (
                 RelationTuple(user, "owner_agent", object) in self.tuples
@@ -46,13 +54,15 @@ class FakeFga:
         return RelationTuple(user, relation, object) in self.tuples
 
     async def read_tuples(
-        self, *, user: str, relation: str, object_type: str
+        self, *, relation: str, object: str, user: str | None = None
     ) -> list[RelationTuple]:
-        self.calls.append("read")
+        self._call("read")
         return [
             t
             for t in self.tuples
-            if t.user == user and t.relation == relation and t.object.startswith(f"{object_type}:")
+            if (user is None or t.user == user)
+            and t.relation == relation
+            and (t.object == object or (object.endswith(":") and t.object.startswith(object)))
         ]
 
     async def close(self) -> None:

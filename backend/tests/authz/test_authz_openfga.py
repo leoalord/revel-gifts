@@ -7,10 +7,11 @@ Start one (isolated project and ports so concurrent stacks do not collide), then
     OPENFGA_TEST_API_URL=http://localhost:18480 uv run pytest -m openfga
     docker compose -p revel-f4 down -v
 
-Each test module bootstraps a fresh, uniquely named store and deletes it afterwards. Skipped
-with a message when the server is unreachable.
+Each test bootstraps a fresh, uniquely named store and deletes it afterwards. Skipped with a
+message when ``OPENFGA_TEST_API_URL`` is unset (there is no default port) or unreachable.
 """
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -25,15 +26,19 @@ from revel.auth import fga_bootstrap
 from revel.auth.authz import (
     TupleHooks,
     ViewerTier,
+    acts_for_tuple,
     can_contribute,
+    configure_authz,
+    on_agent_disconnected,
     reconcile_agent_tuples,
     reconcile_owner_tuples,
+    reset_authz,
     resolve_viewer_tier,
 )
 from revel.auth.fga import OpenFgaServiceClient, create_fga_client
 from revel.settings import Settings
 
-OPENFGA_TEST_API_URL = os.environ.get("OPENFGA_TEST_API_URL", "http://localhost:8080")
+OPENFGA_TEST_API_URL = os.environ.get("OPENFGA_TEST_API_URL", "")
 
 pytestmark = [pytest.mark.openfga, pytest.mark.anyio]
 
@@ -47,6 +52,8 @@ def _reachable(url: str) -> bool:
 
 @pytest.fixture(scope="module")
 def openfga_url() -> str:
+    if not OPENFGA_TEST_API_URL:
+        pytest.skip("OPENFGA_TEST_API_URL is not set (see this module's docstring)")
     if not _reachable(OPENFGA_TEST_API_URL):
         pytest.skip(
             f"OpenFGA not reachable at {OPENFGA_TEST_API_URL}; start it with docker compose and "
@@ -147,7 +154,7 @@ async def test_hooks_owner_agent_and_cross_user_isolation(fga: OpenFgaServiceCli
     assert await can_contribute(fga, alex.as_user(), alex.profile_id)
     assert await can_contribute(fga, sams_muse, sam.profile_id)
     owner_agent = await fga.read_tuples(
-        user=f"agent:{alex.delegation_id}", relation="owner_agent", object_type="profile"
+        user=f"agent:{alex.delegation_id}", relation="owner_agent", object="profile:"
     )
     assert owner_agent == []
 
@@ -171,3 +178,61 @@ async def test_deferred_profile_then_reconcile(fga: OpenFgaServiceClient) -> Non
     # Disconnect without a resolver still finds the backfilled owner_agent tuple.
     await hooks.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
     assert not await can_contribute(fga, agent, alex.profile_id)
+
+
+async def test_check_probe_healthy_and_missing_model(store: Settings) -> None:
+    assert await fga_bootstrap.check(store) == "healthy"
+    missing = store.model_copy(
+        update={"openfga_authorization_model_id": "01M6DFE8C5TDTSBCGBA2HK4M0Q"}
+    )
+    with pytest.raises(Exception):  # noqa: B017 - any SDK error means unhealthy
+        await fga_bootstrap.check(missing)
+
+
+def test_bootstrap_cli_stdout_against_server(
+    openfga_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = Settings(_env_file=None, openfga_api_url=openfga_url)
+    monkeypatch.setattr(fga_bootstrap, "get_settings", lambda: settings)
+    assert fga_bootstrap.main(["--store-name", f"revel-test-{uuid4()}"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split("=")[0] for line in lines] == [
+        "OPENFGA_STORE_ID",
+        "OPENFGA_AUTHORIZATION_MODEL_ID",
+    ]
+    configured = settings.model_copy(
+        update={
+            "openfga_store_id": lines[0].split("=", 1)[1],
+            "openfga_authorization_model_id": lines[1].split("=", 1)[1],
+        }
+    )
+    monkeypatch.setattr(fga_bootstrap, "get_settings", lambda: configured)
+    try:
+        assert fga_bootstrap.main(["--check"]) == 0
+        assert capsys.readouterr().out.strip() == "healthy"
+    finally:
+
+        async def delete_store() -> None:
+            client = create_fga_client(configured)
+            try:
+                await client.sdk.delete_store()
+            finally:
+                await client.close()
+
+        asyncio.run(delete_store())
+
+
+async def test_disconnect_revokes_every_acts_for_on_the_delegation(
+    fga: OpenFgaServiceClient,
+) -> None:
+    alex, other = make_person(), make_person()
+    configure_authz(fga)
+    try:
+        await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id, alex.profile_id)])
+        await fga.write_tuples([acts_for_tuple(other.user_id, alex.delegation_id)])
+        await on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
+        remaining = await fga.read_tuples(relation="acts_for", object=f"agent:{alex.delegation_id}")
+        assert remaining == []
+        assert not await can_contribute(fga, alex.as_agent(uuid4()), alex.profile_id)
+    finally:
+        reset_authz()
