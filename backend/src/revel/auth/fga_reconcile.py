@@ -23,12 +23,21 @@ Run explicitly (idempotent; never at app startup)::
    ``blocked`` pair (the target blocked the requester) gets ``profile:<target>#blocked@user:
    <requester>`` and loses its tiers; a profile whose current policy has no Public opt-in loses
    ``public_viewer``.
-4. Barrier: a short transaction takes SHARE locks on ``agent_delegations``,
+4. Barrier: a short transaction takes EXCLUSIVE locks on ``agent_delegations``,
    ``connection_requests`` and ``contribution_policies`` (waiting for in-flight disconnects,
    connection changes and policy versions to commit, and holding new ones back), re-reads them
    and, while still holding the locks, re-applies the exact current state of every delegation,
    pair and policy that changed since the snapshot. A change committed after step 1 therefore
    cannot be overwritten by steps 2-3, and one that starts later runs its hook after them.
+
+   This relies on the hook-ordering contract (``authz`` module docstring): a writer runs its
+   UPDATE/INSERT on these tables BEFORE awaiting a revoke hook, so by the time its tuple is
+   deleted it holds ROW EXCLUSIVE and the barrier waits for its commit. EXCLUSIVE (rather than
+   SHARE) also waits for writers holding only ROW SHARE (``SELECT ... FOR UPDATE``) who called
+   the hook before their UPDATE. A writer holding no lock on these tables at all (none, or only
+   an advisory lock) when it runs a revoke hook cannot be seen by any table lock: it MUST follow
+   the contract. Plain SELECTs (ACCESS SHARE) are never blocked; inserts into tables with a
+   foreign key to these (their ``FOR KEY SHARE`` check takes ROW SHARE) wait like writers.
 
    Postgres lock queues are FIFO, so app writers queue behind a waiting barrier. The barrier is
    therefore bounded: the lock wait (``lock_timeout``) and every statement under it
@@ -428,16 +437,27 @@ async def _grant_and_revoke(
 
 
 def _barrier(factory: SessionFactory, apply: Callable[[Snapshot], None]) -> Snapshot:
-    """Lock the mutable tables (SHARE: waits for in-flight writers, blocks new ones), read them
-    fresh and run ``apply`` while the locks are held. Not read-only (SHARE needs it). Any raise
-    (lock or statement timeout, ``apply`` timeout) rolls back and releases the locks."""
+    """Lock the mutable tables in EXCLUSIVE mode, read them fresh and run ``apply`` while the
+    locks are held. Any raise (lock or statement timeout, ``apply`` timeout) rolls back and
+    releases the locks.
+
+    EXCLUSIVE waits for, and holds back, every transaction holding ROW EXCLUSIVE (an UPDATE,
+    INSERT or DELETE on the table) or ROW SHARE (``SELECT ... FOR UPDATE/FOR SHARE``, including
+    the ``FOR KEY SHARE`` of a foreign-key check from a referencing insert). It still admits
+    ACCESS SHARE, so plain SELECTs (token resolution, visibility reads) never wait on it. SHARE
+    was not enough: a writer that row-locked with FOR UPDATE and awaited its revoke hook before
+    its UPDATE held only ROW SHARE, so the barrier read its row as unchanged and kept the
+    snapshot's stale grant. A writer holding no table lock (only an advisory lock, or none)
+    before its hook is still invisible here; the hook-ordering contract in ``authz`` (row write
+    BEFORE any revoke hook) covers that case. Not read-only (the lock needs it)."""
     timeout_ms = int(BARRIER_LOCK_TIMEOUT_SECONDS * 1000)
     with factory()() as session, session.begin():
         connection = session.connection()
         connection.exec_driver_sql(f"SET LOCAL lock_timeout = '{timeout_ms}ms'")
         connection.exec_driver_sql(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
         connection.exec_driver_sql(
-            "LOCK TABLE agent_delegations, connection_requests, contribution_policies IN SHARE MODE"
+            "LOCK TABLE agent_delegations, connection_requests, contribution_policies "
+            "IN EXCLUSIVE MODE"
         )
         fresh = read_snapshot(session, questions=False)
         apply(fresh)
