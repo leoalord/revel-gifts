@@ -185,4 +185,225 @@ describe("PolicyScreen", () => {
       unmount();
     }
   });
+
+  it("gives the sharing checkboxes accessible names", async () => {
+    mockRoutes({
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3)),
+    });
+    render(<PolicyScreen />);
+    for (const name of [
+      "Share provisional facts",
+      "Review every contribution before it is shared",
+      "Allow my assistants to add facts",
+      "Allow Public sharing for eligible categories",
+    ]) {
+      expect(await screen.findByRole("checkbox", { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("checkbox", { name: "Share provisional facts" })).toHaveAccessibleDescription(
+      CAVEAT,
+    );
+  });
+
+  it("uses server defaults and audience labels when the response carries them", async () => {
+    const { calls } = mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, {
+          ...policyResponse(null),
+          defaults: {
+            public_opt_in: false,
+            share_provisional: false,
+            require_review_all: true,
+            enrichment_enabled: true,
+          },
+          audiences: [
+            { id: "only_me", label: "Only Me" },
+            { id: "trusted_circle", label: "Trusted Circle" },
+            { id: "connections", label: "Connections" },
+          ],
+        }),
+      "PUT /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...POLICY_V3, version: 1 })),
+    });
+    render(<PolicyScreen />);
+    expect(await screen.findByRole("checkbox", { name: "Share provisional facts" })).not.toBeChecked();
+    expect(
+      within(screen.getByLabelText("Sizes")).getByRole("option", { name: "Trusted Circle" }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Approve policy" }));
+    await screen.findByText("Contribution policy approved.");
+    expect(lastPut(calls)).toMatchObject({ share_provisional: false, require_review_all: true });
+  });
+});
+
+// --- B1: only owner-changed (or already explicit) category values are sent ------------------
+
+const OPTED_IN: typeof POLICY_V3 = { ...POLICY_V3, public_opt_in: true, category_settings: {} };
+const OPTED_IN_CATEGORIES = CATEGORIES.map((c) =>
+  c.public_eligible
+    ? { ...c, effective_audience: "public", allowed_audiences: [...c.allowed_audiences, "public"] }
+    : c,
+);
+
+describe("PolicyScreen category settings", () => {
+  it("a review-only change sends no audience", async () => {
+    const { calls } = mockRoutes({
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3)),
+      "PUT /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...POLICY_V3, version: 4 })),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(await screen.findByLabelText("Review Sizes before sharing"));
+    await userEvent.click(screen.getByRole("button", { name: "Save policy" }));
+    await screen.findByText("Policy saved (version 4).");
+
+    expect(lastPut(calls).category_settings).toEqual({
+      interest: { audience: "trusted_circle" }, // already explicit in the saved policy
+      size: { require_review: true },
+    });
+  });
+
+  it("withdrawing the opt-in with a review change sends no audience for an implicitly Public category", async () => {
+    const { calls } = mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse(OPTED_IN, OPTED_IN_CATEGORIES)),
+      "PUT /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...POLICY_V3, version: 4, category_settings: {} })),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    await userEvent.click(screen.getByLabelText("Review Interests and hobbies before sharing"));
+    await userEvent.click(screen.getByRole("button", { name: "Save policy" }));
+    await screen.findByText("Policy saved (version 4).");
+
+    expect(lastPut(calls)).toEqual({
+      expected_version: 3,
+      public_opt_in: false,
+      share_provisional: true,
+      require_review_all: false,
+      enrichment_enabled: true,
+      category_settings: { interest: { require_review: true } },
+    });
+  });
+
+  it("withdrawing drops a saved Public audience the owner did not re-choose", async () => {
+    const saved = { ...OPTED_IN, category_settings: { interest: { audience: "public" } } };
+    const { calls } = mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse(saved, OPTED_IN_CATEGORIES)),
+      "PUT /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...POLICY_V3, version: 4, category_settings: {} })),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    await userEvent.click(screen.getByLabelText("Review Sizes before sharing"));
+    await userEvent.click(screen.getByRole("button", { name: "Save policy" }));
+    await screen.findByText("Policy saved (version 4).");
+    expect(lastPut(calls).category_settings).toEqual({ size: { require_review: true } });
+  });
+
+  it("first approval with opt-in and one review toggle sends no audience for that category", async () => {
+    const { calls } = mockRoutes({
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(null)),
+      "PUT /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...OPTED_IN, version: 1 }, OPTED_IN_CATEGORIES)),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    await userEvent.click(screen.getByLabelText("Review Interests and hobbies before sharing"));
+    await userEvent.click(screen.getByRole("button", { name: "Approve policy" }));
+    await screen.findByText("Contribution policy approved.");
+
+    expect(lastPut(calls)).toEqual({
+      expected_version: null,
+      public_opt_in: true,
+      share_provisional: true,
+      require_review_all: false,
+      enrichment_enabled: true,
+      category_settings: { interest: { require_review: true } },
+    });
+  });
+});
+
+// --- B2: unsaved opt-in changes are previewed, not computed --------------------------------
+
+describe("PolicyScreen opt-in preview", () => {
+  it("enabling shows the notice, marks eligible rows and offers Public there only", async () => {
+    mockRoutes({
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3)),
+    });
+    render(<PolicyScreen />);
+    const optIn = await screen.findByRole("checkbox", {
+      name: "Allow Public sharing for eligible categories",
+    });
+    expect(screen.queryByText(/after you save/)).toBeNull();
+    expect(screen.queryByText("(updates after saving)")).toBeNull();
+
+    await userEvent.click(optIn);
+
+    expect(
+      screen.getByText(
+        "Categories eligible for Public sharing (marked) will be shared publicly after you save, unless you choose a narrower audience.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("(updates after saving)")).toBeInTheDocument();
+
+    const optionValues = (label: string) =>
+      within(screen.getByLabelText(label))
+        .getAllByRole("option")
+        .map((o) => (o as HTMLOptionElement).value);
+    // interest has an explicit saved audience (trusted_circle): not marked, but may choose Public.
+    expect(optionValues("Interests and hobbies")).toContain("public");
+    expect(screen.getByLabelText("Interests and hobbies")).not.toHaveAccessibleDescription(
+      /Public after saving/,
+    );
+    // size is not public-eligible: no Public option, no marker.
+    expect(optionValues("Sizes")).not.toContain("public");
+    expect(screen.getByLabelText("Sizes")).not.toHaveAccessibleDescription(/Public/);
+
+    await userEvent.click(optIn);
+    expect(screen.queryByText(/after you save/)).toBeNull();
+    expect(optionValues("Interests and hobbies")).not.toContain("public");
+  });
+
+  it("enabling marks implicit eligible rows 'Public after saving'", async () => {
+    mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse({ ...POLICY_V3, category_settings: {} })),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    expect(screen.getByLabelText("Interests and hobbies")).toHaveAccessibleDescription(
+      "Public after saving",
+    );
+    // Choosing an audience explicitly removes the marker for that row.
+    await userEvent.selectOptions(screen.getByLabelText("Interests and hobbies"), "only_me");
+    expect(screen.getByLabelText("Interests and hobbies")).not.toHaveAccessibleDescription(
+      /Public after saving/,
+    );
+  });
+
+  it("withdrawing shows the notice and marks implicitly Public rows", async () => {
+    mockRoutes({
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, policyResponse(OPTED_IN, OPTED_IN_CATEGORIES)),
+    });
+    render(<PolicyScreen />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
+    );
+    expect(screen.getByText("Public sharing will be withdrawn after you save.")).toBeInTheDocument();
+    expect(screen.getByText("(updates after saving)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Interests and hobbies")).toHaveAccessibleDescription(
+      "No longer Public after saving",
+    );
+    expect(screen.getByLabelText("Sizes")).not.toHaveAccessibleDescription(/Public/);
+  });
 });

@@ -1,6 +1,14 @@
 /** Presentation helpers. They format server values; they never decide access or visibility. */
 
-import type { ObservedPrecision } from "./profileApi";
+import type { AudienceInfo, ObservedPrecision } from "./profileApi";
+
+export type AudienceLabel = (id: string) => string;
+
+/** Server audience labels when the policy response carries them, else id-derived labels. */
+export function audienceLabeler(audiences: readonly AudienceInfo[] | undefined): AudienceLabel {
+  const labels = new Map((audiences ?? []).map((a) => [a.id, a.label]));
+  return (id) => labels.get(id) ?? humanize(id);
+}
 
 /** "trusted_circle" -> "Trusted circle". Used for server ids that have no server label. */
 export function humanize(id: string): string {

@@ -62,11 +62,27 @@ export interface Category {
   details_schema: DetailsSchema | null;
 }
 
+export interface PolicyFlags {
+  public_opt_in: boolean;
+  share_provisional: boolean;
+  require_review_all: boolean;
+  enrichment_enabled: boolean;
+}
+
+export interface AudienceInfo {
+  id: Audience;
+  label: string;
+}
+
 export interface PolicyResponse {
   policy: Policy | null;
   categories: Category[];
   /** Server-provided caveat for provisional sharing (present in F5's draft implementation). */
   provisional_caveat?: string;
+  /** Flag defaults while `policy` is null (agreed F5 follow-up; optional until it lands). */
+  defaults?: PolicyFlags;
+  /** Audience ids with display labels (agreed F5 follow-up; optional until it lands). */
+  audiences?: AudienceInfo[];
 }
 
 export interface PolicyUpdate {
@@ -118,6 +134,7 @@ export interface Profile {
   profile_id: string | null;
   policy_version: number | null;
   policy: Policy | null;
+  defaults?: PolicyFlags;
   facts: Fact[];
   summary: Summary;
 }
@@ -218,17 +235,21 @@ export function conflictFact(error: unknown): Fact | null {
   return fact && typeof fact === "object" ? (fact as Fact) : null;
 }
 
-/** The current policy (and categories, when sent) carried by a policy 409. */
-export function conflictPolicy(
-  error: unknown,
-): { policy: Policy | null; categories?: Category[]; provisional_caveat?: string } | null {
+export type PolicyConflict = Partial<PolicyResponse> & { policy: Policy | null };
+
+/** The current policy response carried by a policy 409 (categories etc. when sent). */
+export function conflictPolicy(error: unknown): PolicyConflict | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null;
   const body = objectBody(error);
   if (!body || !("policy" in body)) return null;
-  return {
-    policy: (body.policy as Policy | null) ?? null,
-    categories: Array.isArray(body.categories) ? (body.categories as Category[]) : undefined,
-    provisional_caveat:
-      typeof body.provisional_caveat === "string" ? body.provisional_caveat : undefined,
-  };
+  const result: PolicyConflict = { policy: (body.policy as Policy | null) ?? null };
+  if (Array.isArray(body.categories)) result.categories = body.categories as Category[];
+  if (Array.isArray(body.audiences)) result.audiences = body.audiences as AudienceInfo[];
+  if (typeof body.provisional_caveat === "string") {
+    result.provisional_caveat = body.provisional_caveat;
+  }
+  if (body.defaults && typeof body.defaults === "object") {
+    result.defaults = body.defaults as PolicyFlags;
+  }
+  return result;
 }

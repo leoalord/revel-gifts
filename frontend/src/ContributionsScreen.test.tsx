@@ -279,4 +279,80 @@ describe("ContributionsScreen", () => {
     await userEvent.click(within(li).getByRole("button", { name: "Approve" }));
     expect(await within(li).findByRole("alert")).toHaveTextContent("You are not allowed to do that.");
   });
+
+  it("offers no owner actions on superseded or removed facts", async () => {
+    facts = [
+      fact({ id: "f-5", statement: "Old statement", status: "superseded" }),
+      fact({ id: "f-6", statement: "Removed statement", status: "removed" }),
+    ];
+    routes();
+    render(<ContributionsScreen />);
+    for (const statement of ["Old statement", "Removed statement"]) {
+      const li = (await screen.findByText(statement)).closest("li")!;
+      expect(within(li).queryByRole("button")).toBeNull();
+      expect(within(li).queryByLabelText("Who can see it")).toBeNull();
+    }
+  });
+
+  it("defaults the precision to day when a date is added to an undated fact", async () => {
+    facts = [fact({ observed_at: null, observed_precision: "unknown" })];
+    const { calls } = routes({
+      "PATCH /api/ui/profile/facts/f-1": () => jsonResponse(200, { ...ACTIVE, id: "f-7" }),
+    });
+    render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    const li = item("Enjoys bouldering");
+    await userEvent.click(within(li).getByRole("button", { name: "Correct" }));
+    const precision = within(li).getByLabelText("Date precision");
+    expect(precision).toBeDisabled();
+    await userEvent.type(within(li).getByLabelText("Observed on"), "2026-09-14");
+    expect(precision).toHaveValue("day");
+    expect(precision).toBeEnabled();
+    await userEvent.selectOptions(precision, "month");
+    await userEvent.click(within(li).getByRole("button", { name: "Save correction" }));
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({
+        observed_at: "2026-09-14",
+        observed_precision: "month",
+      }),
+    );
+  });
+
+  it("maps a 400 at loc [body, statement] to the statement field", async () => {
+    routes({
+      "PATCH /api/ui/profile/facts/f-1": () =>
+        jsonResponse(400, {
+          detail: [{ loc: ["body", "statement"], msg: "statement must be 1-500 characters" }],
+        }),
+    });
+    render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    const li = item("Enjoys bouldering");
+    await userEvent.click(within(li).getByRole("button", { name: "Correct" }));
+    await userEvent.clear(within(li).getByLabelText("Statement"));
+    await userEvent.click(within(li).getByRole("button", { name: "Save correction" }));
+    const statement = within(li).getByLabelText("Statement");
+    await waitFor(() => expect(statement).toHaveAttribute("aria-invalid", "true"));
+    expect(statement).toHaveAccessibleDescription("statement must be 1-500 characters");
+  });
+
+  it("uses server audience labels when the policy response carries them", async () => {
+    mockRoutes({
+      "GET /api/ui/profile": () => jsonResponse(200, profile(facts)),
+      "GET /api/ui/profile/policy": () =>
+        jsonResponse(200, {
+          ...policyResponse(POLICY_V3),
+          audiences: [
+            { id: "only_me", label: "Only Me" },
+            { id: "trusted_circle", label: "Trusted Circle" },
+            { id: "connections", label: "My Connections" },
+          ],
+        }),
+    });
+    render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    const li = item("Enjoys bouldering");
+    expect(within(li).getByText("My Connections", { selector: "dd" })).toBeInTheDocument();
+    expect(within(li).getByRole("option", { name: "Only Me" })).toBeInTheDocument();
+  });
 });

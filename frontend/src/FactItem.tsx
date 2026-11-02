@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 
 import { UnauthorizedError } from "./api";
 import { formatObserved, formatTime, humanize } from "./format";
+import type { AudienceLabel } from "./format";
 import { OBSERVED_PRECISIONS, conflictFact, fieldErrorsOf, messageOf } from "./profileApi";
 import type {
   Category,
@@ -30,7 +31,11 @@ interface Props {
   category: Category | undefined;
   actions: FactActions;
   onOutcome: (outcome: FactOutcome) => void;
+  audienceLabel?: AudienceLabel;
 }
+
+// Owner actions are offered for live and pending facts only (presentation; the server enforces).
+const EDITABLE_STATUSES: readonly Fact["status"][] = ["active", "provisional", "pending_review"];
 
 function statusBadge(fact: Fact): { text: string; note?: string } {
   if (fact.status === "pending_review") {
@@ -193,7 +198,12 @@ function CorrectionForm({
             id={ids.date}
             type="date"
             value={observedAt}
-            onChange={(e) => setObservedAt(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              // A newly added date defaults to day precision; the owner can change it.
+              if (next && !observedAt && precision === "unknown") setPrecision("day");
+              setObservedAt(next);
+            }}
             aria-invalid={errors.observed_at ? true : undefined}
             aria-describedby={errors.observed_at ? `${ids.date}-error` : undefined}
           />
@@ -231,8 +241,15 @@ function CorrectionForm({
   );
 }
 
-export function FactItem({ fact, category, actions, onOutcome }: Props) {
+export function FactItem({
+  fact,
+  category,
+  actions,
+  onOutcome,
+  audienceLabel = humanize,
+}: Props) {
   const audienceId = useId();
+  const editable = EDITABLE_STATUSES.includes(fact.status);
   const [audience, setAudience] = useState(fact.audience);
   const [mode, setMode] = useState<"view" | "correct" | "confirm-remove">("view");
   const [busy, setBusy] = useState(false);
@@ -283,7 +300,7 @@ export function FactItem({ fact, category, actions, onOutcome }: Props) {
     event.preventDefault();
     void run(
       () => actions.patch(fact.id, { audience }),
-      (f) => `Audience changed to ${humanize(f.audience)}.`,
+      (f) => `Audience changed to ${audienceLabel(f.audience)}.`,
     );
   };
 
@@ -297,7 +314,7 @@ export function FactItem({ fact, category, actions, onOutcome }: Props) {
         </div>
         <div>
           <dt>Audience</dt>
-          <dd>{humanize(fact.audience)}</dd>
+          <dd>{audienceLabel(fact.audience)}</dd>
         </div>
         <div>
           <dt>Status</dt>
@@ -349,6 +366,7 @@ export function FactItem({ fact, category, actions, onOutcome }: Props) {
         </div>
       )}
 
+      {editable && (
       <form className="audience-form" onSubmit={changeAudience} noValidate>
         <label htmlFor={audienceId}>Who can see it</label>
         <select
@@ -365,7 +383,7 @@ export function FactItem({ fact, category, actions, onOutcome }: Props) {
           )}
           {allowed.map((a) => (
             <option key={a} value={a}>
-              {humanize(a)}
+              {audienceLabel(a)}
             </option>
           ))}
         </select>
@@ -374,8 +392,9 @@ export function FactItem({ fact, category, actions, onOutcome }: Props) {
         </button>
         <FieldError id={`${audienceId}-error`} message={errors.audience} />
       </form>
+      )}
 
-      {mode === "correct" ? (
+      {!editable ? null : mode === "correct" ? (
         <CorrectionForm
           fact={fact}
           category={category}

@@ -2,37 +2,42 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { UnauthorizedError } from "./api";
-import { humanize } from "./format";
-import {
-  conflictPolicy,
-  fieldErrorsOf,
-  getPolicy,
-  messageOf,
-  putPolicy,
-} from "./profileApi";
+import { audienceLabeler } from "./format";
+import { conflictPolicy, fieldErrorsOf, getPolicy, messageOf, putPolicy } from "./profileApi";
 import type {
   Category,
   CategorySetting,
   FieldErrors,
   Policy,
+  PolicyFlags,
   PolicyResponse,
   PolicyUpdate,
 } from "./profileApi";
 
-type Flag = "public_opt_in" | "share_provisional" | "require_review_all" | "enrichment_enabled";
+type Flag = keyof PolicyFlags;
 
-interface Draft {
-  flags: Record<Flag, boolean>;
-  categories: Record<string, { audience: string; require_review: boolean }>;
-  touched: Set<string>;
+/** Only what the owner changed on a category row; untouched fields are never sent. */
+interface CategoryChange {
+  audience?: string;
+  require_review?: boolean;
 }
 
+interface Draft {
+  flags: PolicyFlags;
+  /** Flags as loaded (saved policy, or first-run defaults), to show unsaved opt-in changes. */
+  baseline: PolicyFlags;
+  changes: Record<string, CategoryChange>;
+}
+
+/** The contract's Public audience id (F5). Only used for the opt-in preview below. */
+const PUBLIC_AUDIENCE = "public";
+
 /**
- * Shown before the first approval, when the server has no policy to read the flags from.
- * These mirror the contract's documented defaults and are sent explicitly on approval, so what
- * the owner sees is exactly what is approved. (Raised with F5: the GET could return them.)
+ * Before the first approval the server has no policy to read flags from. Prefer the server's
+ * `defaults` (agreed F5 follow-up); fall back to the contract's documented defaults. Flags are
+ * sent explicitly on approval, so what the owner sees is exactly what is approved.
  */
-const FIRST_RUN_FLAGS: Record<Flag, boolean> = {
+const DOCUMENTED_DEFAULTS: PolicyFlags = {
   public_opt_in: false,
   share_provisional: true,
   require_review_all: false,
@@ -43,56 +48,77 @@ const FALLBACK_CAVEAT =
   "Provisional facts (inferred or low confidence) are shared with a caveat that they are not " +
   "yet confirmed by you.";
 
-const FLAG_FIELDS: { flag: Flag; label: string; hint?: "caveat" | string }[] = [
-  {
-    flag: "share_provisional",
-    label: "Share provisional facts",
-    hint: "caveat",
-  },
-  {
-    flag: "require_review_all",
-    label: "Review every contribution before it is shared",
-  },
-  {
-    flag: "enrichment_enabled",
-    label: "Allow my assistants to add facts",
-  },
+const ENABLING_NOTICE =
+  "Categories eligible for Public sharing (marked) will be shared publicly after you save, " +
+  "unless you choose a narrower audience.";
+const WITHDRAWING_NOTICE = "Public sharing will be withdrawn after you save.";
+
+const FLAG_FIELDS: { flag: Flag; label: string; hint?: string }[] = [
+  { flag: "share_provisional", label: "Share provisional facts", hint: "caveat" },
+  { flag: "require_review_all", label: "Review every contribution before it is shared" },
+  { flag: "enrichment_enabled", label: "Allow my assistants to add facts" },
   {
     flag: "public_opt_in",
     label: "Allow Public sharing for eligible categories",
-    hint: "Turning this off withdraws Public sharing.",
+    hint: "Eligible categories become Public unless you choose a narrower audience below.",
   },
 ];
 
+function flagsOf(data: PolicyResponse): PolicyFlags {
+  const p = data.policy;
+  if (!p) return { ...DOCUMENTED_DEFAULTS, ...(data.defaults ?? {}) };
+  return {
+    public_opt_in: p.public_opt_in,
+    share_provisional: p.share_provisional,
+    require_review_all: p.require_review_all,
+    enrichment_enabled: p.enrichment_enabled,
+  };
+}
+
 function draftFrom(data: PolicyResponse): Draft {
-  const policy = data.policy;
-  const flags: Record<Flag, boolean> = policy
-    ? {
-        public_opt_in: policy.public_opt_in,
-        share_provisional: policy.share_provisional,
-        require_review_all: policy.require_review_all,
-        enrichment_enabled: policy.enrichment_enabled,
-      }
-    : { ...FIRST_RUN_FLAGS };
-  const categories: Draft["categories"] = {};
-  for (const c of data.categories) {
-    categories[c.id] = { audience: c.effective_audience, require_review: c.require_review };
-  }
-  return { flags, categories, touched: new Set() };
+  const flags = flagsOf(data);
+  return { flags, baseline: { ...flags }, changes: {} };
+}
+
+function explicitAudience(policy: Policy | null, id: string): string | null {
+  return policy?.category_settings[id]?.audience ?? null;
 }
 
 function buildUpdate(policy: Policy | null, draft: Draft): PolicyUpdate {
   const update: PolicyUpdate = { expected_version: policy?.version ?? null, ...draft.flags };
-  // Untouched category settings are omitted so the server carries them forward (and applies
-  // its own rules, e.g. dropping Public audiences when the opt-in is withdrawn).
-  if (draft.touched.size > 0) {
-    const settings: Record<string, CategorySetting> = { ...(policy?.category_settings ?? {}) };
-    for (const id of draft.touched) {
-      const value = draft.categories[id];
-      if (value) settings[id] = { audience: value.audience, require_review: value.require_review };
-    }
-    update.category_settings = settings;
+  const changed = Object.keys(draft.changes);
+  // With no category changes, settings are omitted and the server carries them forward
+  // (applying its own rules, e.g. dropping Public audiences when the opt-in is withdrawn).
+  if (changed.length === 0) return update;
+
+  // Otherwise send the saved explicit settings plus only what the owner changed: an audience
+  // the server derived (from the default or the opt-in) is never frozen into the policy.
+  const settings: Record<string, CategorySetting> = {};
+  for (const [id, saved] of Object.entries(policy?.category_settings ?? {})) {
+    const value: CategorySetting = {};
+    if (saved.audience != null) value.audience = saved.audience;
+    if (saved.require_review != null) value.require_review = saved.require_review;
+    settings[id] = value;
   }
+  const withdrawing = draft.baseline.public_opt_in && !draft.flags.public_opt_in;
+  for (const [id, value] of Object.entries(settings)) {
+    // Mirror the server's carry-forward rule: a withdrawn opt-in drops saved Public audiences
+    // the owner did not re-choose in this save.
+    if (withdrawing && value.audience === PUBLIC_AUDIENCE && draft.changes[id]?.audience === undefined) {
+      delete value.audience;
+    }
+  }
+  for (const id of changed) {
+    const change = draft.changes[id] ?? {};
+    const value = { ...(settings[id] ?? {}) };
+    if (change.audience !== undefined) value.audience = change.audience;
+    if (change.require_review !== undefined) value.require_review = change.require_review;
+    settings[id] = value;
+  }
+  for (const [id, value] of Object.entries(settings)) {
+    if (Object.keys(value).length === 0) delete settings[id];
+  }
+  update.category_settings = settings;
   return update;
 }
 
@@ -138,23 +164,19 @@ export function PolicyScreen() {
   if (!data || !draft) return <p role="status">Loading policy…</p>;
 
   const firstRun = data.policy === null;
+  const label = audienceLabeler(data.audiences);
+  const enabling = draft.flags.public_opt_in && !draft.baseline.public_opt_in;
+  const withdrawing = !draft.flags.public_opt_in && draft.baseline.public_opt_in;
+  const optInPending = enabling || withdrawing;
 
   const setFlag = (flag: Flag, value: boolean) =>
     setDraft({ ...draft, flags: { ...draft.flags, [flag]: value } });
 
-  const setCategory = (category: Category, change: Partial<Draft["categories"][string]>) => {
-    const current = draft.categories[category.id] ?? {
-      audience: category.effective_audience,
-      require_review: category.require_review,
-    };
-    const touched = new Set(draft.touched);
-    touched.add(category.id);
+  const setCategory = (id: string, change: CategoryChange) =>
     setDraft({
       ...draft,
-      categories: { ...draft.categories, [category.id]: { ...current, ...change } },
-      touched,
+      changes: { ...draft.changes, [id]: { ...(draft.changes[id] ?? {}), ...change } },
     });
-  };
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -174,16 +196,18 @@ export function PolicyScreen() {
       if (error instanceof UnauthorizedError) return;
       const conflict = conflictPolicy(error);
       if (conflict) {
-        setAlert("Your policy changed elsewhere. The current policy is shown; review it and save again.");
+        setAlert(
+          "Your policy changed elsewhere. The current policy is shown; review it and save again.",
+        );
         if (conflict.categories) {
           apply({
-            policy: conflict.policy,
+            ...conflict,
             categories: conflict.categories,
             provisional_caveat: conflict.provisional_caveat ?? data.provisional_caveat,
+            audiences: conflict.audiences ?? data.audiences,
           });
         } else {
           // Categories (allowed audiences) depend on the policy: re-read them, keep nothing stale.
-          setData({ ...data, policy: conflict.policy });
           setDraft(null);
           await reload();
         }
@@ -210,7 +234,7 @@ export function PolicyScreen() {
 
   const unplacedErrors = Object.entries(errors).filter(
     ([key]) =>
-      !(key in FIRST_RUN_FLAGS) &&
+      !(key in DOCUMENTED_DEFAULTS) &&
       !data.categories.some((c) => key.startsWith(`category_settings.${c.id}`)),
   );
 
@@ -227,7 +251,10 @@ export function PolicyScreen() {
       ) : (
         <p>
           Version {data.policy?.version}
-          {data.policy?.approved_at ? `, approved ${new Date(data.policy.approved_at).toLocaleString()}` : ""}.
+          {data.policy?.approved_at
+            ? `, approved ${new Date(data.policy.approved_at).toLocaleString()}`
+            : ""}
+          .
         </p>
       )}
       {alert && (
@@ -251,27 +278,38 @@ export function PolicyScreen() {
       <form onSubmit={onSubmit} noValidate>
         <fieldset>
           <legend>Sharing</legend>
-          {FLAG_FIELDS.map(({ flag, label, hint }) => (
-            <div className="field" key={flag}>
-              <label>
+          {FLAG_FIELDS.map(({ flag, label: text, hint }) => {
+            const id = `policy-flag-${flag}`;
+            const hintId = hint ? `${id}-hint` : undefined;
+            const describedBy = [hintId, errors[flag] ? fieldId(flag) : undefined]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <div className="field checkbox-field" key={flag}>
                 <input
+                  id={id}
                   type="checkbox"
                   name={flag}
                   checked={draft.flags[flag]}
                   onChange={(e) => setFlag(flag, e.target.checked)}
                   aria-invalid={errors[flag] ? true : undefined}
-                  aria-describedby={errors[flag] ? fieldId(flag) : undefined}
-                />{" "}
-                {label}
-              </label>
-              {hint && (
-                <p className="hint">
-                  {hint === "caveat" ? (data.provisional_caveat ?? FALLBACK_CAVEAT) : hint}
-                </p>
-              )}
-              {errorFor(flag)}
-            </div>
-          ))}
+                  aria-describedby={describedBy || undefined}
+                />
+                <label htmlFor={id}>{text}</label>
+                {hint && (
+                  <p className="hint" id={hintId}>
+                    {hint === "caveat" ? (data.provisional_caveat ?? FALLBACK_CAVEAT) : hint}
+                  </p>
+                )}
+                {flag === "public_opt_in" && optInPending && (
+                  <p className="pending-notice" role="status">
+                    {enabling ? ENABLING_NOTICE : WITHDRAWING_NOTICE}
+                  </p>
+                )}
+                {errorFor(flag)}
+              </div>
+            );
+          })}
         </fieldset>
 
         <fieldset>
@@ -280,17 +318,45 @@ export function PolicyScreen() {
             <thead>
               <tr>
                 <th scope="col">Category</th>
-                <th scope="col">Who can see it</th>
+                <th scope="col">
+                  Who can see it
+                  {optInPending && <span className="hint"> (updates after saving)</span>}
+                </th>
                 <th scope="col">Review first</th>
               </tr>
             </thead>
             <tbody>
-              {data.categories.map((category) => {
-                const value = draft.categories[category.id];
+              {data.categories.map((category: Category) => {
+                const change = draft.changes[category.id] ?? {};
                 const audienceKey = `category_settings.${category.id}.audience`;
                 const rowKey = `category_settings.${category.id}`;
-                const audienceError = errors[audienceKey] ? audienceKey : errors[rowKey] ? rowKey : null;
+                const audienceError = errors[audienceKey]
+                  ? audienceKey
+                  : errors[rowKey]
+                    ? rowKey
+                    : null;
                 const selectId = `audience-${category.id}`;
+                const markerId = `${selectId}-marker`;
+                const implicit =
+                  category.public_eligible &&
+                  explicitAudience(data.policy, category.id) === null &&
+                  change.audience === undefined;
+                const marker =
+                  implicit && enabling
+                    ? "Public after saving"
+                    : implicit && withdrawing
+                      ? "No longer Public after saving"
+                      : null;
+                const options = [...category.allowed_audiences];
+                if (enabling && category.public_eligible && !options.includes(PUBLIC_AUDIENCE)) {
+                  options.push(PUBLIC_AUDIENCE);
+                }
+                const describedBy = [
+                  marker ? markerId : undefined,
+                  audienceError ? fieldId(audienceError) : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(" ");
                 return (
                   <tr key={category.id}>
                     <th scope="row">
@@ -299,25 +365,33 @@ export function PolicyScreen() {
                     <td>
                       <select
                         id={selectId}
-                        value={value?.audience ?? category.effective_audience}
-                        onChange={(e) => setCategory(category, { audience: e.target.value })}
+                        value={change.audience ?? category.effective_audience}
+                        onChange={(e) => setCategory(category.id, { audience: e.target.value })}
                         aria-invalid={audienceError ? true : undefined}
-                        aria-describedby={audienceError ? fieldId(audienceError) : undefined}
+                        aria-describedby={describedBy || undefined}
                       >
-                        {category.allowed_audiences.map((audience) => (
+                        {options.map((audience) => (
                           <option key={audience} value={audience}>
-                            {humanize(audience)}
+                            {label(audience)}
                           </option>
                         ))}
                       </select>
+                      {marker && (
+                        <span className="marker" id={markerId}>
+                          {" "}
+                          {marker}
+                        </span>
+                      )}
                       {audienceError && errorFor(audienceError)}
                     </td>
                     <td>
                       <input
                         type="checkbox"
                         aria-label={`Review ${category.label} before sharing`}
-                        checked={value?.require_review ?? category.require_review}
-                        onChange={(e) => setCategory(category, { require_review: e.target.checked })}
+                        checked={change.require_review ?? category.require_review}
+                        onChange={(e) =>
+                          setCategory(category.id, { require_review: e.target.checked })
+                        }
                       />
                     </td>
                   </tr>

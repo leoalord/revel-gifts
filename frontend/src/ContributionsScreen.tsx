@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UnauthorizedError } from "./api";
 import { FactItem } from "./FactItem";
 import type { FactActions, FactOutcome } from "./FactItem";
-import { formatTime, humanize } from "./format";
+import { audienceLabeler, formatTime, humanize } from "./format";
+import type { AudienceLabel } from "./format";
 import {
   CLAIM_STATUSES,
   approveFact,
@@ -14,7 +15,7 @@ import {
   rejectFact,
   removeFact,
 } from "./profileApi";
-import type { Category, ClaimStatus, Profile, Summary } from "./profileApi";
+import type { AudienceInfo, Category, ClaimStatus, Profile, Summary } from "./profileApi";
 
 const ACTIONS: FactActions = {
   patch: patchFact,
@@ -23,7 +24,15 @@ const ACTIONS: FactActions = {
   reject: rejectFact,
 };
 
-function Counts({ title, counts }: { title: string; counts: Record<string, number> }) {
+function Counts({
+  title,
+  counts,
+  label = humanize,
+}: {
+  title: string;
+  counts: Record<string, number>;
+  label?: AudienceLabel;
+}) {
   const entries = Object.entries(counts);
   return (
     <div>
@@ -34,7 +43,7 @@ function Counts({ title, counts }: { title: string; counts: Record<string, numbe
         <dl className="counts">
           {entries.map(([key, value]) => (
             <div key={key}>
-              <dt>{humanize(key)}</dt>
+              <dt>{label(key)}</dt>
               <dd>{value}</dd>
             </div>
           ))}
@@ -44,7 +53,15 @@ function Counts({ title, counts }: { title: string; counts: Record<string, numbe
   );
 }
 
-function SummaryView({ summary, labels }: { summary: Summary; labels: Map<string, string> }) {
+function SummaryView({
+  summary,
+  labels,
+  audienceLabel,
+}: {
+  summary: Summary;
+  labels: Map<string, string>;
+  audienceLabel: AudienceLabel;
+}) {
   return (
     <section aria-labelledby="summary-heading" className="summary">
       <h3 id="summary-heading">Summary</h3>
@@ -54,7 +71,7 @@ function SummaryView({ summary, labels }: { summary: Summary; labels: Map<string
       </p>
       <div className="counts-row">
         <Counts title="By status" counts={summary.counts.by_status} />
-        <Counts title="By audience" counts={summary.counts.by_audience} />
+        <Counts title="By audience" counts={summary.counts.by_audience} label={audienceLabel} />
       </div>
       <h4>Recent activity</h4>
       {summary.recent.length === 0 ? (
@@ -80,7 +97,7 @@ function SummaryView({ summary, labels }: { summary: Summary; labels: Map<string
                 <td>
                   {event.category ? (labels.get(event.category) ?? humanize(event.category)) : "—"}
                 </td>
-                <td>{event.audience ? humanize(event.audience) : "—"}</td>
+                <td>{event.audience ? audienceLabel(event.audience) : "—"}</td>
                 <td>{event.acceptance ? humanize(event.acceptance) : "—"}</td>
               </tr>
             ))}
@@ -94,6 +111,7 @@ function SummaryView({ summary, labels }: { summary: Summary; labels: Map<string
 export function ContributionsScreen() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [audiences, setAudiences] = useState<AudienceInfo[] | undefined>(undefined);
   const [filter, setFilter] = useState<ClaimStatus | "">("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -106,6 +124,7 @@ export function ContributionsScreen() {
         if (id !== request.current) return;
         setProfile(nextProfile);
         setCategories(policy.categories);
+        setAudiences(policy.audiences);
         setLoadError(null);
       },
       (error: unknown) => {
@@ -121,6 +140,7 @@ export function ContributionsScreen() {
 
   const byId = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
   const labels = useMemo(() => new Map(categories.map((c) => [c.id, c.label])), [categories]);
+  const audienceLabel = useMemo(() => audienceLabeler(audiences), [audiences]);
 
   const onOutcome = (outcome: FactOutcome) => {
     if (outcome.kind === "gone") {
@@ -167,7 +187,7 @@ export function ContributionsScreen() {
         {notice}
       </p>
 
-      <SummaryView summary={profile.summary} labels={labels} />
+      <SummaryView summary={profile.summary} labels={labels} audienceLabel={audienceLabel} />
 
       <section aria-labelledby="facts-heading">
         <h3 id="facts-heading">Facts</h3>
@@ -197,6 +217,7 @@ export function ContributionsScreen() {
                 category={byId.get(fact.category)}
                 actions={ACTIONS}
                 onOutcome={onOutcome}
+                audienceLabel={audienceLabel}
               />
             ))}
           </ul>
