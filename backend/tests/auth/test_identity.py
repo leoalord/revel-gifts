@@ -273,3 +273,30 @@ async def test_resolver_default_hooks_without_authz(monkeypatch, repo: InMemoryI
     resolver = IdentityResolver(repo)
     principal = await resolver.resolve(_token(), via="mcp")
     assert principal.delegation_id in repo.delegations
+
+
+async def test_resolve_user_is_ui_principal_on_shared_user_row(
+    runtime: AuthRuntime, repo: InMemoryIdentityRepository, hooks: RecordingHooks
+):
+    resolver = runtime.require_resolver()
+    ui = await resolver.resolve_user("user_alice")
+    assert (ui.agent_id, ui.delegation_id, ui.via) == (None, None, "ui")
+    assert repo.agents == {} and repo.delegations == {}
+    mcp = await resolver.resolve(_token(), via="mcp")
+    assert mcp.user_id == ui.user_id
+    again = await resolver.resolve_user("user_alice")
+    assert again.user_id == ui.user_id
+    assert [name for name, _ in hooks.calls] == ["on_user_created", "on_agent_delegated"]
+
+
+@pytest.mark.parametrize("sub", ["", None])
+async def test_resolve_user_requires_subject(runtime: AuthRuntime, sub):
+    from revel.auth.identity import InvalidIdentityClaims
+
+    with pytest.raises(InvalidIdentityClaims):
+        await runtime.require_resolver().resolve_user(sub)
+
+
+async def test_resolve_cannot_produce_ui_principal(runtime: AuthRuntime):
+    with pytest.raises(ValueError):
+        await runtime.require_resolver().resolve(_token(), via="ui")
