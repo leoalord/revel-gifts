@@ -14,7 +14,7 @@ another profile is indistinguishable from a missing one (``ClaimNotFound``).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -122,6 +122,21 @@ def lock_claim(session: Session, profile_id: UUID, claim_id: UUID) -> Claim:
     if claim is None:
         raise ClaimNotFound()
     return claim
+
+
+def lock_claims(session: Session, profile_id: UUID, claim_ids: Iterable[UUID]) -> None:
+    """Lock the given facts of ``profile_id`` ``FOR UPDATE`` in id order (missing or foreign
+    ids are skipped; later per-row checks report them). Callers that will lock several facts
+    call this first so concurrent transactions acquire them in one global order."""
+    ids = sorted(set(claim_ids))
+    if not ids:
+        return
+    session.execute(
+        select(Claim.id)
+        .where(Claim.profile_id == profile_id, Claim.id.in_(ids))
+        .order_by(Claim.id)
+        .with_for_update()
+    ).all()
 
 
 def _supersede(

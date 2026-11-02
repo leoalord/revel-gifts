@@ -283,8 +283,38 @@ class CategoryOut(BaseModel):
     details_schema: dict[str, Any] | None
 
 
+class PolicyDefaults(BaseModel):
+    """The flags that apply while there is no approved policy (``policy`` is null)."""
+
+    public_opt_in: bool = False
+    share_provisional: bool = True
+    require_review_all: bool = False
+    enrichment_enabled: bool = True
+
+
+class AudienceOut(BaseModel):
+    id: Audience
+    label: str
+
+
+AUDIENCE_LABELS: dict[Audience, str] = {
+    Audience.ONLY_ME: "Only me",
+    Audience.TRUSTED_CIRCLE: "Trusted Circle",
+    Audience.CONNECTIONS: "Connections",
+    Audience.PUBLIC: "Public",
+}
+
+
+def _audiences() -> list[AudienceOut]:
+    """Audiences narrowest first, with display labels."""
+    return [AudienceOut(id=a, label=AUDIENCE_LABELS[a]) for a in reversed(Audience)]
+
+
 class PolicyResponse(BaseModel):
     policy: PolicyOut | None
+    # Set only while ``policy`` is null: the defaults that then apply.
+    defaults: PolicyDefaults | None = None
+    audiences: list[AudienceOut] = Field(default_factory=_audiences)
     # Shown with provisional sharing: provisional facts are shared with a caveat.
     provisional_caveat: str = (
         "Provisional facts (inferred or low confidence) are shared with a caveat that they are "
@@ -351,6 +381,8 @@ class ProfileOut(BaseModel):
     profile_id: UUID | None
     policy_version: int | None
     policy: PolicyOut | None
+    # Set only while ``policy`` is null (see ``PolicyResponse.defaults``).
+    defaults: PolicyDefaults | None
     facts: list[FactOut]
     summary: SummaryOut
 
@@ -466,6 +498,7 @@ def _policy_response(view: PolicyView) -> PolicyResponse:
         )
     return PolicyResponse(
         policy=policy,
+        defaults=PolicyDefaults() if policy is None else None,
         categories=[
             CategoryOut(
                 id=spec.id,
@@ -480,6 +513,15 @@ def _policy_response(view: PolicyView) -> PolicyResponse:
             for spec in CATEGORIES
         ],
     )
+
+
+def _audience_refusal(spec: CategorySpec, audience: Audience) -> str:
+    """Why ``audience`` is not allowed for a fact of ``spec`` (``audience_allowed`` failed)."""
+    if spec.sensitive:
+        return "Sensitive facts are always Only Me"
+    if audience is Audience.PUBLIC and not spec.public_eligible:
+        return "This category can never be Public"
+    return "Public needs the owner's Public opt-in"
 
 
 def _is_owner_ui(principal: PrincipalLike) -> bool:
@@ -795,12 +837,7 @@ def _plan_fact(
     # Facts involving other people: tightest plausible audience unless one is given.
     audience = fact.audience or (Audience.ONLY_ME if fact.involves_others else effective)
     if not policy.audience_allowed(spec, audience):
-        raise _Rejected(
-            "invalid_field",
-            "Sensitive facts are Only Me"
-            if spec.sensitive
-            else "Public needs a public-eligible category and the owner's opt-in",
-        )
+        raise _Rejected("invalid_field", _audience_refusal(spec, audience))
     acceptance: AcceptanceMode | None
     owner_ui = _is_owner_ui(principal)
     if not owner_ui and policy.approved and not policy.enrichment_enabled:
@@ -863,6 +900,23 @@ async def add_facts(
     def write() -> list[FactOutcome]:
         _lock_profile(session, profile_id, exclusive=False)
         policy = _policy_view(_current_policy_row(session, profile_id))
+        # Lock every supersede target up front in id order, so two batches naming the same
+        # facts in opposite orders queue instead of deadlocking.
+        claim_writes.lock_claims(
+            session,
+            profile_id,
+            {
+                item.supersedes_id
+                for item in facts
+                if isinstance(item, FactInput) and item.supersedes_id is not None
+            }
+            | {
+                sid
+                for item in facts
+                if not isinstance(item, FactInput)
+                and (sid := _uuid_or_none(item.get("supersedes_id"))) is not None
+            },
+        )
         results: list[FactOutcome] = []
         for index, raw in enumerate(facts):
             try:
@@ -910,6 +964,13 @@ async def add_facts(
     except BaseException:
         await _in_thread(session.rollback)
         raise
+
+
+def _uuid_or_none(value: Any) -> UUID | None:
+    try:
+        return UUID(str(value)) if value is not None else None
+    except ValueError:
+        return None
 
 
 def _rejected(index: int, reason_code: str, message: str) -> FactOutcome:
@@ -1069,6 +1130,7 @@ async def get_my_profile(
             profile_id=None,
             policy_version=None,
             policy=None,
+            defaults=PolicyDefaults(),
             facts=[],
             summary=_empty_summary(since),
         )
@@ -1090,6 +1152,7 @@ async def get_my_profile(
         profile_id=profile_id,
         policy_version=policy.policy.version if policy.policy else None,
         policy=policy.policy,
+        defaults=policy.defaults,
         facts=facts,
         summary=summary,
     )
@@ -1171,9 +1234,10 @@ async def set_fact_audience(
         def check(claim: Claim) -> None:
             if Audience(claim.audience).rank > audience.rank and not owner_ui:
                 raise NotAllowed()
-            if not policy.audience_allowed(_spec_of(claim), audience):
+            spec = _spec_of(claim)
+            if not policy.audience_allowed(spec, audience):
                 raise InvalidRequest(
-                    [{"loc": ["audience"], "msg": "Public needs eligibility and the opt-in"}]
+                    [{"loc": ["body", "audience"], "msg": _audience_refusal(spec, audience)}]
                 )
 
         return claim_writes.set_audience(
@@ -1263,25 +1327,39 @@ async def patch_fact(
     def change(profile_id: UUID, policy: PolicyView) -> Claim:
         def build(old: Claim) -> claim_writes.NewFact:
             spec = _spec_of(old)
-            try:
-                statement = _check_statement(
-                    spec, patch.statement if "statement" in fields else old.statement
-                )
-                details = validate_details(
-                    spec, patch.details if "details" in fields else old.details
-                )
-                if fields & {"observed_at", "observed_precision"}:
+            errors: list[dict[str, Any]] = []
+
+            def field_error(loc: str, exc: CategoryError) -> None:
+                errors.append({"loc": ["body", loc], "msg": exc.message})
+
+            statement = old.statement
+            if "statement" in fields:
+                try:
+                    if patch.statement is None:
+                        raise InvalidField("statement must be 1-500 characters")
+                    statement = _check_statement(spec, patch.statement)
+                except CategoryError as exc:
+                    field_error("statement", exc)
+            details = old.details
+            if "details" in fields:
+                try:
+                    details = validate_details(spec, patch.details)
+                except CategoryError as exc:
+                    field_error("details", exc)
+            observed_at = old.observed_at
+            precision = ObservedPrecision(old.observed_precision)
+            if fields & {"observed_at", "observed_precision"}:
+                try:
                     observed_at, precision = _observed(patch.observed_at, patch.observed_precision)
-                else:
-                    observed_at = old.observed_at
-                    precision = ObservedPrecision(old.observed_precision)
-            except CategoryError as exc:
-                raise InvalidRequest([{"loc": ["body"], "msg": exc.message}]) from None
+                except CategoryError as exc:
+                    field_error("observed_at", exc)
             audience = patch.audience or Audience(old.audience)
             if not policy.audience_allowed(spec, audience):
-                raise InvalidRequest(
-                    [{"loc": ["audience"], "msg": "Public needs eligibility and the opt-in"}]
+                errors.append(
+                    {"loc": ["body", "audience"], "msg": _audience_refusal(spec, audience)}
                 )
+            if errors:
+                raise InvalidRequest(errors)
             return claim_writes.NewFact(
                 category=old.category,
                 statement=statement,

@@ -31,13 +31,18 @@ POLICY_DESCRIPTION = (
     "Read the user's contribution policy and the fact categories: for each category its "
     "effective audience (the widest audience accepted without the user's review), allowed "
     "audiences, whether review is required and the details schema. Read-only. Call it before "
-    "add_facts. Never collected: street addresses, birth years, health, religion, politics, "
-    "orientation and finances."
+    "add_facts. Never collected: street addresses and birth years. Sensitive topics (health, "
+    "religion, politics, orientation, finances) may be saved only when the user volunteers "
+    "them, in the 'sensitive' category (Only Me, explicit evidence, held for the user's "
+    "approval); never infer them or ask about them."
 )
 ADD_FACTS_DESCRIPTION = (
     "Save 1-20 short, actionable gifting facts about the user to their Revel profile "
-    "(e.g. 'Owns a Moka pot', 'Prefers loose-leaf green tea'). Never raw conversation, quotes "
-    "or sensitive information. Each fact gets its own outcome: 'accepted' (status 'active', or "
+    "(e.g. 'Owns a Moka pot', 'Prefers loose-leaf green tea'). Never raw conversation or "
+    "quotes. Sensitive topics go only in the 'sensitive' category and only when the user "
+    "volunteered them (evidence_type 'explicit'; Only Me; held for the user's approval); "
+    "never infer them or ask about them. Set involves_others when a fact is about other "
+    "people too. Each fact gets its own outcome: 'accepted' (status 'active', or "
     "'provisional' when inferred or low confidence, shared with a caveat), 'pending_review' "
     "(held for the user's approval, e.g. an audience wider than their policy allows) or "
     "'rejected' with a reason_code. To correct a fact, send the replacement with supersedes_id; "
@@ -53,7 +58,8 @@ AUDIENCE_DESCRIPTION = (
 )
 REMOVE_DESCRIPTION = (
     "Remove one of the user's facts (e.g. undo a wrong contribution or a fact the user asked "
-    "to forget). It stops being shared immediately."
+    "to forget). It stops being shared immediately. Removing an already removed or replaced "
+    "fact is an error (not idempotent)."
 )
 
 _NOT_FOUND = "Fact not found"
@@ -139,8 +145,9 @@ def register(server: MCPServer, settings: Any) -> None:
             "remove_fact",
             "Remove a fact",
             REMOVE_DESCRIPTION,
+            # A repeat remove is a conflict (ToolError), so not idempotent.
             ToolAnnotations(
-                readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+                readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
             ),
         ),
     ]
