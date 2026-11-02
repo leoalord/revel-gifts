@@ -41,7 +41,9 @@ edit can widen it), which needs `evidence_type = explicit` (otherwise rejected,
 `sensitive_not_explicit`) and is ALWAYS `pending_review` until the owner approves it in the UI,
 even when review is otherwise off and even for the owner's own entry. A category id naming a
 sensitive topic (e.g. `health`) is `unknown_category` with a hint to use `sensitive`.
-Health-related diet exclusions stay in `diet_exclusion`, with no reason.
+Health-related diet exclusions stay in `diet_exclusion`, with no reason. Assistants save
+sensitive topics only when the owner volunteers them (`sensitive`, Only Me, owner approval)
+and never infer or ask for them; the MCP tool descriptions say so.
 
 ## Contribution policy
 
@@ -87,7 +89,7 @@ effective default), `evidence_type` (`explicit|observed|inferred`), `confidence?
 date), `supersedes_id?`, `involves_others?` (bool, default false; input only, not stored).
 Batch of 1-20; each item gets its own outcome, one bad item does not fail the batch (semantic
 checks are per item; a structurally invalid body, e.g. a wrong enum value or a missing
-`evidence_type`, is a 400 / MCP validation error for the whole request).
+`evidence_type`, is FastAPI's **422** / an MCP validation error for the whole request).
 
 Outcome per item (`accepted | pending_review | rejected`):
 
@@ -140,7 +142,7 @@ adapters): `get_policy`, `set_policy`, `get_my_profile`, `get_summary`, `set_fac
 `remove_fact`, `approve_fact`, `reject_fact`, `patch_fact`, `session_scope` (sessions from the
 shared `get_sessionmaker`; `configure_sessionmaker` overrides it in tests). Errors:
 `FactNotFound` (404), `NotAllowed` / `AuthorizationDenied` (403), `FactConflict` (409, carries
-the fact), `PolicyVersionConflict` (409), `PolicyInvalid` / `InvalidRequest` (400),
+the fact), `PolicyVersionConflict` (409), `PolicyInvalid` / `InvalidRequest` (400, field errors),
 `AuthorizationUnavailable` (503).
 
 ## Operations
@@ -175,12 +177,28 @@ policy writes create it.
 {"policy": null | {"version": 3, "approved_at": "...", "public_opt_in": false,
   "share_provisional": true, "require_review_all": false, "enrichment_enabled": true,
   "category_settings": {"size": {"audience": "only_me"}}},
+ "defaults": null | {"public_opt_in": false, "share_provisional": true,
+   "require_review_all": false, "enrichment_enabled": true},
+ "audiences": [{"id": "only_me", "label": "Only me"}, {"id": "trusted_circle", "label": "Trusted Circle"},
+   {"id": "connections", "label": "Connections"}, {"id": "public", "label": "Public"}],
  "provisional_caveat": "Provisional facts (inferred or low confidence) are shared with a caveat ...",
  "categories": [{"id": "interest", "label": "Interests and hobbies", "default_audience": "connections",
    "public_eligible": true, "effective_audience": "connections",
    "allowed_audiences": ["only_me", "trusted_circle", "connections"], "require_review": false,
    "details_schema": null}]}
 ```
+`defaults` is set only while `policy` is null (the flags that apply until the first approval),
+else null. `audiences` lists every audience narrowest first with its display label.
+`details_schema` is `null` (no details) or a JSON Schema subset: `{"type": "object",
+"properties": {<name>: {"type": "integer", "minimum", "maximum"} | {"type": "string",
+"maxLength": 100}}, "required": [...], "additionalProperties": false, "minProperties"?: 1}`
+(only these keywords occur). The server also checks rules the subset cannot express (a valid
+day of the month, no street address or year in text).
+
+`allowed_audiences` bounds what a POLICY may set and what assistants get without review. A
+fact itself may sit outside its category's `allowed_audiences` when the owner approved a wider
+proposal or widened it in the UI (e.g. a `size` fact at `connections`); Public always needs
+eligibility and the opt-in, and `sensitive` facts are always Only Me.
 
 `PUT /api/ui/profile/policy` body: `{"expected_version": 2 | null, "public_opt_in": ...,
 "share_provisional": ..., "require_review_all": ..., "enrichment_enabled": ...,
@@ -193,6 +211,7 @@ policy writes create it.
 `GET .../profile` →
 ```json
 {"profile_id": "..." | null, "policy_version": 3 | null, "policy": null | {...policy...},
+ "defaults": null | {...same as GET .../policy, set only while policy is null...},
  "facts": [{"id": "...", "category": "owned_item", "statement": "...", "details": null,
    "audience": "connections", "status": "active", "provisional": false,
    "evidence_type": "explicit", "confidence": "high", "observed_at": "2026-10-20",
@@ -215,10 +234,26 @@ changes create a replacement; audience-only changes update in place. Fact-level 
 `{"detail": "<reason>", "fact": {...current fact...}}` (reasons: `fact_not_editable`,
 `fact_not_removable`, `fact_not_pending`, `fact_not_live`, `superseded_fact_not_live`,
 `audience_not_allowed`). `PATCH /api/v1/profile/facts/{id}/audience` body `{"audience": ...}`.
+PATCH field errors are 400 with field-level locations, e.g.
+`{"detail": [{"loc": ["body", "statement"], "msg": "..."}]}` (also `["body", "details"]`,
+`["body", "observed_at"]`, `["body", "audience"]`); the audience message names the actual rule
+("Sensitive facts are always Only Me", "This category can never be Public", "Public needs the
+owner's Public opt-in").
+
+`DELETE .../facts/{id}` → **200** with the removed fact (`"status": "removed"`). Removing it
+again (or a superseded fact) is **409** `{"detail": "fact_not_removable", "fact": {...}}`. The MCP
+`remove_fact` tool is therefore annotated `idempotentHint: false` (a repeat is a tool error).
+
+Locking: `add_facts` locks every `supersedes_id` target up front in id order (after the
+profile's `FOR SHARE`), so batches naming the same facts in opposite orders queue instead of
+deadlocking.
 
 ### Errors
 
-400 validation (`{"detail": [...]}` field errors); 401 not signed in / bad token; 403 not allowed
+422 structural validation (FastAPI: malformed JSON, wrong types or enum values, missing
+required fields, unknown fields); 400 semantic validation (`{"detail": [{"loc", "msg"}]}`
+field errors, e.g. a policy audience not allowed or an invalid correction); 401 not signed in /
+bad token; 403 not allowed
 (e.g. an agent widening or approving, policy write by an agent, an OpenFGA contribute check that
 fails, a cross-origin UI write); 404 fact not found **or not the
 caller's** (never reveals existence); 409 policy version conflict or a fact that changed state;
