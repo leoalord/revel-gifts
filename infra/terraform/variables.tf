@@ -164,3 +164,15 @@ variable "domain_name" {
   type        = string
   default     = "api.revel.gifts"
 }
+
+variable "enable_fga_reconcile_schedule" {
+  description = "Run the revel-fga-reconcile job on fga_reconcile_schedule with Cloud Scheduler. Takes effect only once openfga_store_id and openfga_authorization_model_id are both set (reconcile exits 2 without them). Set false and apply to remove the job, the scheduler job and the revel-scheduler service account; to pause without an apply, use `gcloud scheduler jobs pause` (see infra/README.md)."
+  type        = bool
+  default     = true
+}
+
+variable "fga_reconcile_schedule" {
+  description = "Cron schedule (time zone Etc/UTC) for revel-fga-reconcile. Keep the interval well above the job's 300s timeout so runs do not overlap."
+  type        = string
+  default     = "*/15 * * * *"
+}
