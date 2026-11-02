@@ -30,6 +30,32 @@ Configuration comes from environment variables, then `backend/.env`, then the re
 `.env` (copy `../.env.example`). Local Postgres and OpenFGA: `docker compose up -d` from the repo
 root (see `../dev/README.md`).
 
+## Database migrations
+
+F3 owns `alembic.ini`, `migrations/` and `src/revel/db/` (models in `revel.db.models`, enums in
+`revel.db.enums`, engine/sessions in `revel.db.session`). Other features request schema changes
+from F3, which keeps a single Alembic head. `migrations/env.py` reads the URL from settings
+(`DATABASE_URL`); it is never stored in `alembic.ini` or logged. Cloud SQL unix-socket URLs work:
+`postgresql+psycopg://USER:PASS@/revel?host=/cloudsql/PROJECT:REGION:INSTANCE`.
+
+```sh
+cd backend
+uv run alembic upgrade head      # apply (explicit step, not run on app startup)
+uv run alembic check             # models and migrations agree (no drift)
+uv run alembic heads             # must print exactly one head
+uv run alembic downgrade base    # roll back everything (destroys data)
+uv run alembic revision --autogenerate -m "..."   # then hand-review; name constraints via conventions
+```
+
+PostgreSQL-backed tests run against a disposable database and are skipped unless
+`REVEL_TEST_DATABASE_URL` is set; they downgrade it to base and recreate it:
+
+```sh
+POSTGRES_HOST_PORT=55433 docker compose -p revel-test up -d --wait postgres   # from repo root
+docker compose -p revel-test exec -T postgres psql -U revel -d revel -c "CREATE DATABASE revel_test"
+REVEL_TEST_DATABASE_URL=postgresql+psycopg://revel:revel@localhost:55433/revel_test uv run pytest tests/db
+```
+
 Inspect the MCP endpoint with the MCP Inspector CLI:
 
 ```sh
