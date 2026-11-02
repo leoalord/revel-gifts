@@ -14,11 +14,23 @@ Use in FastAPI routes::
   access token (refreshing it when expired and re-setting the cookie on the route's
   response) and returns ``Principal(user_id, None, None, via="ui")`` for the same
   ``users`` row the MCP OAuth path resolves. Missing/invalid session: **401 JSON**
-  ``{"detail": "Not signed in"}`` (an invalid cookie is also cleared); the UI should
-  then navigate to ``/auth/login?return_to=<current path>``. WorkOS outage: 503.
+  ``{"detail": "Not signed in"}``; the UI should then navigate to
+  ``/auth/login?return_to=<current path>``. An unreadable/invalid cookie is also cleared;
+  a cookie whose refresh token WorkOS rejected is left in place (a concurrent request may
+  have just replaced it) and is overwritten by the next sign-in. WorkOS outage: 503.
 * :func:`require_same_origin` rejects cookie-authenticated unsafe requests
   (POST/PUT/PATCH/DELETE) whose ``Origin`` (or, if absent, ``Referer``) is not this
   service's origin: **403**. :data:`SameOriginUIPrincipal` applies both.
+
+Sign-out: call ``POST /auth/logout`` (same-origin) and then **always navigate the browser
+to the returned ``logout_url``** when it is not ``null``. The POST only clears Revel's
+cookie; the WorkOS/AuthKit session (and its refresh token, should a copy of the cookie
+exist) ends only when the browser visits that URL.
+
+Residual risk: refresh single-flight is per process. If two Cloud Run instances refresh
+the same single-use refresh token at once, the loser answers 401 (cookie kept) and the UI
+sends the user through sign-in again, which AuthKit completes without re-entering
+credentials while its session is alive.
 
 Cookies never authenticate ``/mcp`` or bearer-only routes such as ``GET /me``.
 A route that returns a ``Response`` object directly must copy the refreshed cookie
@@ -27,6 +39,7 @@ itself; returning data (dict/model) lets FastAPI merge it automatically.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -39,13 +52,14 @@ from revel.auth.browser import (
     BrowserAuthNotConfigured,
     BrowserSessionManager,
     SessionInvalid,
+    SessionRefreshRejected,
     WorkOSUnavailable,
 )
 from revel.auth.identity import IdentityError, Principal
 from revel.auth.runtime import AuthNotConfigured, AuthRuntime, get_auth_runtime
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 # --- cookie helpers ----------------------------------------------------------------------
@@ -129,6 +143,12 @@ async def current_ui_principal(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not signed in")
     try:
         session = await browser.authenticate_cookie(sealed)
+    except SessionRefreshRejected:
+        # Keep the cookie: a concurrent request may have rotated the refresh token and
+        # set a fresher cookie, which a deletion here could race with and wipe.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not signed in"
+        ) from None
     except SessionInvalid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -165,23 +185,52 @@ async def current_ui_principal(
     return principal
 
 
-def _origin_of(url: str) -> str | None:
-    parts = urlsplit(url)
-    if not parts.scheme or not parts.netloc:
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+
+
+def _parse_origin(value: str, *, allow_path: bool = False) -> tuple[str, str, int | None] | None:
+    """Strictly parse ``scheme://host[:port]`` into ``(scheme, host, port)``, else ``None``.
+
+    Rejects userinfo, non-numeric or out-of-range ports (``http://localhost:8000.evil``),
+    invalid host characters and, for ``Origin`` values, any path/query/fragment.
+    """
+    try:
+        parts = urlsplit(value.strip())
+        port = parts.port
+    except ValueError:
         return None
-    return f"{parts.scheme}://{parts.netloc}".lower()
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if scheme not in ("http", "https") or not host or "@" in parts.netloc:
+        return None
+    if not allow_path and (parts.path not in ("", "/") or parts.query or parts.fragment):
+        return None
+    if ":" in host:  # IPv6 literal; only loopback is ever allowed
+        if host != "::1":
+            return None
+    elif not _HOST_RE.match(host):
+        return None
+    return scheme, host, port
 
 
-def _origin_allowed(origin: str, browser: BrowserSessionManager) -> bool:
+def _origin_key(parsed: tuple[str, str, int | None]) -> str:
+    scheme, host, port = parsed
+    shown = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{shown}" + (f":{port}" if port is not None else "")
+
+
+def _origin_allowed(parsed: tuple[str, str, int | None], browser: BrowserSessionManager) -> bool:
     config = browser.config
-    allowed = {config.public_origin.lower(), *(o.lower() for o in config.extra_origins)}
-    if origin in allowed:
+    allowed = set()
+    for candidate in (config.public_origin, *config.extra_origins):
+        configured = _parse_origin(candidate)
+        if configured is not None:
+            allowed.add(_origin_key(configured))
+    if _origin_key(parsed) in allowed:
         return True
-    if config.development:
-        host = urlsplit(origin).hostname or ""
-        bracketed = f"[{host}]" if ":" in host else host
-        return urlsplit(origin).scheme == "http" and bracketed in _LOCAL_HOSTS
-    return False
+    scheme, host, _ = parsed
+    # Development/test only: any port on plain-http loopback (separately served dev UIs).
+    return config.development and scheme == "http" and host in _LOOPBACK_HOSTS
 
 
 async def require_same_origin(
@@ -200,10 +249,11 @@ async def require_same_origin(
         return
     browser = require_browser(runtime)
     raw = request.headers.get("origin")
-    origin = _origin_of(raw) if raw and raw != "null" else None
-    if raw is None:
+    if raw is not None:
+        origin = _parse_origin(raw) if raw != "null" else None
+    else:
         referer = request.headers.get("referer")
-        origin = _origin_of(referer) if referer else None
+        origin = _parse_origin(referer, allow_path=True) if referer else None
     if origin is None or not _origin_allowed(origin, browser):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin request")
 

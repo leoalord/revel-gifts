@@ -11,8 +11,8 @@ Browser routes (contract for F8; see ``revel.auth.ui``):
 * ``GET /auth/session`` — the shared whoami payload (``via="ui"``, ``agent=null``) for
   the signed-in browser user; 401 when not signed in.
 * ``POST /auth/logout`` — same-origin only; clears the session cookie and returns
-  ``{"logout_url": ...}``: navigate there to end the WorkOS session too (``null`` when
-  no session id is known).
+  ``{"logout_url": ...}``. F8 must then navigate the browser to ``logout_url`` (when not
+  ``null``): that is what ends the WorkOS/AuthKit session and its refresh token.
 
 ``GET /me`` stays bearer-only; cookies are never accepted there or on ``/mcp``.
 """

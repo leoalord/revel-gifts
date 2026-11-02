@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -51,6 +51,8 @@ STATE_COOKIE = "revel_auth_state"
 SECURE_PREFIX = "__Host-"
 SESSION_MAX_AGE_SECONDS = 30 * 24 * 3600
 STATE_MAX_AGE_SECONDS = 600
+# A request still carrying a just-rotated refresh token reuses that refresh's result.
+REFRESH_REUSE_SECONDS = 60
 # Browsers cap a cookie (name + value) at about 4096 bytes.
 MAX_COOKIE_BYTES = 4000
 CALLBACK_PATH = "/auth/callback"
@@ -64,6 +66,14 @@ class BrowserAuthNotConfigured(RuntimeError):
 
 class SessionInvalid(Exception):
     """The browser session is missing, unreadable or no longer valid (respond 401)."""
+
+
+class SessionRefreshRejected(SessionInvalid):
+    """WorkOS rejected the cookie's refresh token (respond 401 but keep the cookie).
+
+    Another request (possibly on another instance) may have just rotated the token and
+    set a fresher cookie; deleting the cookie here could race with and wipe that one.
+    """
 
 
 class WorkOSUnavailable(Exception):
@@ -174,12 +184,16 @@ class CookieSealer:
         if len(password) < MIN_COOKIE_PASSWORD_LENGTH:
             raise BrowserAuthNotConfigured("cookie password too short")
         self._password = password.encode()
+        self._keys: dict[str, AESGCM] = {}
 
     def _aead(self, purpose: str) -> AESGCM:
-        key = HKDF(
-            algorithm=hashes.SHA256(), length=32, salt=_SEAL_SALT, info=purpose.encode()
-        ).derive(self._password)
-        return AESGCM(key)
+        aead = self._keys.get(purpose)
+        if aead is None:
+            key = HKDF(
+                algorithm=hashes.SHA256(), length=32, salt=_SEAL_SALT, info=purpose.encode()
+            ).derive(self._password)
+            aead = self._keys[purpose] = AESGCM(key)
+        return aead
 
     def seal(self, purpose: str, data: dict[str, Any]) -> str:
         nonce = os.urandom(12)
@@ -284,8 +298,9 @@ class BrowserSessionManager:
         if self._jwks is None and config.jwks_url:
             self._jwks = JWKSCache(config.jwks_url, http_client=http_client)
         # Single-flight refresh per refresh token within this process: concurrent requests
-        # carrying the same (possibly single-use) refresh token share one WorkOS call.
-        self._refresh_lock = anyio.Lock()
+        # carrying the same (possibly single-use) refresh token share one WorkOS call, while
+        # refreshes of different sessions run independently.
+        self._inflight: dict[str, _RefreshFlight] = {}
         self._recent_refreshes: dict[str, tuple[float, SessionTokens]] = {}
         if not config.configured:
             logger.warning("Browser sign-in is not configured; /auth routes will answer 503")
@@ -464,7 +479,8 @@ class BrowserSessionManager:
     async def authenticate_cookie(self, sealed: str | None) -> VerifiedSession:
         """Verify the session cookie, refreshing an expired access token when possible.
 
-        Raises :class:`SessionInvalid` (401, clear cookie) or :class:`WorkOSUnavailable`
+        Raises :class:`SessionInvalid` (401, clear cookie), its subclass
+        :class:`SessionRefreshRejected` (401, keep cookie) or :class:`WorkOSUnavailable`
         (503, keep cookie). ``refreshed`` tells the caller to re-set the cookie.
         """
         if not sealed:
@@ -498,23 +514,38 @@ class BrowserSessionManager:
 
     async def _refresh(self, refresh_token: str) -> SessionTokens:
         key = hashlib.sha256(refresh_token.encode()).hexdigest()
-        async with self._refresh_lock:
-            now = time.monotonic()
-            self._recent_refreshes = {
-                k: v for k, v in self._recent_refreshes.items() if now - v[0] < 60
-            }
-            cached = self._recent_refreshes.get(key)
-            if cached is not None:
-                return cached[1]
-            try:
-                data = await self._authenticate(
-                    {"grant_type": "refresh_token", "refresh_token": refresh_token}
-                )
-            except WorkOSRejected:
-                raise SessionInvalid("refresh rejected") from None
-            tokens = SessionTokens(data["access_token"], data["refresh_token"])
-            self._recent_refreshes[key] = (now, tokens)
-            return tokens
+        now = time.monotonic()
+        self._recent_refreshes = {
+            k: v for k, v in self._recent_refreshes.items() if now - v[0] < REFRESH_REUSE_SECONDS
+        }
+        cached = self._recent_refreshes.get(key)
+        if cached is not None:
+            return cached[1]
+        flight = self._inflight.get(key)
+        if flight is not None:
+            await flight.done.wait()
+            if flight.tokens is None:
+                # Fresh exception per waiter; an interrupted leader counts as unavailable.
+                error = flight.error or WorkOSUnavailable("refresh interrupted")
+                raise type(error)(str(error))
+            return flight.tokens
+        flight = self._inflight[key] = _RefreshFlight()
+        try:
+            data = await self._authenticate(
+                {"grant_type": "refresh_token", "refresh_token": refresh_token}
+            )
+            flight.tokens = SessionTokens(data["access_token"], data["refresh_token"])
+            self._recent_refreshes[key] = (time.monotonic(), flight.tokens)
+            return flight.tokens
+        except WorkOSRejected:
+            flight.error = SessionRefreshRejected("refresh rejected")
+            raise flight.error from None
+        except WorkOSUnavailable as exc:
+            flight.error = WorkOSUnavailable(str(exc))
+            raise
+        finally:
+            flight.done.set()
+            self._inflight.pop(key, None)
 
     # --- logout ------------------------------------------------------------------------
 
@@ -541,6 +572,13 @@ class BrowserSessionManager:
             return None
         value = claims.get("sid")
         return value if isinstance(value, str) else None
+
+
+@dataclass
+class _RefreshFlight:
+    done: anyio.Event = field(default_factory=anyio.Event)
+    tokens: SessionTokens | None = None
+    error: Exception | None = None
 
 
 def _sid(claims: dict[str, Any], fallback: str | None) -> str | None:

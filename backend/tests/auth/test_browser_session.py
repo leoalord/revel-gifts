@@ -384,15 +384,42 @@ def test_expired_access_token_refreshes_and_resets_cookie(
     assert SESSION not in _set_cookies(again)
 
 
-def test_refresh_failure_is_401_and_clears_cookie(
+def test_refresh_rejected_is_401_and_keeps_cookie(
     auth_client: TestClient, authkit: TestAuthKit, runtime: AuthRuntime
 ) -> None:
+    """A rejected refresh may be a lost cross-instance race; never delete a fresher cookie."""
     sealed = _expired_session(runtime, authkit)
     authkit.refresh_tokens.clear()  # revoked / already used
     auth_client.cookies.set(SESSION, sealed)
     response = auth_client.get("/auth/session")
     assert response.status_code == 401
-    assert _set_cookies(response)[SESSION][SESSION]["max-age"] == "0"
+    assert response.json() == {"detail": "Not signed in"}
+    assert SESSION not in _set_cookies(response)
+    # Signing in again overwrites the dead cookie.
+    assert _sign_in(auth_client, authkit).status_code == 302
+    assert auth_client.get("/auth/session").status_code == 200
+
+
+def test_rotated_cookie_from_other_instance_survives_losing_refresh(
+    auth_client: TestClient, authkit: TestAuthKit, runtime: AuthRuntime
+) -> None:
+    """Instance A rotated the token and set a new cookie; B's late rejection must not wipe it."""
+    stale = _expired_session(runtime, authkit)
+    # "Instance A": a separate manager (no shared in-process cache) refreshes first.
+    from revel.auth.browser import BrowserSessionManager
+
+    other = BrowserSessionManager(
+        runtime.require_browser().config, http_client=authkit.http_client()
+    )
+    fresh = anyio.run(other.authenticate_cookie, stale)
+    fresh_cookie = other.seal_session(fresh.tokens, fresh.session_id)
+    # "Instance B" (this app) gets the old cookie: WorkOS rejects the reused token.
+    auth_client.cookies.set(SESSION, stale)
+    late = auth_client.get("/auth/session")
+    assert late.status_code == 401 and SESSION not in _set_cookies(late)
+    auth_client.cookies.clear()
+    auth_client.cookies.set(SESSION, fresh_cookie)
+    assert auth_client.get("/auth/session").status_code == 200
 
 
 def test_refresh_outage_is_503_and_keeps_cookie(
@@ -497,6 +524,27 @@ def test_session_token_is_not_a_bearer_token(auth_client: TestClient) -> None:
     assert auth_client.get("/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [{"drop": ("aud",)}, {"aud": CLIENT_ID}, {"aud": "client_muse"}],
+)
+def test_audience_guard_rejects_session_shaped_authkit_tokens(
+    auth_client: TestClient, auth_settings: Settings, overrides: dict
+) -> None:
+    """Signed by the AuthKit key with the AuthKit issuer, but not for the MCP resource.
+
+    Pins that the bearer verifier's ``aud == resource`` check (not ``kid``/issuer) is what
+    keeps User-Management-shaped tokens from authenticating as an assistant.
+    """
+    token = TestAuthKit.token(auth_settings, **overrides)
+    response = auth_client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert 'error="invalid_token"' in response.headers["www-authenticate"]
+    # Control: the same key/issuer with the right audience is accepted.
+    good = TestAuthKit.token(auth_settings)
+    assert auth_client.get("/me", headers={"Authorization": f"Bearer {good}"}).status_code == 200
+
+
 # --- logout ------------------------------------------------------------------------------
 
 
@@ -584,6 +632,17 @@ def csrf_client(runtime: AuthRuntime, auth_settings: Settings) -> Iterator[TestC
         ({"Origin": "https://localhost:8000"}, 403),
         ({"Origin": "https://evil.example"}, 403),
         ({"Origin": "http://localhost.evil.example"}, 403),
+        ({"Origin": "http://localhost:8000.evil.example"}, 403),
+        ({"Origin": "http://127.0.0.1:3000.evil.example"}, 403),
+        ({"Origin": "http://localhost:8000@evil.example"}, 403),
+        ({"Origin": "http://evil.example@localhost:8000"}, 403),
+        ({"Origin": "http://localhost:99999"}, 403),
+        ({"Origin": "http://localhost:8000/path"}, 403),
+        ({"Origin": "http://[::1]:8000"}, 200),  # dev/test only
+        ({"Origin": "http://[::2]:8000"}, 403),
+        ({"Origin": "ftp://localhost:8000"}, 403),
+        ({"Origin": "HTTP://LOCALHOST:8000"}, 200),
+        ({"Referer": "http://localhost:8000.evil.example/x"}, 403),
         ({"Referer": "https://evil.example/"}, 403),
         ({"Origin": "https://evil.example", "Referer": f"{PUBLIC_BASE_URL}/"}, 403),
     ],
@@ -642,3 +701,69 @@ def test_redirect_uri_defaults_to_public_base_url_callback(authkit: TestAuthKit)
     )
     assert config.redirect_uri == "https://revel.example/auth/callback"
     assert config.configured
+
+
+@pytest.mark.anyio
+async def test_refresh_single_flight_is_per_token(
+    authkit: TestAuthKit, runtime: AuthRuntime
+) -> None:
+    """Different sessions refresh independently; one slow refresh does not block others."""
+    browser = runtime.require_browser()
+    slow_started = anyio.Event()
+    release = anyio.Event()
+    original = authkit.handler
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if b"rt_slow" in request.content:
+            slow_started.set()
+            await release.wait()
+        return original(request)
+
+    browser._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    slow = _expired_session(runtime, authkit, rt="rt_slow")
+    fast = _expired_session(runtime, authkit, rt="rt_fast")
+    results: dict[str, object] = {}
+
+    async def run(name: str, sealed: str) -> None:
+        results[name] = await browser.authenticate_cookie(sealed)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run, "slow", slow)
+        await slow_started.wait()
+        with anyio.fail_after(2):
+            await run("fast", fast)  # completes while the slow refresh is still pending
+        assert "slow" not in results
+        release.set()
+    assert set(results) == {"slow", "fast"}
+
+
+@pytest.mark.anyio
+async def test_concurrent_rejected_refreshes_all_rejected(
+    authkit: TestAuthKit, runtime: AuthRuntime
+) -> None:
+    from revel.auth.browser import SessionRefreshRejected
+
+    sealed = _expired_session(runtime, authkit)
+    authkit.refresh_tokens.clear()
+    browser = runtime.require_browser()
+    errors: list[BaseException] = []
+
+    async def run() -> None:
+        try:
+            await browser.authenticate_cookie(sealed)
+        except SessionRefreshRejected as exc:
+            errors.append(exc)
+
+    async with anyio.create_task_group() as tg:
+        for _ in range(4):
+            tg.start_soon(run)
+    # Every concurrent request sees the rejection (401, cookie kept); rejections are not
+    # cached, so late arrivals may ask WorkOS again, which rejects them again.
+    assert len(errors) == 4
+
+
+def test_sealer_caches_key_per_purpose() -> None:
+    sealer = CookieSealer(COOKIE_PASSWORD)
+    assert sealer._aead("session") is sealer._aead("session")
+    assert sealer._aead("session") is not sealer._aead("state")
+    assert sealer.unseal("session", sealer.seal("session", {"a": 1})) == {"a": 1}
