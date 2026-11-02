@@ -634,3 +634,11 @@ def test_production_csrf_allows_only_public_and_configured_origins(authkit: Test
                 assert response.status_code == expected, origin
     finally:
         reset_auth_runtimes()
+
+
+def test_redirect_uri_defaults_to_public_base_url_callback(authkit: TestAuthKit) -> None:
+    config = BrowserAuthConfig.from_settings(
+        authkit.settings(public_base_url="https://revel.example/", workos_redirect_uri=None)
+    )
+    assert config.redirect_uri == "https://revel.example/auth/callback"
+    assert config.configured

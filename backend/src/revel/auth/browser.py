@@ -146,7 +146,8 @@ class BrowserAuthConfig:
         return cls(
             client_id=setting("workos_client_id"),
             api_key=setting("workos_api_key"),
-            redirect_uri=setting("workos_redirect_uri"),
+            # Same default as infra: PUBLIC_BASE_URL + /auth/callback.
+            redirect_uri=setting("workos_redirect_uri") or (base + CALLBACK_PATH if base else None),
             cookie_password=password,
             public_origin=public_origin,
             extra_origins=extras,
