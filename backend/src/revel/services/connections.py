@@ -78,9 +78,12 @@ from lookups); with no profile there is nothing to protect in OpenFGA, and recon
 
 Rate limits (module constants). ``REQUEST_LIMIT`` new requests per requester per
 ``REQUEST_WINDOW`` are counted in Postgres via ``(requester_user_id, created_at)`` under a
-per-requester advisory lock (exact across instances). Every lookup, found or not, also counts
-against ``LOOKUP_LIMIT`` per ``LOOKUP_WINDOW`` in an in-process sliding window (no table exists
-for failed lookups): this slows handle enumeration but is per instance and reset on restart.
+per-requester advisory lock (exact across instances); blocked rows the target inserted are not
+the requester's and do not count. ``LOOKUP_LIMIT`` per ``LOOKUP_WINDOW`` is an in-process sliding
+window (no table exists for failed lookups; per instance, reset on restart) that slows handle
+enumeration: every ``lookup_and_request`` and every ``set_handle`` that supplies a handle (its
+"unavailable" answer reveals occupancy) records an attempt before any database work;
+``resolve_handle`` checks the limit first but records only not-found results.
 """
 
 from __future__ import annotations
@@ -102,7 +105,7 @@ from uuid import UUID
 import anyio.from_thread
 import anyio.to_thread
 from pydantic import BaseModel
-from sqlalchemy import exists, func, insert, or_, select, text, update
+from sqlalchemy import and_, exists, func, insert, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -401,18 +404,32 @@ class _SlidingWindow:
         self._lock = threading.Lock()
         self._hits: dict[UUID, deque[float]] = {}
 
+    def _current(self, key: UUID, window: timedelta, now: float) -> deque[float]:
+        hits = self._hits.setdefault(key, deque())
+        horizon = now - window.total_seconds()
+        while hits and hits[0] <= horizon:
+            hits.popleft()
+        return hits
+
     def hit(self, key: UUID, limit: int, window: timedelta) -> bool:
         """Record one attempt; ``False`` when ``limit`` attempts already fall in ``window``."""
         now = time.monotonic()
-        horizon = now - window.total_seconds()
         with self._lock:
-            hits = self._hits.setdefault(key, deque())
-            while hits and hits[0] <= horizon:
-                hits.popleft()
+            hits = self._current(key, window, now)
             if len(hits) >= limit:
                 return False
             hits.append(now)
             return True
+
+    def exceeded(self, key: UUID, limit: int, window: timedelta) -> bool:
+        """Whether ``limit`` attempts already fall in ``window`` (records nothing)."""
+        with self._lock:
+            return len(self._current(key, window, time.monotonic())) >= limit
+
+    def record(self, key: UUID) -> None:
+        """Record one attempt without checking (the caller checked ``exceeded`` first)."""
+        with self._lock:
+            self._hits.setdefault(key, deque()).append(time.monotonic())
 
     def reset(self) -> None:
         with self._lock:
@@ -475,9 +492,15 @@ async def set_handle(
 
     ``handle`` is required the first time. ``avatar_url`` left unset keeps the current value;
     ``None`` or ``""`` clears it. A taken handle raises ``HandleUnavailable``.
+
+    ``HandleUnavailable`` reveals that SOME account holds the handle, including an
+    undiscoverable one, so every call that supplies a handle counts against the lookup limit
+    BEFORE any validation or database work (``RateLimited`` once exhausted, for taken and free
+    handles alike). Calls that change only ``discoverable`` / ``avatar_url`` are not counted.
     """
     normalized = None
     if handle is not None:
+        _count_lookup(principal)
         normalized = normalize_handle(handle)
         if normalized is None:
             raise InvalidHandle()
@@ -561,16 +584,28 @@ async def resolve_handle(
     Not found (identically): nonexistent or malformed handle, a target who blocked the caller,
     and an undiscoverable target the caller holds no approved connection to. The caller's own
     handle resolves (to themselves). Creates nothing; access to the target's profile is still
-    decided by F4 (``visible_claims``). Counts against the lookup limit (``RateLimited``).
+    decided by F4 (``visible_claims``).
+
+    Rate limit: the lookup limit is checked first (``RateLimited`` once exhausted, whatever the
+    handle), but only a ``TargetNotFound`` result records an attempt. Successful resolves (e.g.
+    F5's repeated reads of a connection's profile) cost nothing, while enumerating handles,
+    which produces mostly not-found results, spends the quota. Every hidden case takes the same
+    not-found path (one statement, then one record), so recording adds no difference between
+    them; a found handle is already distinguishable by its result.
     """
-    _count_lookup(principal)
+    if lookup_limiter.exceeded(principal.user_id, LOOKUP_LIMIT, LOOKUP_WINDOW):
+        raise RateLimited()
     normalized = normalize_handle(handle)
 
     def work() -> ResolvedTarget:
         _check_actor(session, principal)
         return _resolve_sync(session, principal.user_id, normalized, allow_self=True)
 
-    return await _run(work)
+    try:
+        return await _run(work)
+    except TargetNotFound:
+        lookup_limiter.record(principal.user_id)
+        raise
 
 
 # --- Requests ---------------------------------------------------------------------------------
@@ -616,6 +651,14 @@ async def lookup_and_request(
                 .where(
                     ConnectionRequest.requester_user_id == me,
                     ConnectionRequest.created_at > func.now() - REQUEST_WINDOW,
+                    # Blocks the TARGET inserted (no live row to update) name this user as
+                    # requester but were not created by them: inserted already blocked, so
+                    # responded_at equals created_at (one transaction's now()). A request
+                    # blocked later was responded to in a later transaction.
+                    ~and_(
+                        ConnectionRequest.status == _BLOCKED,
+                        ConnectionRequest.responded_at == ConnectionRequest.created_at,
+                    ),
                 )
             ).scalar_one()
             if recent >= REQUEST_LIMIT:
@@ -869,7 +912,12 @@ def _pair_for(
 def _locked_row(
     session: Session, principal: PrincipalLike, request_id: UUID, side: Side
 ) -> ConnectionRequest:
-    """Take the pair lock, then row-lock the request (re-checking ownership under the lock)."""
+    """Check the caller's side of the request, take the pair lock, then row-lock the request.
+
+    Ownership is checked once, before the lock: a row's requester and target never change, so
+    the check still holds under the lock; only its status may have changed, which every caller
+    re-checks on the locked row.
+    """
     requester, target = _pair_for(session, principal, request_id, side)
     _lock_pair(session, requester, target)
     row = session.execute(

@@ -78,9 +78,8 @@ ERRORS: dict[type[svc.ConnectionsError], tuple[int, str]] = {
 def error_response(exc: Exception) -> JSONResponse:
     """Fixed ``{"detail", "code"}`` body for a service error; anything else is a generic 503.
 
-    Returned (not raised) so no exception text can reach the client. As F2's ``ui`` notes, a
-    returned ``Response`` does not carry a cookie refreshed by the dependency; the next request
-    refreshes again.
+    Returned (not raised) so no exception text can reach the client. A session cookie refreshed
+    by F2's dependency is still delivered (F2's ``RefreshedSessionCookieMiddleware``).
     """
     for cls, (status, code) in ERRORS.items():
         if isinstance(exc, cls):
