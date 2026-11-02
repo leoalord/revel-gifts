@@ -41,6 +41,9 @@ class AgentDelegation(TimestampMixin, Base):
     __tablename__ = "agent_delegations"
     __table_args__ = (
         UniqueConstraint("user_id", "agent_id"),
+        # Target of composite (delegation_id, user_id) FKs: a row that stores both a user and a
+        # delegation can only cite a delegation that belongs to that user.
+        UniqueConstraint("id", "user_id"),
         CheckConstraint(check_in("status", DelegationStatus), name="status"),
         CheckConstraint(
             "(status = 'disconnected') = (disconnected_at IS NOT NULL)",

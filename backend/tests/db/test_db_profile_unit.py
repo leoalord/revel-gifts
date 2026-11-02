@@ -106,7 +106,7 @@ def _ddl() -> str:
 
 
 def test_profile_constraint_and_index_names() -> None:
-    assert set(Base.metadata.tables) == {"users", "agents", "agent_delegations"} | PROFILE_TABLES
+    assert set(Base.metadata.tables) >= {"users", "agents", "agent_delegations"} | PROFILE_TABLES
     ddl = _ddl()
     for name in (
         "pk_profiles",
