@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     allowed_hosts: str = ""
     # Extra browser Origin values (comma-separated, scheme://host[:port]).
     allowed_origins: str = ""
+    # Built human UI (Vite output) served under /app/. Unset: <repo>/frontend/dist, resolved
+    # from this file (not the CWD). A missing directory is allowed; /app/ then answers 503.
+    frontend_dist_dir: Path | None = None
 
     # --- Google Cloud ---
     gcp_project_id: str | None = None
@@ -83,6 +86,10 @@ class Settings(BaseSettings):
         """Fail closed on unsafe production configuration (called by create_app)."""
         if self.app_env == "production" and urlsplit(self.public_base_url).scheme != "https":
             raise ValueError("PUBLIC_BASE_URL must use https when APP_ENV=production")
+
+    @property
+    def resolved_frontend_dist_dir(self) -> Path:
+        return self.frontend_dist_dir or (_REPO_DIR / "frontend" / "dist")
 
     @property
     def normalized_mcp_path(self) -> str:
