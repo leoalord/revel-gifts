@@ -28,6 +28,17 @@ variable "public_base_url" {
   default     = "https://api.revel.gifts"
 }
 
+variable "app_extra_allowed_hosts" {
+  description = "Extra Host values for revel-app's MCP transport allowlist, in addition to the PUBLIC_BASE_URL host and the computed deterministic run.app host. Use for the non-deterministic run.app hostname (from `terraform output app_urls`) after the first apply. Hostnames only, no scheme."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for h in var.app_extra_allowed_hosts : can(regex("^[a-z0-9.-]+(:[0-9]+)?$", h))])
+    error_message = "app_extra_allowed_hosts entries must be bare hostnames (optionally :port), without scheme or path."
+  }
+}
+
 variable "mcp_path" {
   description = "Public MCP endpoint path."
   type        = string

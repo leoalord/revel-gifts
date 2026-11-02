@@ -19,6 +19,9 @@ Terraform lives in `infra/terraform/`. [`infra/README.md`](../infra/README.md) i
 
 - Plan/apply: `terraform plan -out=rg7.tfplan`, then `terraform apply rg7.tfplan` after approval. State is local and contains generated DB credentials; never commit it.
 - Explicit migrations (Cloud Run jobs, never on replica start): `gcloud run jobs execute revel-openfga-migrate --region us-central1 --wait` and `gcloud run jobs execute revel-migrate --region us-central1 --wait`.
+- Image: root `Dockerfile` (multi-stage uv, Python 3.12 slim, non-root, no `.env` in the image; `.dockerignore` enforces it). Build from the repo root: `docker buildx build --platform linux/amd64 -t "$IMAGE" --push .`.
+- Health: use `/health` for Cloud Run checks; Cloud Run reserves some paths ending in `z`, so `/healthz` may not reach the app on `run.app` ([known issues](https://docs.cloud.google.com/run/docs/known-issues)). `revel-app` uses the default TCP startup probe.
+- Hosts: Terraform sets `ALLOWED_HOSTS`/`ALLOWED_ORIGINS` to the deterministic `revel-app-<PROJECT_NUMBER>.<REGION>.run.app` host so the app works before DNS; the hash URL needs `app_extra_allowed_hosts` after the first apply.
 - App rollout: build `linux/amd64` and push to `us-central1-docker.pkg.dev/revel-gifts/revel/revel-app:<sha>`, `gcloud run jobs update revel-migrate --image …`, run the migration job, then `gcloud run deploy revel-app --image …`.
 - App runtime configuration: `APP_ENV=production`, `PUBLIC_BASE_URL` (default `https://api.revel.gifts`), `MCP_PATH=/mcp`, `OPENFGA_API_URL` (OpenFGA's canonical `run.app` URL, also the ID-token audience), `OPENFGA_GOOGLE_AUTH=true`, `DATABASE_URL` from Secret Manager (unix socket under `/cloudsql`), plus opted-in secrets listed in `app_secret_env`.
 - OpenFGA is IAM-authenticated: only the `revel-app` service account may invoke it, and unauthenticated requests get 403.

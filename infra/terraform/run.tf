@@ -156,11 +156,30 @@ resource "google_cloud_run_v2_job" "openfga_migrate" {
 # Revel application (public API + MCP)
 ############################################
 
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
 locals {
+  app_service_name = "revel-app"
+
+  # The scaffold's MCP transport allowlist rejects any Host other than the PUBLIC_BASE_URL host.
+  # Before DNS exists the app is reached at its run.app URL, so allow that host too. The
+  # deterministic URL is https://SERVICE-PROJECT_NUMBER.REGION.run.app
+  # (https://docs.cloud.google.com/run/docs/triggering/https-request). The non-deterministic
+  # (hash) URL cannot be predicted; add it through app_extra_allowed_hosts after the first
+  # apply if it is needed (see infra/README.md).
+  app_run_app_hosts = distinct(concat(
+    ["${local.app_service_name}-${data.google_project.this.number}.${var.region}.run.app"],
+    var.app_extra_allowed_hosts,
+  ))
+
   app_env = {
     APP_ENV         = "production"
     PUBLIC_BASE_URL = var.public_base_url
     MCP_PATH        = var.mcp_path
+    ALLOWED_HOSTS   = join(",", local.app_run_app_hosts)
+    ALLOWED_ORIGINS = join(",", [for h in local.app_run_app_hosts : "https://${h}"])
     # Canonical run.app URL; the app also uses it as the Google ID-token audience.
     OPENFGA_API_URL     = google_cloud_run_v2_service.openfga.uri
     OPENFGA_GOOGLE_AUTH = "true"
@@ -168,7 +187,7 @@ locals {
 }
 
 resource "google_cloud_run_v2_service" "app" {
-  name                 = "revel-app"
+  name                 = local.app_service_name
   location             = var.region
   ingress              = "INGRESS_TRAFFIC_ALL"
   invoker_iam_disabled = false
@@ -234,6 +253,10 @@ resource "google_cloud_run_v2_service" "app" {
         name       = "cloudsql"
         mount_path = "/cloudsql"
       }
+      # Default TCP startup probe on 8080 (kept deliberately: it works for the placeholder
+      # image and our image alike). Any HTTP probe or deployed check must use /health, not
+      # /healthz: Cloud Run reserves some paths ending in "z"
+      # (https://docs.cloud.google.com/run/docs/known-issues, "Reserved URL paths").
     }
 
     volumes {

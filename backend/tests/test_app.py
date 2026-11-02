@@ -125,3 +125,36 @@ def test_mcp_resource_url(settings: Settings) -> None:
     assert settings.mcp_resource_url == "http://localhost:8000/mcp"
     custom = Settings(_env_file=None, workos_token_audience="https://api.revel.gifts/mcp")
     assert custom.mcp_resource_url == "https://api.revel.gifts/mcp"
+
+
+def test_health_matches_healthz(client: TestClient) -> None:
+    for path in ("/health", "/healthz"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+
+def test_settings_repr_hides_database_password() -> None:
+    password = "s3cr3t-db-password"
+    settings = Settings(
+        _env_file=None,
+        database_url=f"postgresql+psycopg://revel_app:{password}@/revel?host=/cloudsql/p:r:i",
+    )
+    assert password not in repr(settings)
+    assert password not in str(settings)
+    assert "database_url" not in repr(settings)
+    # The type consumed by F3 is unchanged.
+    assert isinstance(settings.database_url, str)
+    assert password in settings.database_url
+
+
+@pytest.mark.parametrize("url", ["http://api.revel.gifts", "api.revel.gifts", ""])
+def test_production_requires_https_public_base_url(url: str) -> None:
+    settings = Settings(_env_file=None, app_env="production", public_base_url=url)
+    with pytest.raises(ValueError, match="https"):
+        create_app(settings)
+
+
+def test_development_allows_http_public_base_url() -> None:
+    settings = Settings(_env_file=None, app_env="development", public_base_url="http://localhost:1")
+    assert create_app(settings).state.settings is settings

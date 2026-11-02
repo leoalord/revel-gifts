@@ -17,7 +17,7 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
 | `iam.tf` | Service accounts `revel-app`, `revel-openfga`; `cloudsql.client`; invoker bindings |
 | `database.tf` | Cloud SQL PostgreSQL 16 `revel-db` (db-f1-micro, Enterprise, zonal, 10 GB SSD), databases `revel` and `openfga`, users `revel_app` and `openfga` |
 | `secrets.tf` | `DATABASE_URL`, `OPENFGA_DATASTORE_URI` (generated) and empty placeholders `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FIREWORKS_API_KEY`, `META_API_KEY`; per-secret accessor grants |
-| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`; optional domain mapping |
+| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`; optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
 | `outputs.tf` | URLs, connection name, repository path, service accounts, DNS record |
 
 ### Network and access design
@@ -47,7 +47,25 @@ terraform apply rg7.tfplan                              # only after approval
 
 ADC must be authenticated as an account allowed to administer the project (`gcloud auth application-default login`). The first apply enables the APIs and then creates everything else. Service creation waits on the API enablement, which can take a minute or two to propagate; if a create fails with "API not enabled", wait and re-run `terraform apply`.
 
+### Recovering from a partial first apply
+
+If an apply fails partway (API propagation, quota, billing), a resource can exist in GCP without being recorded in state. The next apply then fails with **409 / "already exists"** for that resource. Either import it into state and re-plan, or delete the orphan (only if it holds nothing you need) and re-apply. Examples:
+
+```sh
+terraform import google_sql_database_instance.main projects/revel-gifts/instances/revel-db
+terraform import google_service_account.app projects/revel-gifts/serviceAccounts/revel-app@revel-gifts.iam.gserviceaccount.com
+terraform import google_cloud_run_v2_service.app projects/revel-gifts/locations/us-central1/services/revel-app
+terraform import google_artifact_registry_repository.revel projects/revel-gifts/locations/us-central1/repositories/revel
+terraform plan -out=rg7.tfplan   # re-check before applying again
+```
+
+The import ID format for each resource is in the provider docs ("Import" section). Do not import a database instance created by someone else without checking it first.
+
+### Destroy
+
 Before a deliberate `terraform destroy`, apply with `deletion_protection = false` first.
+
+A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to about a week** after deletion. Recreating the instance during that window fails; change the instance name in `database.tf` instead (the connection name, `DATABASE_URL` and `OPENFGA_DATASTORE_URI` follow it automatically).
 
 ## Initial rollout order
 
@@ -62,14 +80,27 @@ Before a deliberate `terraform destroy`, apply with `deletion_protection = false
 
 ## Images
 
-**Application** (the Dockerfile is a later step; the image must be `linux/amd64`):
+**Application**: the `Dockerfile` at the repository root (build context is the repo root, so `backend/` and `authorization/` are both available). It is a multi-stage uv build (`ghcr.io/astral-sh/uv:0.10.2`, `python:3.12-slim-bookworm`), `uv sync --locked --no-dev --no-editable`, runs as non-root `revel` (uid 10001) with `WORKDIR /app/backend` and the venv on `PATH`, so `uvicorn` and `alembic` resolve from there. It listens on `$PORT` (default 8080) with `--proxy-headers`. `.dockerignore` excludes every `.env`/`.env.*`, `.git`, `.claude/`, `infra/` (state, plans, tfvars) and research notes; settings come only from the environment. The image must be `linux/amd64`:
 
 ```sh
 SHA=$(git rev-parse --short HEAD)
 IMAGE=us-central1-docker.pkg.dev/revel-gifts/revel/revel-app:$SHA
 gcloud auth configure-docker us-central1-docker.pkg.dev   # once
-docker buildx build --platform linux/amd64 -t "$IMAGE" --push backend
+docker buildx build --platform linux/amd64 -t "$IMAGE" --push .   # from the repo root
 ```
+
+Local smoke test (pick a free host port):
+
+```sh
+docker buildx build --platform linux/amd64 --load -t revel-app:test .
+docker run -d --rm --name revel-test -p 18080:8080 \
+  -e APP_ENV=development -e PUBLIC_BASE_URL=http://localhost:8080 -e PORT=8080 revel-app:test
+curl -fsS http://localhost:18080/health
+npx -y @modelcontextprotocol/inspector --cli http://localhost:18080/mcp --transport http --method tools/list
+docker stop revel-test
+```
+
+With `APP_ENV=production` the app refuses to start unless `PUBLIC_BASE_URL` is `https://`.
 
 Terraform ignores image changes on `revel-app` and `revel-migrate` after creation, so roll out with gcloud (other settings stay as Terraform set them):
 
@@ -87,11 +118,33 @@ Change the migration command through the `migrate_command` variable (default `al
 
 Terraform generates `DATABASE_URL` (`postgresql+psycopg://revel_app:…@/revel?host=/cloudsql/<connection-name>`) and `OPENFGA_DATASTORE_URI` (`postgres://openfga:…@/openfga?host=/cloudsql/<connection-name>&sslmode=disable`). It creates the other secrets without versions and never holds their values. Add a version from your local `.env` without printing it:
 
+Pitfalls with a naive `grep | cut` pipeline:
+
+- **Quoted values**: `KEY="abc"` would store the quotes as part of the secret.
+- **Missing or empty keys**: an absent line pipes an empty string, and gcloud stores an empty secret version, which only fails later at runtime.
+- **Duplicates, `\r` line endings, `export KEY=…`** lines also change what is stored.
+
+Use this helper (bash or zsh) from the directory holding `.env`. It reads one key (the last occurrence, as dotenv does), strips one pair of surrounding quotes and a trailing `\r`, refuses missing or empty values, and never prints the value (do not run it under `set -x`):
+
 ```sh
-# Example for one key; repeat per secret. Reads only that line; nothing is echoed.
-grep '^WORKOS_API_KEY=' .env | cut -d= -f2- | tr -d '\n' \
-  | gcloud secrets versions add WORKOS_API_KEY --data-file=-
+add_secret() {  # usage: add_secret WORKOS_API_KEY
+  local name="$1" line value
+  line=$(grep -E "^${name}=" .env | tail -n 1)
+  if [ -z "$line" ]; then echo "$name: not found in .env; skipped" >&2; return 1; fi
+  value=${line#*=}
+  value=${value%$'\r'}
+  case "$value" in
+    \"*\") value=${value#\"}; value=${value%\"} ;;
+    \'*\') value=${value#\'}; value=${value%\'} ;;
+  esac
+  if [ -z "$value" ]; then echo "$name: empty in .env; skipped" >&2; return 1; fi
+  printf '%s' "$value" | gcloud secrets versions add "$name" --data-file=- >/dev/null \
+    && echo "$name: version added"
+}
+add_secret WORKOS_API_KEY
 ```
+
+Values with inline comments (`KEY=abc # note`) are not handled; keep `.env` lines to `KEY=value`.
 
 Then add the secret ID to `app_secret_env` in `terraform.tfvars` and apply. Cloud Run refuses to deploy a revision that references a secret with no versions, so only list secrets that have one. The env var name equals the secret ID.
 
@@ -105,12 +158,37 @@ Needs user steps; DNS is not pre-approved.
 4. Wait for the managed certificate (often 15 minutes to a few hours), then check:
    ```sh
    gcloud beta run domain-mappings describe --domain api.revel.gifts --region us-central1
-   curl -fsS https://api.revel.gifts/healthz
+   curl -fsS https://api.revel.gifts/health
    ```
+
+## Health checks and allowed hosts
+
+Cloud Run reserves some URL paths ending in `z`, and recommends avoiding all such paths ([known issues: Reserved URL paths](https://docs.cloud.google.com/run/docs/known-issues)). `/healthz` can therefore be intercepted on `*.run.app` before reaching the app. The app serves the same `200 {"status":"ok"}` on `/health` and `/healthz`; use **`/health`** for every Cloud Run check:
+
+```sh
+curl -fsS "$(terraform output -raw app_url)/health"
+```
+
+`revel-app` keeps Cloud Run's default **TCP** startup probe on port 8080 (no HTTP probe), which works for both the placeholder image and ours. If an HTTP probe is added later, point it at `/health`.
+
+**Allowed hosts.** The MCP transport rejects (421) any `Host` other than the `PUBLIC_BASE_URL` host (`api.revel.gifts`) and `ALLOWED_HOSTS`. Before DNS exists the app is reached on `run.app`, so Terraform sets:
+
+- `ALLOWED_HOSTS` = the deterministic URL host `revel-app-<PROJECT_NUMBER>.<REGION>.run.app` (format from [Cloud Run HTTPS URLs](https://docs.cloud.google.com/run/docs/triggering/https-request); the project number comes from the `google_project` data source; for this project `revel-app-1034867470814.us-central1.run.app`), plus any `app_extra_allowed_hosts`.
+- `ALLOWED_ORIGINS` = `https://` plus each of those hosts.
+
+The non-deterministic URL (`revel-app-<hash>-uc.a.run.app`) contains a random hash and cannot be predicted. If you use it, after the first apply:
+
+```sh
+terraform output app_urls            # lists both URLs
+# add the hash host (no scheme) to app_extra_allowed_hosts in terraform.tfvars, then
+terraform plan -out=rg7.tfplan && terraform apply rg7.tfplan
+```
+
+Prefer the Terraform variable over `gcloud run services update --update-env-vars`, which the next apply would revert.
 
 ## Verifying OpenFGA is not public
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' "$(terraform output -raw openfga_url)/healthz"   # expect 403
+curl -s -o /dev/null -w '%{http_code}\n' "$(terraform output -raw openfga_url)/stores"    # expect 403
 gcloud run services get-iam-policy revel-openfga --region us-central1                      # only revel-app SA
 ```

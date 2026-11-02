@@ -8,6 +8,11 @@ app_image = "us-docker.pkg.dev/cloudrun/container/hello"
 openfga_image_tag = "v1.22.1"
 public_base_url   = "https://api.revel.gifts"
 mcp_path          = "/mcp"
+
+# The deterministic run.app host is computed automatically. After the first apply, add the
+# non-deterministic run.app host from `terraform output app_urls` here if you use that URL.
+app_extra_allowed_hosts = []
+
 migrate_command   = ["alembic", "upgrade", "head"]
 
 # Add secret IDs here only after `gcloud secrets versions add` has created a version.

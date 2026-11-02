@@ -16,6 +16,7 @@ from revel.settings import Settings, get_settings
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_runtime()
 
     # A session manager can run only once, so each app gets its own MCP server instance.
     mcp_server = create_mcp_server(settings, **mcp_auth_kwargs(settings))
@@ -31,15 +32,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.mcp_server = mcp_server
 
+    # Cloud Run reserves some paths ending in "z", so /healthz may never reach the app on
+    # *.run.app (https://docs.cloud.google.com/run/docs/known-issues, "Reserved URL paths").
+    # Probes and deployed checks use /health; /healthz stays for local and compose checks.
+    @app.get("/health", include_in_schema=False)
     @app.get("/healthz", include_in_schema=False)
-    async def healthz() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         return {"status": "ok"}
 
     for router in routers():
         app.include_router(router)
 
     # Mount the SDK app at "/" LAST: its internal route is exactly settings.mcp_path (no /mcp/
-    # redirect), and every FastAPI route registered above (/healthz, /.well-known/*, /me) wins.
+    # redirect), and every FastAPI route registered above (/health, /healthz, /.well-known/*,
+    # /me) wins.
     # Routes added to `app` after this line would be shadowed; add them via revel.api.routers().
     app.mount("/", mcp_app)
     return app

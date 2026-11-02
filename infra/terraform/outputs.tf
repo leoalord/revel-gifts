@@ -3,6 +3,16 @@ output "app_url" {
   value       = google_cloud_run_v2_service.app.uri
 }
 
+output "app_urls" {
+  description = "All revel-app URLs (deterministic and non-deterministic run.app). Add a host missing from app_allowed_hosts to app_extra_allowed_hosts."
+  value       = google_cloud_run_v2_service.app.urls
+}
+
+output "app_allowed_hosts" {
+  description = "run.app hosts passed to revel-app as ALLOWED_HOSTS (https:// origins go to ALLOWED_ORIGINS)."
+  value       = local.app_run_app_hosts
+}
+
 output "openfga_url" {
   description = "revel-openfga run.app URL (IAM-authenticated; only revel-app may invoke)."
   value       = google_cloud_run_v2_service.openfga.uri
