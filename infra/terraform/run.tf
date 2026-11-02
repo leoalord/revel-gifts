@@ -476,6 +476,89 @@ resource "google_cloud_run_v2_job" "fga_admin" {
   ]
 }
 
+# Scheduled OpenFGA reconcile (backstop; see scheduler.tf and infra/README.md, "OpenFGA
+# bootstrap"). v2 post-commit grants can race a later revoke, and reconcile repairs that. Fixed
+# args with reconcile's defaults: no --prune (orphan deletion stays an explicit operator run) and
+# the default 2-minute in-flight --window. A dedicated job, rather than revel-fga-admin with arg
+# overrides, so the scheduler only needs roles/run.invoker on this job (no runWithOverrides).
+# max_retries = 0: a failed run (for example exit 3, "barrier not applied; re-run reconcile") is
+# repaired by the next scheduled run.
+resource "google_cloud_run_v2_job" "fga_reconcile" {
+  count = local.fga_reconcile_enabled ? 1 : 0
+
+  name                = "revel-fga-reconcile"
+  location            = var.region
+  deletion_protection = var.deletion_protection
+
+  template {
+    task_count = 1
+    template {
+      service_account = google_service_account.app.email
+      max_retries     = 0
+      timeout         = "300s"
+
+      containers {
+        # On create, use the image revel-fga-admin currently runs (its state follows gcloud
+        # rollouts because the image is ignored there), not the placeholder var.app_image.
+        # Later rollouts use `gcloud run jobs update` (see infra/README.md, "Images").
+        image   = google_cloud_run_v2_job.fga_admin.template[0].template[0].containers[0].image
+        command = ["python"]
+        args    = ["-m", "revel.auth.fga_reconcile"]
+
+        dynamic "env" {
+          for_each = local.fga_admin_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+        env {
+          name = "DATABASE_URL"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.database_url.secret_id
+              version = "latest"
+            }
+          }
+        }
+
+        resources {
+          limits = {
+            cpu    = "1000m"
+            memory = "512Mi"
+          }
+        }
+
+        volume_mounts {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+      }
+
+      volumes {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [local.sql_connection_name]
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].template[0].containers[0].image,
+      client,
+      client_version,
+    ]
+  }
+
+  depends_on = [
+    google_secret_manager_secret_version.database_url,
+    google_secret_manager_secret_iam_member.app_database_url,
+    google_project_iam_member.app_sql_client,
+  ]
+}
+
 ############################################
 # Custom domain (gated; needs user steps)
 ############################################

@@ -1,6 +1,7 @@
 locals {
   services = [
     "artifactregistry.googleapis.com",
+    "cloudscheduler.googleapis.com",       # scheduled revel-fga-reconcile runs
     "cloudresourcemanager.googleapis.com", # project IAM bindings
     "iam.googleapis.com",
     "run.googleapis.com",

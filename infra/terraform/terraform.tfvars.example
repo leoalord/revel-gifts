@@ -25,6 +25,11 @@ mcp_path          = "/mcp"
 # openfga_store_id               = ""
 # openfga_authorization_model_id = ""
 
+# Scheduled OpenFGA reconcile (Cloud Scheduler -> revel-fga-reconcile job). Created only once both
+# OpenFGA IDs above are set. Pause without an apply: gcloud scheduler jobs pause revel-fga-reconcile.
+enable_fga_reconcile_schedule = true
+fga_reconcile_schedule        = "*/15 * * * *" # Etc/UTC
+
 # The deterministic run.app host is computed automatically. After the first apply, add the
 # non-deterministic run.app host from `terraform output app_urls` here if you use that URL.
 app_extra_allowed_hosts = []

@@ -12,12 +12,13 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
 | --- | --- |
 | `versions.tf` | Terraform >= 1.9, `hashicorp/google ~> 8.9`, `hashicorp/random ~> 3.9`; local state |
 | `variables.tf` / `terraform.tfvars.example` | Inputs; copy the example to `terraform.tfvars` (gitignored) |
-| `apis.tf` | Enables run, sqladmin, secretmanager, artifactregistry, iam, cloudresourcemanager (`disable_on_destroy = false`) |
+| `apis.tf` | Enables run, sqladmin, secretmanager, artifactregistry, iam, cloudresourcemanager, cloudscheduler (`disable_on_destroy = false`) |
 | `registry.tf` | Artifact Registry `revel` (our images) and `dockerhub` (Docker Hub pull-through remote repository) |
 | `iam.tf` | Service accounts `revel-app`, `revel-openfga`; `cloudsql.client`; invoker bindings |
+| `scheduler.tf` | Scheduled OpenFGA reconcile (gated): service account `revel-scheduler`, its `run.invoker` on the `revel-fga-reconcile` job only, and the Cloud Scheduler job `revel-fga-reconcile` |
 | `database.tf` | Cloud SQL PostgreSQL 16 `revel-db` (db-f1-micro, Enterprise, zonal, 10 GB SSD), databases `revel` and `openfga`, users `revel_app` and `openfga` |
 | `secrets.tf` | `DATABASE_URL`, `OPENFGA_DATASTORE_URI` (generated) and empty placeholders `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `FIREWORKS_API_KEY`, `META_API_KEY`; per-secret accessor grants. `WORKOS_CLIENT_ID` is not a secret (plain variable, see [WorkOS configuration](#workos-configuration)) |
-| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`, `revel-fga-admin` (adopted with an `import` block); optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
+| `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`, `revel-fga-admin` (adopted with an `import` block), `revel-fga-reconcile` (gated, scheduled); optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
 | `outputs.tf` | URLs, connection name, repository path, service accounts, DNS record |
 
 ### Network and access design
@@ -75,7 +76,7 @@ A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to abou
    gcloud run jobs execute revel-openfga-migrate --region us-central1 --wait
    ```
 3. Build and push the app image, then run the app migration and deploy it (below).
-4. Bootstrap the OpenFGA store and model with `revel-fga-admin`, set `openfga_store_id` and `openfga_authorization_model_id`, and `terraform apply` ([OpenFGA bootstrap](#openfga-bootstrap)).
+4. Bootstrap the OpenFGA store and model with `revel-fga-admin`, set `openfga_store_id` and `openfga_authorization_model_id`, and `terraform apply` ([OpenFGA bootstrap](#openfga-bootstrap)). This apply also creates the [scheduled reconcile](#scheduled-reconcile) unless `enable_fga_reconcile_schedule = false`.
 5. Add secret versions, then list those secret IDs in `app_secret_env` and `terraform apply`.
 6. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401.
 7. Custom domain (below).
@@ -104,14 +105,17 @@ docker stop revel-test
 
 With `APP_ENV=production` the app refuses to start unless `PUBLIC_BASE_URL` is `https://`.
 
-Terraform ignores image changes on `revel-app`, `revel-migrate` and `revel-fga-admin` after creation, so roll out with gcloud (other settings stay as Terraform set them):
+Terraform ignores image changes on `revel-app`, `revel-migrate`, `revel-fga-admin` and `revel-fga-reconcile` after creation, so roll out with gcloud (other settings stay as Terraform set them):
 
 ```sh
 gcloud run jobs update revel-migrate --region us-central1 --image "$IMAGE"
 gcloud run jobs execute revel-migrate --region us-central1 --wait     # explicit migration step
 gcloud run deploy revel-app --region us-central1 --image "$IMAGE"
 gcloud run jobs update revel-fga-admin --region us-central1 --image "$IMAGE"
+gcloud run jobs update revel-fga-reconcile --region us-central1 --image "$IMAGE"   # if the schedule is enabled
 ```
+
+`revel-fga-reconcile` is created with the image `revel-fga-admin` runs at that time, so it starts on the current app image rather than the placeholder.
 
 Change the migration command through the `migrate_command` variable (default `alembic upgrade head`; F3 owns the final command). Migrations never run on replica start.
 
@@ -160,7 +164,38 @@ Every run writes only IDs, counts or a health word to the logs, never tokens, tu
      --args="-m,revel.auth.fga_reconcile"
    ```
 
-   It prints a count summary on stderr.
+   It prints a count summary on stderr. Exit 2 means OpenFGA is unconfigured. Exit 3 means the final barrier step could not take its locks in time: OpenFGA may still grant access revoked during the run, so re-run it.
+
+### Scheduled reconcile
+
+Post-commit OpenFGA grants can race a later revoke. As a backstop, Cloud Scheduler runs reconcile every 15 minutes (`fga_reconcile_schedule`, default `*/15 * * * *`, time zone `Etc/UTC`) through a dedicated job, `revel-fga-reconcile`:
+
+- The job has the same service account, OpenFGA env, `DATABASE_URL` secret, Cloud SQL volume and resources as `revel-fga-admin`. Its args are fixed at `-m revel.auth.fga_reconcile` with reconcile's defaults: no `--prune` (orphan deletion stays an explicit operator run) and the 2-minute in-flight `--window`. Timeout 300s, no task retries.
+- The Cloud Scheduler job `revel-fga-reconcile` POSTs to the Cloud Run Admin API `jobs/revel-fga-reconcile:run` with an OAuth token for the `revel-scheduler` service account. That account's only grant is `roles/run.invoker` on this job. It can start the job with its own args, but it cannot override them. A dedicated job avoids giving the scheduler `run.jobs.runWithOverrides` on `revel-fga-admin`.
+- It is created when `enable_fga_reconcile_schedule` is true (the default) **and** both `openfga_store_id` and `openfga_authorization_model_id` are set. Reconcile exits 2 without them, so it stays off until the bootstrap IDs are applied.
+- A failed run (for example exit 3) is not retried. The next run 15 minutes later repairs the same state. Scheduler retries only a failed `jobs:run` call (2 retries, 30-120s backoff, 60s deadline).
+- Overlapping runs are unlikely: a run takes seconds and the job times out at 300s. Overlap with a manual `revel-fga-admin` reconcile is safe. Each run's barrier re-applies everything that changed since its own snapshot, and SHARE locks don't conflict with each other. Writers may wait a few more seconds behind the barriers.
+
+Pause, resume or trigger it (pausing does not need an apply):
+
+```sh
+gcloud scheduler jobs pause revel-fga-reconcile --location us-central1
+gcloud scheduler jobs resume revel-fga-reconcile --location us-central1
+gcloud scheduler jobs run revel-fga-reconcile --location us-central1       # run now via the scheduler
+gcloud run jobs execute revel-fga-reconcile --region us-central1 --wait    # or run the job directly
+```
+
+To remove it, set `enable_fga_reconcile_schedule = false`, then plan and apply after approval. With `deletion_protection = true`, the job cannot be deleted; pause it instead, or set `deletion_protection = false` first.
+
+View executions and logs (counts only; no tuples or credentials):
+
+```sh
+gcloud run jobs executions list --job revel-fga-reconcile --region us-central1 --limit 10
+gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="revel-fga-reconcile"' \
+  --limit 20 --format='value(timestamp,textPayload)'
+gcloud logging read 'resource.type="cloud_scheduler_job" AND resource.labels.job_id="revel-fga-reconcile"' \
+  --limit 10    # scheduler attempts (jobs:run HTTP status)
+```
 
 ## Secrets
 
