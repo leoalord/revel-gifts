@@ -300,3 +300,24 @@ async def test_resolve_user_requires_subject(runtime: AuthRuntime, sub):
 async def test_resolve_cannot_produce_ui_principal(runtime: AuthRuntime):
     with pytest.raises(ValueError):
         await runtime.require_resolver().resolve(_token(), via="ui")
+
+
+async def test_resolve_user_uses_authz_bridge_on_insert_only(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    async def on_user_created(*, user_id):
+        calls.append(("user", {"user_id": user_id}))
+
+    async def on_agent_delegated(*, user_id, agent_id, delegation_id):
+        calls.append(("delegation", {"user_id": user_id}))
+
+    module = types.ModuleType("fake_authz")
+    module.on_user_created = on_user_created
+    module.on_agent_delegated = on_agent_delegated
+    monkeypatch.setitem(sys.modules, "revel.auth._fake_authz_for_tests", module)
+    monkeypatch.setattr("revel.auth.hooks.AUTHZ_MODULE", "revel.auth._fake_authz_for_tests")
+
+    resolver = IdentityResolver(InMemoryIdentityRepository())
+    principal = await resolver.resolve_user("user_alice")
+    await resolver.resolve_user("user_alice")
+    assert calls == [("user", {"user_id": principal.user_id})]
