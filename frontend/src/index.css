@@ -1,0 +1,47 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  color: #1f2328;
+  background: #ffffff;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.shell main {
+  flex: 1;
+}
+
+.account {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nav {
+  display: flex;
+  gap: 1rem;
+  list-style: none;
+  padding: 0;
+}
+
+.nav a[aria-current="page"] {
+  font-weight: 600;
+}
+
+.footer {
+  margin-top: 2rem;
+  color: #59636e;
+}

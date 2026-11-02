@@ -18,9 +18,11 @@
 **/htmlcov
 **/dist
 
-# Node
+# Node: frontend source is needed by the image's frontend build stage; its dependencies and
+# build output are produced inside the image.
 **/node_modules
-frontend/
+frontend/node_modules
+frontend/dist
 
 # Infrastructure: Terraform working dir, state, plans and variables
 infra/
