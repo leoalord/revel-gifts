@@ -13,7 +13,13 @@ from uuid import UUID, uuid4
 
 import anyio
 
-from revel.auth.repository import AgentRecord, DelegationRecord, OnCreated, UserRecord
+from revel.auth.repository import (
+    AgentRecord,
+    DelegationRecord,
+    OnCreated,
+    OnDisconnected,
+    UserRecord,
+)
 
 
 class InMemoryIdentityRepository:
@@ -95,6 +101,27 @@ class InMemoryIdentityRepository:
                 raise
             return record, True
 
+    async def disconnect_delegation(
+        self,
+        *,
+        user_id: UUID,
+        delegation_id: UUID,
+        on_disconnected: OnDisconnected | None = None,
+    ) -> bool:
+        async with self._lock:
+            existing = self.delegations.get(delegation_id)
+            if existing is None or existing.user_id != user_id or existing.status != "active":
+                return False
+            record = replace(existing, status="disconnected")
+            self.delegations[delegation_id] = record
+            try:
+                if on_disconnected is not None:
+                    await on_disconnected(record)
+            except BaseException:
+                self.delegations[delegation_id] = existing
+                raise
+            return True
+
     def disconnect(self, delegation_id: UUID) -> None:
         """Simulates #14's disconnect flow."""
         self.delegations[delegation_id] = replace(
@@ -106,6 +133,7 @@ class RecordingHooks:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_next_user_hook = False
+        self.fail_next_disconnect_hook = False
 
     async def on_user_created(self, *, user_id: UUID) -> None:
         if self.fail_next_user_hook:
@@ -120,5 +148,18 @@ class RecordingHooks:
             (
                 "on_agent_delegated",
                 {"user_id": user_id, "agent_id": agent_id, "delegation_id": delegation_id},
+            )
+        )
+
+    async def on_agent_disconnected(
+        self, *, user_id: UUID, delegation_id: UUID, agent_id: UUID
+    ) -> None:
+        if self.fail_next_disconnect_hook:
+            self.fail_next_disconnect_hook = False
+            raise RuntimeError("authz unavailable")
+        self.calls.append(
+            (
+                "on_agent_disconnected",
+                {"user_id": user_id, "delegation_id": delegation_id, "agent_id": agent_id},
             )
         )

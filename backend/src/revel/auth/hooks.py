@@ -16,6 +16,9 @@ Hook contract (agreed with F4):
   uncommitted and holds a unique-key lock, so such access would block or miss it.
 * A committed tuple can outlive a later commit failure; F4 should treat a tuple
   without a matching row as inert.
+* ``on_agent_disconnected`` runs inside the transaction that flipped an active
+  delegation to disconnected (``IdentityResolver.disconnect_delegation``), only when a
+  row changed. If it raises, the delegation stays active and the error propagates.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ class AuthzHooks(Protocol):
 
     async def on_agent_delegated(
         self, *, user_id: UUID, agent_id: UUID, delegation_id: UUID
+    ) -> None: ...
+
+    async def on_agent_disconnected(
+        self, *, user_id: UUID, delegation_id: UUID, agent_id: UUID
     ) -> None: ...
 
 
@@ -66,3 +73,10 @@ class ModuleAuthzHooks:
         fn = self._function("on_agent_delegated")
         if fn is not None:
             await fn(user_id=user_id, agent_id=agent_id, delegation_id=delegation_id)
+
+    async def on_agent_disconnected(
+        self, *, user_id: UUID, delegation_id: UUID, agent_id: UUID
+    ) -> None:
+        fn = self._function("on_agent_disconnected")
+        if fn is not None:
+            await fn(user_id=user_id, delegation_id=delegation_id, agent_id=agent_id)

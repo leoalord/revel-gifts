@@ -132,3 +132,21 @@ class IdentityResolver:
             raise InvalidIdentityClaims("session has no subject")
         user = await self._ensure_user(workos_user_id, profile)
         return Principal(user_id=user.id, agent_id=None, delegation_id=None, via="ui")
+
+    async def disconnect_delegation(self, *, user_id: UUID, delegation_id: UUID) -> bool:
+        """Disconnect ``user_id``'s active delegation, revoking its authorization.
+
+        Calls the authz ``on_agent_disconnected`` hook inside the same transaction, only
+        when a row actually changed; a hook failure rolls back and propagates. Returns
+        ``False`` (no hook) when already disconnected, not owned by ``user_id`` or unknown.
+        Afterwards :meth:`resolve` rejects that assistant with ``DelegationDisconnected``.
+        """
+
+        async def disconnected(record: DelegationRecord) -> None:
+            await self._hooks.on_agent_disconnected(
+                user_id=record.user_id, delegation_id=record.id, agent_id=record.agent_id
+            )
+
+        return await self.repository.disconnect_delegation(
+            user_id=user_id, delegation_id=delegation_id, on_disconnected=disconnected
+        )
