@@ -198,6 +198,9 @@ def test_profile_schema_after_upgrade(migrated_engine: Engine) -> None:
         u["name"]: u["column_names"]
         for u in inspector.get_unique_constraints("contribution_policies")
     } == {"uq_contribution_policies_profile_id_version": ["profile_id", "version"]}
+    assert {u["name"]: u["column_names"] for u in inspector.get_unique_constraints("claims")} == {
+        "uq_claims_profile_id_id": ["profile_id", "id"]
+    }
 
     expected_fks = {
         "profiles": {"fk_profiles_user_id_users"},
@@ -217,6 +220,7 @@ def test_profile_schema_after_upgrade(migrated_engine: Engine) -> None:
             "fk_claim_events_profile_id_profiles",
             "fk_claim_events_actor_user_id_users",
             "fk_claim_events_actor_delegation_id_agent_delegations",
+            "fk_claim_events_policy_version_contribution_policies",
         },
     }
     for table, names in expected_fks.items():
@@ -224,12 +228,33 @@ def test_profile_schema_after_upgrade(migrated_engine: Engine) -> None:
         assert set(fks) == names, table
         for fk in fks.values():
             assert fk["options"].get("ondelete") == "RESTRICT", fk["name"]
-    policy_fk = {fk["name"]: fk for fk in inspector.get_foreign_keys("claims")}[
-        "fk_claims_profile_id_contribution_policies"
-    ]
-    assert policy_fk["constrained_columns"] == ["profile_id", "policy_version"]
-    assert policy_fk["referred_table"] == "contribution_policies"
-    assert policy_fk["referred_columns"] == ["profile_id", "version"]
+    composite_fks = {
+        ("claims", "fk_claims_profile_id_contribution_policies"): (
+            ["profile_id", "policy_version"],
+            "contribution_policies",
+            ["profile_id", "version"],
+        ),
+        ("claims", "fk_claims_supersedes_id_claims"): (
+            ["profile_id", "supersedes_id"],
+            "claims",
+            ["profile_id", "id"],
+        ),
+        ("claim_events", "fk_claim_events_claim_id_claims"): (
+            ["profile_id", "claim_id"],
+            "claims",
+            ["profile_id", "id"],
+        ),
+        ("claim_events", "fk_claim_events_policy_version_contribution_policies"): (
+            ["profile_id", "policy_version"],
+            "contribution_policies",
+            ["profile_id", "version"],
+        ),
+    }
+    for (table, name), (columns, referred, referred_columns) in composite_fks.items():
+        fk = {fk["name"]: fk for fk in inspector.get_foreign_keys(table)}[name]
+        assert fk["constrained_columns"] == columns, name
+        assert fk["referred_table"] == referred, name
+        assert fk["referred_columns"] == referred_columns, name
 
     claim_indexes = {ix["name"]: ix for ix in inspector.get_indexes("claims")}
     assert claim_indexes["ix_claims_profile_id_status_audience"]["column_names"] == [
@@ -447,6 +472,56 @@ def test_one_live_replacement_per_claim(conn: Connection) -> None:
         conn,
         "uq_claims_supersedes_id_live",
         lambda: _claim(conn, profile_id, owner, supersedes_id=original, status="provisional"),
+    )
+
+
+def test_supersedes_same_profile_only(conn: Connection) -> None:
+    profile_id, owner = _profile(conn)
+    other_profile_id, other_owner = _profile(conn)
+    others_fact = _claim(conn, other_profile_id, other_owner, audience="only_me")
+    _rejects(
+        conn,
+        "fk_claims_supersedes_id_claims",
+        lambda: _claim(conn, profile_id, owner, supersedes_id=others_fact, status="provisional"),
+    )
+    own_fact = _claim(conn, profile_id, owner)
+    _claim(conn, profile_id, owner, supersedes_id=own_fact, status="provisional")
+    _rejects(
+        conn,
+        "fk_claims_supersedes_id_claims",
+        lambda: _claim(conn, profile_id, owner, supersedes_id=uuid.uuid4(), status="provisional"),
+    )
+
+
+def test_event_profile_must_match_claim(conn: Connection) -> None:
+    profile_id, owner = _profile(conn)
+    other_profile_id, other_owner = _profile(conn)
+    others_claim = _claim(conn, other_profile_id, other_owner)
+    _rejects(
+        conn,
+        "fk_claim_events_claim_id_claims",
+        lambda: _event(conn, others_claim, profile_id, owner),
+    )
+    _event(conn, others_claim, other_profile_id, other_owner)
+
+
+def test_event_policy_version_must_exist_for_same_profile(conn: Connection) -> None:
+    profile_id, owner = _profile(conn)
+    other_profile_id, other_owner = _profile(conn)
+    _policy(conn, other_profile_id, other_owner, version=1)
+    claim_id = _claim(conn, profile_id, owner)
+    _rejects(
+        conn,
+        "fk_claim_events_policy_version_contribution_policies",
+        lambda: _event(conn, claim_id, profile_id, owner, policy_version=1),
+    )
+    _policy(conn, profile_id, owner, version=1)
+    _event(conn, claim_id, profile_id, owner, policy_version=1)
+    _event(conn, claim_id, profile_id, owner, policy_version=None)
+    _rejects(
+        conn,
+        "fk_claim_events_policy_version_contribution_policies",
+        lambda: _event(conn, claim_id, profile_id, owner, policy_version=2),
     )
 
 

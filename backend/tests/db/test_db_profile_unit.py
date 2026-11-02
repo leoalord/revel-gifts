@@ -123,6 +123,7 @@ def test_profile_constraint_and_index_names() -> None:
         "fk_claims_contributor_delegation_id_agent_delegations",
         "fk_claims_supersedes_id_claims",
         "fk_claims_profile_id_contribution_policies",
+        "uq_claims_profile_id_id",
         "ck_claims_category_length",
         "ck_claims_statement_length",
         "ck_claims_audience",
@@ -144,17 +145,31 @@ def test_profile_constraint_and_index_names() -> None:
         "fk_claim_events_profile_id_profiles",
         "fk_claim_events_actor_user_id_users",
         "fk_claim_events_actor_delegation_id_agent_delegations",
+        "fk_claim_events_policy_version_contribution_policies",
         "ck_claim_events_action",
         "ck_claim_events_acceptance",
         "ix_claim_events_claim_id",
         "ix_claim_events_profile_id_occurred_at",
     ):
         assert name in ddl, name
-    assert ddl.count("ON DELETE RESTRICT") == 12
+    assert ddl.count("ON DELETE RESTRICT") == 13
+    # Same-profile composite FKs.
     assert (
-        "FOREIGN KEY(profile_id, policy_version) REFERENCES contribution_policies "
-        "(profile_id, version)" in ddl
+        ddl.count(
+            "FOREIGN KEY(profile_id, policy_version) REFERENCES contribution_policies "
+            "(profile_id, version)"
+        )
+        == 2
     )
+    assert (
+        "CONSTRAINT fk_claims_supersedes_id_claims FOREIGN KEY(profile_id, supersedes_id) "
+        "REFERENCES claims (profile_id, id)" in ddl
+    )
+    assert (
+        "CONSTRAINT fk_claim_events_claim_id_claims FOREIGN KEY(profile_id, claim_id) "
+        "REFERENCES claims (profile_id, id)" in ddl
+    )
+    assert "CONSTRAINT uq_claims_profile_id_id UNIQUE (profile_id, id)" in ddl
     assert (
         "CREATE UNIQUE INDEX uq_claims_supersedes_id_live ON claims (supersedes_id) "
         "WHERE status IN ('active', 'provisional') AND supersedes_id IS NOT NULL" in ddl

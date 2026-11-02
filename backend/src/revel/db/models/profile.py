@@ -141,6 +141,15 @@ class Claim(TimestampMixin, Base):
             name="mcp_requires_delegation",
         ),
         CheckConstraint("supersedes_id IS NULL OR supersedes_id <> id", name="not_self_supersede"),
+        # Target of the same-profile composite FKs below and from claim_events.
+        UniqueConstraint("profile_id", "id"),
+        # A fact may only replace a fact of the same profile (MATCH SIMPLE: NULL allowed).
+        ForeignKeyConstraint(
+            ["profile_id", "supersedes_id"],
+            ["claims.profile_id", "claims.id"],
+            name="fk_claims_supersedes_id_claims",
+            ondelete="RESTRICT",
+        ),
         # Only this profile's policy versions may be cited (MATCH SIMPLE: NULL version allowed).
         ForeignKeyConstraint(
             ["profile_id", "policy_version"],
@@ -186,9 +195,7 @@ class Claim(TimestampMixin, Base):
     )
     contributed_via: Mapped[str] = mapped_column(Text, nullable=False)
     policy_version: Mapped[int | None] = mapped_column(Integer)
-    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("claims.id", ondelete="RESTRICT"), index=True
-    )
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
 
 
 class ClaimEvent(Base):
@@ -204,14 +211,27 @@ class ClaimEvent(Base):
     __table_args__ = (
         CheckConstraint(check_in("action", ClaimEventAction), name="action"),
         CheckConstraint(check_in("acceptance", AcceptanceMode), name="acceptance"),
+        # The event's profile must be its claim's profile.
+        ForeignKeyConstraint(
+            ["profile_id", "claim_id"],
+            ["claims.profile_id", "claims.id"],
+            name="fk_claim_events_claim_id_claims",
+            ondelete="RESTRICT",
+        ),
+        # Only this profile's policy versions may be cited (MATCH SIMPLE: NULL version allowed).
+        ForeignKeyConstraint(
+            ["profile_id", "policy_version"],
+            ["contribution_policies.profile_id", "contribution_policies.version"],
+            name="fk_claim_events_policy_version_contribution_policies",
+            ondelete="RESTRICT",
+        ),
         Index("ix_claim_events_profile_id_occurred_at", "profile_id", "occurred_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, server_default=_UUID_DEFAULT)
-    claim_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("claims.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    # Denormalized from the claim for the per-profile contribution summary.
+    claim_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    # Denormalized from the claim for the per-profile contribution summary (kept consistent by
+    # the composite FK to claims).
     profile_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("profiles.id", ondelete="RESTRICT"), nullable=False
     )
