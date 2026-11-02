@@ -12,7 +12,8 @@ status: draft
 - Discovery: leave the audience unset for sensitive facts (always Only Me; any other audience is
   rejected).
 - Connections: every line describing F6 behavior is marked PROVISIONAL.
-- MCP server instructions now come from this package and name only registered tools.
+- MCP server instructions now come from this package. They name no tools and tell clients to
+  use only the tools in their tool list.
 
 ## 0.2.0 (draft, 2026-11-02)
 
