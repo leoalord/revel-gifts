@@ -1,0 +1,15 @@
+name: view_trusted is computed and cannot be written
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this tuple.
+
+tests:
+  - name: direct view_trusted tuple
+    tuples:
+      - user: "user:sam"
+        relation: view_trusted
+        object: profile:alex
+    check:
+      - user: user:sam
+        object: profile:alex
+        assertions:
+          view_trusted: true

@@ -1,0 +1,15 @@
+name: trusted accepts users only; agents inherit through user#delegate
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this tuple.
+
+tests:
+  - name: direct trusted tuple
+    tuples:
+      - user: "agent:deleg-sam-muse"
+        relation: trusted
+        object: profile:alex
+    check:
+      - user: agent:deleg-sam-muse
+        object: profile:alex
+        assertions:
+          view_trusted: true

@@ -190,7 +190,7 @@ async def test_stored_tuples_carry_write_times(fga: OpenFgaServiceClient) -> Non
     alex = make_person()
     await reconcile_agent_tuples(fga, [(alex.user_id, alex.delegation_id)])
     stored = await fga.read_stored_tuples()
-    assert len(stored) == 2
+    assert len(stored) == 3  # acts_for, delegate, connected_agent
     assert all(s.written_at.tzinfo is not None for s in stored)
 
 

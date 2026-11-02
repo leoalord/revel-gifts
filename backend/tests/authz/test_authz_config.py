@@ -21,6 +21,7 @@ from revel.auth.authz import (
     can_contribute,
     configure_authz,
     delegate_tuple,
+    delegation_tuples,
     owner_tuple,
     require_contribute,
     require_viewer,
@@ -68,8 +69,7 @@ async def test_module_hooks_delegate_to_configured_hooks(fake_fga: FakeFga) -> N
     )
     assert fake_fga.tuples == {
         owner_tuple(alex.user_id, alex.profile_id),
-        acts_for_tuple(alex.user_id, alex.delegation_id),
-        delegate_tuple(alex.user_id, alex.delegation_id),
+        *delegation_tuples(alex.user_id, alex.delegation_id),
     }
     assert await can_contribute(fake_fga, alex.as_agent(agent_id), alex.profile_id)
     await f2_hook("on_agent_disconnected")(
@@ -227,14 +227,12 @@ async def test_disconnect_deletes_all_acts_for_and_delegate_of_the_delegation(
         acts_for_tuple(other.user_id, alex.delegation_id),
         delegate_tuple(alex.user_id, alex.delegation_id),
         delegate_tuple(other.user_id, alex.delegation_id),
-        acts_for_tuple(other.user_id, other.delegation_id),
-        delegate_tuple(other.user_id, other.delegation_id),
+        *delegation_tuples(other.user_id, other.delegation_id),
     }
     configure_authz(fake_fga)
     await authz.on_agent_disconnected(user_id=alex.user_id, delegation_id=alex.delegation_id)
     assert fake_fga.tuples == {
-        acts_for_tuple(other.user_id, other.delegation_id),
-        delegate_tuple(other.user_id, other.delegation_id),
+        *delegation_tuples(other.user_id, other.delegation_id),
     }
 
 

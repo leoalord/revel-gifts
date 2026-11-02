@@ -42,6 +42,41 @@
     {
       "metadata": {
         "relations": {
+          "connected_agent": {
+            "directly_related_user_types": [
+              {
+                "type": "agent"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "connected_agent": {
+          "this": {}
+        }
+      },
+      "type": "platform"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "blocked": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "blocked_any": {},
+          "connection": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "connection_member": {},
           "contribute": {},
           "owner": {
             "directly_related_user_types": [
@@ -51,10 +86,81 @@
             ]
           },
           "owner_agent": {},
-          "view_only_me": {}
+          "public_viewer": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "wildcard": {}
+              },
+              {
+                "relation": "connected_agent",
+                "type": "platform"
+              }
+            ]
+          },
+          "trusted": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "trusted_member": {},
+          "view_connections": {},
+          "view_only_me": {},
+          "view_public": {},
+          "view_trusted": {}
         }
       },
       "relations": {
+        "blocked": {
+          "this": {}
+        },
+        "blocked_any": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "blocked"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "delegate"
+                  },
+                  "tupleset": {
+                    "relation": "blocked"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "connection": {
+          "this": {}
+        },
+        "connection_member": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "connection"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "delegate"
+                  },
+                  "tupleset": {
+                    "relation": "connection"
+                  }
+                }
+              }
+            ]
+          }
+        },
         "contribute": {
           "union": {
             "child": [
@@ -84,6 +190,58 @@
             }
           }
         },
+        "public_viewer": {
+          "this": {}
+        },
+        "trusted": {
+          "this": {}
+        },
+        "trusted_member": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "trusted"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "delegate"
+                  },
+                  "tupleset": {
+                    "relation": "trusted"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "view_connections": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "view_trusted"
+                }
+              },
+              {
+                "difference": {
+                  "base": {
+                    "computedUserset": {
+                      "relation": "connection_member"
+                    }
+                  },
+                  "subtract": {
+                    "computedUserset": {
+                      "relation": "blocked_any"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
         "view_only_me": {
           "union": {
             "child": [
@@ -99,9 +257,172 @@
               }
             ]
           }
+        },
+        "view_public": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "view_connections"
+                }
+              },
+              {
+                "difference": {
+                  "base": {
+                    "computedUserset": {
+                      "relation": "public_viewer"
+                    }
+                  },
+                  "subtract": {
+                    "computedUserset": {
+                      "relation": "blocked_any"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "view_trusted": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "owner_agent"
+                }
+              },
+              {
+                "difference": {
+                  "base": {
+                    "computedUserset": {
+                      "relation": "trusted_member"
+                    }
+                  },
+                  "subtract": {
+                    "computedUserset": {
+                      "relation": "blocked_any"
+                    }
+                  }
+                }
+              }
+            ]
+          }
         }
       },
       "type": "profile"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "about": {
+            "directly_related_user_types": [
+              {
+                "type": "profile"
+              }
+            ]
+          },
+          "read_answer": {},
+          "requester": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "requester_agent": {},
+          "respond": {}
+        }
+      },
+      "relations": {
+        "about": {
+          "this": {}
+        },
+        "read_answer": {
+          "union": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "owner"
+                  },
+                  "tupleset": {
+                    "relation": "about"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "owner_agent"
+                  },
+                  "tupleset": {
+                    "relation": "about"
+                  }
+                }
+              },
+              {
+                "difference": {
+                  "base": {
+                    "union": {
+                      "child": [
+                        {
+                          "computedUserset": {
+                            "relation": "requester"
+                          }
+                        },
+                        {
+                          "computedUserset": {
+                            "relation": "requester_agent"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "subtract": {
+                    "tupleToUserset": {
+                      "computedUserset": {
+                        "relation": "blocked_any"
+                      },
+                      "tupleset": {
+                        "relation": "about"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "requester": {
+          "this": {}
+        },
+        "requester_agent": {
+          "tupleToUserset": {
+            "computedUserset": {
+              "relation": "delegate"
+            },
+            "tupleset": {
+              "relation": "requester"
+            }
+          }
+        },
+        "respond": {
+          "tupleToUserset": {
+            "computedUserset": {
+              "relation": "owner_agent"
+            },
+            "tupleset": {
+              "relation": "about"
+            }
+          }
+        }
+      },
+      "type": "question"
     }
   ]
 }
