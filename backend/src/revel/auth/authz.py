@@ -9,9 +9,15 @@ stay thin. It implements model v1 (``authorization/model.fga``):
   delegation, else ``user:<user_id>``.
 
 Tuple hooks (module-level ``on_*`` functions over a process-wide ``TupleHooks`` installed by
-``configure_authz``) are called by F2 on sign-in, agent connect and disconnect, inside its
-inserting transaction. They are idempotent; retries, duplicate writes and deletes of missing
-tuples are safe.
+``configure_authz``) are called by F2 on sign-in, agent connect and disconnect. F2 awaits them
+INSIDE its inserting database transaction, BEFORE commit: a raise rolls the insert back and the
+next request retries both, so they are idempotent (retries, duplicate writes and deletes of
+missing tuples are safe). A commit failure after a successful hook can leave orphan tuples whose
+IDs match no row; they are unreachable (no principal carries those IDs) and are pruned by
+reconciliation. Hooks never read or write users, agents or agent_delegations; the only database
+access allowed is the profile resolver's plain read of profiles. Profiles are resolved through
+that injectable async resolver; when it returns ``None`` the profile tuples are deferred and
+later backfilled with ``reconcile_owner_tuples`` / ``reconcile_agent_tuples``.
 
 Hook failure rule (follow it for every new hook, e.g. v2 revoke, block, tier downgrade):
 
@@ -22,9 +28,7 @@ Hook failure rule (follow it for every new hook, e.g. v2 revoke, block, tier dow
   ``FgaConfigurationError`` when unconfigured: a skipped delete would leave access in place.
 - Once configured, any OpenFGA error on a grant or a revoke propagates; never swallow it.
 - Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, later ``visible_claims``)
-  raise ``FgaConfigurationError`` when unconfigured; they never allow by default. Profiles are
-resolved through an injectable async resolver; when it returns ``None`` the profile tuples are
-deferred and later backfilled with ``reconcile_owner_tuples`` / ``reconcile_agent_tuples``.
+  raise ``FgaConfigurationError`` when unconfigured; they never allow by default.
 
 Policy lives in Notion (Relationships, Discovery & Privacy); this module implements it.
 """
