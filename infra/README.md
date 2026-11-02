@@ -164,7 +164,7 @@ Names match `backend/src/revel/settings.py`. Non-secret values are Terraform var
 
 **`/mcp` fails closed until the AuthKit domain is set.** While `WORKOS_AUTHKIT_DOMAIN` is unset (or a placeholder), every `/mcp` and `/me` request gets 401. `WORKOS_TOKEN_AUDIENCE` is set explicitly so the audience stays `https://api.revel.gifts/mcp` even when the app is reached on its `run.app` host; it must equal the resource indicator configured in WorkOS. Changing `public_base_url` or `mcp_path` changes it too.
 
-Set the AuthKit domain (public, from the WorkOS dashboard, e.g. `https://<tenant>.authkit.app`, no path) in `terraform.tfvars` and re-apply:
+Set the AuthKit domain (public, from the WorkOS dashboard, e.g. `https://<tenant>.authkit.app`, no path) in `terraform.tfvars` and re-apply. Plan fails validation if `workos_authkit_domain` or `workos_client_id` still contains the example `replace-with-...` placeholder:
 
 ```hcl
 workos_authkit_domain = "https://<tenant>.authkit.app"
