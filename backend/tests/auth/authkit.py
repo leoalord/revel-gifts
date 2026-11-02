@@ -35,6 +35,11 @@ from revel.settings import Settings
 AUTHKIT_DOMAIN = "revel-test.authkit.app"
 ISSUER = f"https://{AUTHKIT_DOMAIN}"
 PRIMARY_KID = "kid-primary"
+WORKOS_API = "https://api.workos.com"
+CLIENT_ID = "client_app_test"
+SESSION_KID = "kid-session"
+COOKIE_PASSWORD = "test-cookie-password-0123456789-abcdefghij"
+REDIRECT_URI = "http://localhost:8000/auth/callback"
 
 
 @cache
@@ -73,6 +78,13 @@ class TestAuthKit:
         }
     )
     user_api_status: int = 200
+    # User Management authenticate mock: one-time codes and refresh tokens -> WorkOS user id.
+    codes: dict[str, str] = field(default_factory=dict)
+    refresh_tokens: dict[str, str] = field(default_factory=dict)
+    authenticate_requests: list[dict[str, Any]] = field(default_factory=list)
+    authenticate_status: int = 200
+    session_jwks_requests: int = 0
+    session_token_ttl: int = 300
 
     # --- HTTP mock -----------------------------------------------------------------
 
@@ -94,6 +106,12 @@ class TestAuthKit:
                     "jwks_uri": f"{ISSUER}/oauth2/jwks",
                 },
             )
+        if url == f"{WORKOS_API}/sso/jwks/{CLIENT_ID}":
+            self.session_jwks_requests += 1
+            key = rsa_key("session")
+            return httpx.Response(200, json={"keys": [public_jwk(key, SESSION_KID)]})
+        if url == f"{WORKOS_API}/user_management/authenticate" and request.method == "POST":
+            return self._authenticate(json.loads(request.content))
         prefix = "https://api.workos.com/user_management/users/"
         if url.startswith(prefix):
             user_id = url[len(prefix) :]
@@ -106,6 +124,67 @@ class TestAuthKit:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json=user)
         return httpx.Response(599, json={"unexpected": url})
+
+    def _authenticate(self, body: dict[str, Any]) -> httpx.Response:
+        self.authenticate_requests.append(body)
+        if self.authenticate_status != 200:
+            return httpx.Response(self.authenticate_status, json={"error": "mock"})
+        if body.get("client_id") != CLIENT_ID or body.get("client_secret") != "sk_test_fake":
+            return httpx.Response(401, json={"error": "invalid_client"})
+        grant = body.get("grant_type")
+        if grant == "authorization_code":
+            user_id = self.codes.pop(body.get("code", ""), None)
+        elif grant == "refresh_token":
+            # Single-use refresh tokens (rotation).
+            user_id = self.refresh_tokens.pop(body.get("refresh_token", ""), None)
+        else:
+            user_id = None
+        if user_id is None:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        refresh = f"rt_{len(self.authenticate_requests)}_{user_id}"
+        self.refresh_tokens[refresh] = user_id
+        return httpx.Response(
+            200,
+            json={
+                "user": self.users.get(user_id, {"object": "user", "id": user_id}),
+                "organization_id": None,
+                "access_token": self.session_token(
+                    sub=user_id, exp=int(time.time()) + self.session_token_ttl
+                ),
+                "refresh_token": refresh,
+                "authentication_method": "Password",
+            },
+        )
+
+    def issue_code(self, user_id: str = "user_alice") -> str:
+        code = f"code_{len(self.codes)}_{user_id}"
+        self.codes[code] = user_id
+        return code
+
+    @staticmethod
+    def session_token(
+        *,
+        key: rsa.RSAPrivateKey | None = None,
+        kid: str = SESSION_KID,
+        drop: tuple[str, ...] = (),
+        **overrides: Any,
+    ) -> str:
+        """Mint a WorkOS User Management (browser session) access token."""
+        now = int(time.time())
+        claims: dict[str, Any] = {
+            "iss": WORKOS_API,
+            "sub": "user_alice",
+            "sid": "session_browser_1",
+            "jti": f"jti_{now}",
+            "iat": now,
+            "exp": now + 300,
+        }
+        claims.update(overrides)
+        for name in drop:
+            claims.pop(name, None)
+        return jwt.encode(
+            claims, key or rsa_key("session"), algorithm="RS256", headers={"kid": kid}
+        )
 
     def http_client(self) -> httpx.AsyncClient:
         # MockTransport holds no connections, so the client needs no explicit close.
@@ -120,7 +199,9 @@ class TestAuthKit:
             "public_base_url": "http://localhost:8000",
             "workos_authkit_domain": AUTHKIT_DOMAIN,
             "workos_api_key": "sk_test_fake",
-            "workos_client_id": "client_app_test",
+            "workos_client_id": CLIENT_ID,
+            "workos_cookie_password": COOKIE_PASSWORD,
+            "workos_redirect_uri": REDIRECT_URI,
         }
         values.update(overrides)
         return Settings(_env_file=None, **values)
