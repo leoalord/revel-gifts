@@ -1,0 +1,15 @@
+name: blocked_any is computed and cannot be written
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this tuple.
+
+tests:
+  - name: direct blocked_any tuple
+    tuples:
+      - user: "user:sam"
+        relation: blocked_any
+        object: profile:alex
+    check:
+      - user: user:sam
+        object: profile:alex
+        assertions:
+          blocked_any: true

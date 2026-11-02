@@ -1,0 +1,332 @@
+name: Revel Gifts authorization model v2
+model_file: ../model.fga
+# Synthetic IDs. Each user has one connected agent (an agent_delegations.id), written as on
+# connect: acts_for, user#delegate and platform:revel#connected_agent. B owns profile:b.
+# Tiers: owner (only_me) > trusted_circle > connections > public. Blocks are directional:
+# profile:b#blocked@user:x removes x and x's agents from every tier on b's profile only.
+
+tests:
+  - name: tier hierarchy and agent inheritance
+    description: Each tier includes the lower ones; a user's connected agent inherits the user's tier; strangers get nothing without the Public opt-in.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:b, relation: acts_for, object: agent:b-muse}
+      - {user: agent:b-muse, relation: delegate, object: user:b}
+      - {user: agent:b-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:t, relation: acts_for, object: agent:t-muse}
+      - {user: agent:t-muse, relation: delegate, object: user:t}
+      - {user: agent:t-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:c, relation: acts_for, object: agent:c-muse}
+      - {user: agent:c-muse, relation: delegate, object: user:c}
+      - {user: agent:c-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:s, relation: acts_for, object: agent:s-muse}
+      - {user: agent:s-muse, relation: delegate, object: user:s}
+      - {user: agent:s-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:t, relation: trusted, object: profile:b}
+      - {user: user:c, relation: connection, object: profile:b}
+    check:
+      - user: user:b
+        object: profile:b
+        assertions: &owner_all
+          view_only_me: true
+          view_trusted: true
+          view_connections: true
+          view_public: true
+          contribute: true
+      - user: agent:b-muse
+        object: profile:b
+        assertions: *owner_all
+      - user: user:t
+        object: profile:b
+        assertions: &trusted_tier
+          view_only_me: false
+          view_trusted: true
+          view_connections: true
+          view_public: true
+          contribute: false
+      - user: agent:t-muse
+        object: profile:b
+        assertions: *trusted_tier
+      - user: user:c
+        object: profile:b
+        assertions: &connection_tier
+          view_only_me: false
+          view_trusted: false
+          view_connections: true
+          view_public: true
+          contribute: false
+      - user: agent:c-muse
+        object: profile:b
+        assertions: *connection_tier
+      - user: user:s
+        object: profile:b
+        assertions: &no_tier
+          view_only_me: false
+          view_trusted: false
+          view_connections: false
+          view_public: false
+          contribute: false
+      - user: agent:s-muse
+        object: profile:b
+        assertions: *no_tier
+      # Access is directional: b holds nothing on a profile b has not been granted.
+      - user: user:b
+        object: profile:t
+        assertions: *no_tier
+    list_objects:
+      - user: agent:t-muse
+        type: profile
+        assertions:
+          view_trusted:
+            - profile:b
+          view_public:
+            - profile:b
+      - user: agent:c-muse
+        type: profile
+        assertions:
+          view_trusted: []
+          view_connections:
+            - profile:b
+
+  - name: public opt-in reaches any user and any connected agent
+    description: The opt-in writes user:* and platform:revel#connected_agent; connected agents of strangers get public only; a delegation without the platform tuple (disconnected) gets nothing.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:s, relation: acts_for, object: agent:s-muse}
+      - {user: agent:s-muse, relation: delegate, object: user:s}
+      - {user: agent:s-muse, relation: connected_agent, object: platform:revel}
+      - {user: "user:*", relation: public_viewer, object: profile:b}
+      - {user: "platform:revel#connected_agent", relation: public_viewer, object: profile:b}
+    check:
+      - user: user:s
+        object: profile:b
+        assertions: &public_tier
+          view_only_me: false
+          view_trusted: false
+          view_connections: false
+          view_public: true
+          contribute: false
+      - user: agent:s-muse
+        object: profile:b
+        assertions: *public_tier
+      - user: user:anyone
+        object: profile:b
+        assertions: *public_tier
+      - user: agent:gone
+        object: profile:b
+        assertions: *no_tier
+
+  - name: blocks override every tier
+    description: A block on b's profile removes the blocked user and that user's agents from trusted, connections and public, even with stale grant tuples; the block is directional.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:t, relation: owner, object: profile:t}
+      - {user: user:t, relation: acts_for, object: agent:t-muse}
+      - {user: agent:t-muse, relation: delegate, object: user:t}
+      - {user: agent:t-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:c, relation: acts_for, object: agent:c-muse}
+      - {user: agent:c-muse, relation: delegate, object: user:c}
+      - {user: agent:c-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:s, relation: acts_for, object: agent:s-muse}
+      - {user: agent:s-muse, relation: delegate, object: user:s}
+      - {user: agent:s-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:t, relation: trusted, object: profile:b}
+      - {user: user:c, relation: connection, object: profile:b}
+      - {user: "user:*", relation: public_viewer, object: profile:b}
+      - {user: "platform:revel#connected_agent", relation: public_viewer, object: profile:b}
+      - {user: user:t, relation: blocked, object: profile:b}
+      - {user: user:c, relation: blocked, object: profile:b}
+      - {user: user:s, relation: blocked, object: profile:b}
+      # The reverse direction: t approved b as a connection on profile:t.
+      - {user: user:b, relation: connection, object: profile:t}
+    check:
+      - user: user:t
+        object: profile:b
+        assertions: &blocked_all
+          view_only_me: false
+          view_trusted: false
+          view_connections: false
+          view_public: false
+          contribute: false
+          blocked_any: true
+      - user: agent:t-muse
+        object: profile:b
+        assertions: *blocked_all
+      - user: user:c
+        object: profile:b
+        assertions: *blocked_all
+      - user: agent:c-muse
+        object: profile:b
+        assertions: *blocked_all
+      - user: user:s
+        object: profile:b
+        assertions: *blocked_all
+      - user: agent:s-muse
+        object: profile:b
+        assertions: *blocked_all
+      # Unblocked users still see the public profile.
+      - user: user:other
+        object: profile:b
+        assertions:
+          view_public: true
+          view_connections: false
+      # Directional: b blocked t on profile:b, but b keeps the connection t granted on profile:t.
+      - user: user:b
+        object: profile:t
+        assertions:
+          view_connections: true
+          view_public: true
+          blocked_any: false
+
+  - name: owner cannot be blocked out of their own profile
+    description: Degenerate owner-blocks-self (and a trusted tuple for the owner) leave the owner and the owner's agents with every tier.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:b, relation: acts_for, object: agent:b-muse}
+      - {user: agent:b-muse, relation: delegate, object: user:b}
+      - {user: agent:b-muse, relation: connected_agent, object: platform:revel}
+      - {user: user:b, relation: blocked, object: profile:b}
+      - {user: user:b, relation: trusted, object: profile:b}
+    check:
+      - user: user:b
+        object: profile:b
+        assertions: *owner_all
+      - user: agent:b-muse
+        object: profile:b
+        assertions: *owner_all
+
+  - name: revocation removes access
+    description: Without the trusted, connection or public tuples (revoked or withdrawn), the former viewer and agent hold no tier; a tier change leaves only the new tier.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:c, relation: acts_for, object: agent:c-muse}
+      - {user: agent:c-muse, relation: delegate, object: user:c}
+      - {user: agent:c-muse, relation: connected_agent, object: platform:revel}
+      # Downgraded from trusted to connections: only the connection tuple remains.
+      - {user: user:d, relation: connection, object: profile:b}
+    check:
+      - user: user:c
+        object: profile:b
+        assertions: *no_tier
+      - user: agent:c-muse
+        object: profile:b
+        assertions: *no_tier
+      - user: user:d
+        object: profile:b
+        assertions: *connection_tier
+
+  - name: agent disconnect removes every inherited tier
+    description: A disconnected delegation (acts_for, delegate and connected_agent deleted) holds nothing, while its user keeps their grants and other agents are unaffected.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:t, relation: owner, object: profile:t}
+      - {user: user:t, relation: trusted, object: profile:b}
+      - {user: "user:*", relation: public_viewer, object: profile:b}
+      - {user: "platform:revel#connected_agent", relation: public_viewer, object: profile:b}
+      # t's second agent is still connected.
+      - {user: user:t, relation: acts_for, object: agent:t-other}
+      - {user: agent:t-other, relation: delegate, object: user:t}
+      - {user: agent:t-other, relation: connected_agent, object: platform:revel}
+      - {user: user:b, relation: requester, object: question:q1}
+      - {user: profile:t, relation: about, object: question:q1}
+    check:
+      - user: agent:t-muse
+        object: profile:b
+        assertions: *no_tier
+      - user: agent:t-muse
+        object: profile:t
+        assertions: *no_tier
+      - user: agent:t-muse
+        object: question:q1
+        assertions:
+          respond: false
+          read_answer: false
+      - user: user:t
+        object: profile:b
+        assertions: *trusted_tier
+      - user: agent:t-other
+        object: profile:b
+        assertions: *trusted_tier
+      - user: agent:t-other
+        object: question:q1
+        assertions:
+          respond: true
+
+  - name: question relations
+    description: Respondents are the about-profile owner's agents; the requester, the requester's agents and the owner side read the answer; others cannot; a block on the requester stops requester-side answer reads.
+    tuples:
+      - {user: user:b, relation: owner, object: profile:b}
+      - {user: user:b, relation: acts_for, object: agent:b-muse}
+      - {user: agent:b-muse, relation: delegate, object: user:b}
+      - {user: user:r, relation: acts_for, object: agent:r-muse}
+      - {user: agent:r-muse, relation: delegate, object: user:r}
+      - {user: user:x, relation: acts_for, object: agent:x-muse}
+      - {user: agent:x-muse, relation: delegate, object: user:x}
+      - {user: user:r, relation: connection, object: profile:b}
+      - {user: profile:b, relation: about, object: question:q1}
+      - {user: user:r, relation: requester, object: question:q1}
+      - {user: profile:b, relation: about, object: question:q2}
+      - {user: user:x, relation: requester, object: question:q2}
+      - {user: user:x, relation: blocked, object: profile:b}
+    check:
+      - user: agent:b-muse
+        object: question:q1
+        assertions:
+          respond: true
+          read_answer: true
+          requester_agent: false
+      - user: user:b
+        object: question:q1
+        assertions:
+          # The owner human answers through their agent (F7 leases), not directly.
+          respond: false
+          read_answer: true
+      - user: user:r
+        object: question:q1
+        assertions:
+          requester: true
+          respond: false
+          read_answer: true
+      - user: agent:r-muse
+        object: question:q1
+        assertions:
+          requester_agent: true
+          respond: false
+          read_answer: true
+      - user: user:x
+        object: question:q1
+        assertions: &question_none
+          respond: false
+          read_answer: false
+      - user: agent:x-muse
+        object: question:q1
+        assertions: *question_none
+      # x was blocked after asking q2: neither x nor x's agent reads its answer.
+      - user: user:x
+        object: question:q2
+        assertions:
+          requester: true
+          read_answer: false
+      - user: agent:x-muse
+        object: question:q2
+        assertions:
+          requester_agent: true
+          read_answer: false
+      - user: agent:b-muse
+        object: question:q2
+        assertions:
+          respond: true
+          read_answer: true
+    list_objects:
+      - user: agent:b-muse
+        type: question
+        assertions:
+          respond:
+            - question:q1
+            - question:q2
+      - user: agent:r-muse
+        type: question
+        assertions:
+          read_answer:
+            - question:q1
+          respond: []

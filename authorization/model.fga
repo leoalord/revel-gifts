@@ -1,10 +1,25 @@
-# Revel Gifts authorization model v1.
+# Revel Gifts authorization model v2.
 # Traces to "Authorization granularity" (rooms and keys) on the main project page:
 # https://app.notion.com/p/4092bade7f31805191e7c4c884960908
+# and to Relationships, Discovery & Privacy (audiences, Public opt-in, approval, block):
+# https://app.notion.com/p/40b2bade7f31811d8e55d8818e949b31
 # OpenFGA stores relationships only; claim audience filtering happens in PostgreSQL.
 # Object IDs: user:<users.id>; agent:<agent_delegations.id> (one object per user and
-# OAuth client pair, never the global agents.id); profile:<profiles.id>.
-# v2 extends this model additively; do not rename v1 types or relations.
+# OAuth client pair, never the global agents.id); profile:<profiles.id>;
+# question:<questions.id>; platform:revel (the single platform object).
+#
+# v2 is additive: every v1 type and relation is unchanged, so v1 tuples stay valid.
+# Never rename or remove a relation; add new ones.
+#
+# Tiers, highest first: owner (only_me) > trusted_circle > connections > public. Each
+# view_* relation includes the tiers above it, and a user's connected agents (user#delegate)
+# inherit every tier the user holds.
+#
+# Blocks are DIRECTIONAL: profile:<B>#blocked@user:<A> means B blocked A, so A and A's agents
+# lose every tier on B's profile, public included, even if a stale connection or trusted tuple
+# remains. It says nothing about B on A's profile; any reverse effect is F6's (Privacy: the
+# target "can approve, decline, or block", and "approval and access are directional").
+# The owner and the owner's agents are never subject to a block on their own profile.
 model
   schema 1.1
 
@@ -17,6 +32,14 @@ type agent
   relations
     define acts_for: [user]
 
+# One object, platform:revel. Every ACTIVE delegation is platform:revel#connected_agent
+# (written with acts_for/delegate on connect, deleted on disconnect). It exists because OpenFGA
+# cannot follow a wildcard tupleset (`delegate from public_viewer` with [user:*] is rejected),
+# and agent:* would also match disconnected delegations.
+type platform
+  relations
+    define connected_agent: [agent]
+
 type profile
   relations
     define owner: [user]
@@ -25,3 +48,33 @@ type profile
     define owner_agent: delegate from owner
     define contribute: owner or owner_agent
     define view_only_me: owner or owner_agent
+
+    # v2 grants written by F6 (approved connection_requests: requester on the target's
+    # profile) and F5 (Public opt-in). A viewer holds at most one of trusted/connection.
+    define trusted: [user]
+    define connection: [user]
+    # Public opt-in writes both user:* and platform:revel#connected_agent.
+    define public_viewer: [user:*, platform#connected_agent]
+    define blocked: [user]
+
+    # Computed (never written): a user and that user's agents.
+    define trusted_member: trusted or delegate from trusted
+    define connection_member: connection or delegate from connection
+    define blocked_any: blocked or delegate from blocked
+
+    define view_trusted: owner or owner_agent or (trusted_member but not blocked_any)
+    define view_connections: view_trusted or (connection_member but not blocked_any)
+    define view_public: view_connections or (public_viewer but not blocked_any)
+
+type question
+  relations
+    # The profile the question is about, and the requesting user (F7 writes both at creation).
+    define about: [profile]
+    define requester: [user]
+    define requester_agent: delegate from requester
+    # Respondents are the owner's delegations; they read minimized_question only (F7's rule).
+    define respond: owner_agent from about
+    # The requester side reads the answer unless the owner has since blocked the requester;
+    # the owner side always can. F7 still releases an answer only when the requester can see
+    # the facts it relies on (Privacy).
+    define read_answer: owner from about or owner_agent from about or ((requester or requester_agent) but not blocked_any from about)

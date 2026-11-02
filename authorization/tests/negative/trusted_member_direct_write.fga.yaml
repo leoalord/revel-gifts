@@ -1,0 +1,15 @@
+name: trusted_member is computed and cannot be written
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this tuple.
+
+tests:
+  - name: direct trusted_member tuple
+    tuples:
+      - user: "agent:deleg-sam-muse"
+        relation: trusted_member
+        object: profile:alex
+    check:
+      - user: agent:deleg-sam-muse
+        object: profile:alex
+        assertions:
+          view_trusted: true

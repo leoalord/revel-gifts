@@ -1,0 +1,15 @@
+name: question#respond is computed and cannot be written
+model_file: ../../model.fga
+# Expected to FAIL: scripts/test-model.sh asserts the CLI rejects this tuple.
+
+tests:
+  - name: direct respond tuple
+    tuples:
+      - user: "agent:deleg-sam-muse"
+        relation: respond
+        object: question:q1
+    check:
+      - user: agent:deleg-sam-muse
+        object: question:q1
+        assertions:
+          respond: true
