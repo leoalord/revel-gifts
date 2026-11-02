@@ -70,7 +70,7 @@ def test_deterministic_constraint_names() -> None:
         "ix_agent_delegations_agent_id",
     ):
         assert name in ddl, name
-    assert ddl.count("ON DELETE RESTRICT") == 34  # every FK (identity 2, profile 13, 0003 19)
+    assert ddl.count("ON DELETE RESTRICT") == 35  # every FK (identity 2, profile 13, 0003 20)
     assert "gen_random_uuid()" in ddl
 
 

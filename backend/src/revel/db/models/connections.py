@@ -59,7 +59,8 @@ class ConnectionRequest(TimestampMixin, Base):
     or declines/blocks. At most one live (pending/approved/blocked) row exists per directed pair:
     a duplicate request returns the existing row and a block persists. ``responded_at`` is set
     whenever the request leaves ``pending``. ``(requester_user_id, created_at)`` supports rate
-    limits.
+    limits. ``responder_delegation_id`` records the target's agent when the target responded
+    through it (NULL for UI responses).
     """
 
     __tablename__ = "connection_requests"
@@ -79,6 +80,14 @@ class ConnectionRequest(TimestampMixin, Base):
             ["requester_delegation_id", "requester_user_id"],
             ["agent_delegations.id", "agent_delegations.user_id"],
             name="fk_connection_requests_requester_delegation_agent_delegations",
+            ondelete="RESTRICT",
+        ),
+        # The responding delegation (target approving through an agent) must belong to the
+        # target (MATCH SIMPLE: NULL allowed).
+        ForeignKeyConstraint(
+            ["responder_delegation_id", "target_user_id"],
+            ["agent_delegations.id", "agent_delegations.user_id"],
+            name="fk_connection_requests_responder_delegation_agent_delegations",
             ondelete="RESTRICT",
         ),
         Index(
@@ -109,3 +118,5 @@ class ConnectionRequest(TimestampMixin, Base):
     )
     granted_tier: Mapped[str | None] = mapped_column(Text)
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Audit: the target's delegation that responded, when the target responded via an agent.
+    responder_delegation_id: Mapped[uuid.UUID | None] = mapped_column()

@@ -65,6 +65,12 @@ class Question(TimestampMixin, Base):
     purpose-minimized text set after routing. ``routing_step`` is the routing ladder position:
     1 profile, 2 owner's agents, 3 owner via lease, 4 Trusted Circle (stretch). Escalation
     permission and context are stored as given; Trusted Circle escalation is off in the MVP.
+
+    ``private_purpose`` and ``escalation_context`` are ORM-deferred with raiseload: a plain
+    ``select(Question)`` / ``session.get(Question, ...)`` does not load them, and accessing them
+    raises instead of lazy-loading. F7 must explicitly ``undefer`` them (e.g.
+    ``options(undefer(Question.private_purpose))``) only in requester/router-only code paths;
+    respondent-facing reads should select explicit columns.
     """
 
     __tablename__ = "questions"
@@ -97,6 +103,8 @@ class Question(TimestampMixin, Base):
         UniqueConstraint("profile_id", "id"),
         Index("ix_questions_profile_id_status", "profile_id", "status"),
         Index("ix_questions_requester_user_id_status", "requester_user_id", "status"),
+        # Requester rate limits ("N questions per window").
+        Index("ix_questions_requester_user_id_created_at", "requester_user_id", "created_at"),
         Index("ix_questions_status_expires_at", "status", "expires_at"),
     )
 
@@ -110,9 +118,13 @@ class Question(TimestampMixin, Base):
     )
     requester_delegation_id: Mapped[uuid.UUID | None] = mapped_column()
     requested_information: Mapped[str] = mapped_column(Text, nullable=False)
-    # Restricted: never shown to respondents.
+    # Restricted: never shown to respondents. Deferred with raiseload (see class docstring).
     private_purpose: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=_EMPTY_JSONB
+        JSONB,
+        nullable=False,
+        server_default=_EMPTY_JSONB,
+        deferred=True,
+        deferred_raiseload=True,
     )
     minimized_question: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
@@ -122,7 +134,9 @@ class Question(TimestampMixin, Base):
     escalation_permitted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    escalation_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    escalation_context: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, deferred=True, deferred_raiseload=True
+    )
     routing_step: Mapped[int | None] = mapped_column(SmallInteger)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -158,8 +172,10 @@ class Assignment(TimestampMixin, Base):
             name="completed_at_matches_status",
         ),
         UniqueConstraint("question_id", "respondent_delegation_id"),
-        # Target of the same-question composite FKs from question_events and answers.
+        # Target of the same-question composite FK from question_events.
         UniqueConstraint("question_id", "id"),
+        # Target of the answers FK: an answer may only cite a lease its own delegation holds.
+        UniqueConstraint("question_id", "id", "respondent_delegation_id"),
         Index(
             "uq_assignments_question_id_human_contact",
             "question_id",
@@ -257,6 +273,11 @@ class Answer(TimestampMixin, Base):
         ),
         CheckConstraint(check_in("audience", Audience), name="audience"),
         CheckConstraint(check_in("status", AnswerStatus), name="status"),
+        # MATCH SIMPLE skips the lease FK when the delegation is NULL, so require it.
+        CheckConstraint(
+            "assignment_id IS NULL OR respondent_delegation_id IS NOT NULL",
+            name="assignment_requires_delegation",
+        ),
         # The answer's profile must be its question's profile.
         ForeignKeyConstraint(
             ["profile_id", "question_id"],
@@ -264,10 +285,11 @@ class Answer(TimestampMixin, Base):
             name="fk_answers_question_id_questions",
             ondelete="RESTRICT",
         ),
-        # The assignment must belong to the answer's question (MATCH SIMPLE: NULL allowed).
+        # The assignment must belong to the answer's question and be held by the answer's
+        # delegation (MATCH SIMPLE: NULL assignment allowed).
         ForeignKeyConstraint(
-            ["question_id", "assignment_id"],
-            ["assignments.question_id", "assignments.id"],
+            ["question_id", "assignment_id", "respondent_delegation_id"],
+            ["assignments.question_id", "assignments.id", "assignments.respondent_delegation_id"],
             name="fk_answers_assignment_id_assignments",
             ondelete="RESTRICT",
         ),

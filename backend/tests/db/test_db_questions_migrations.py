@@ -10,7 +10,8 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import Connection, Engine, delete, inspect, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.orm import Session, undefer
 
 from revel.db.base import Base
 from revel.db.models import (
@@ -22,6 +23,7 @@ from revel.db.models import (
     Claim,
     ClaimEvent,
     ConnectionRequest,
+    ContributionPolicy,
     Handle,
     Profile,
     Question,
@@ -192,6 +194,11 @@ class _Scene:
             requester_delegation_id=self.requester_delegation,
         )
         self.assignment_id = _assignment(conn, self.question_id, self.owner_delegation)
+        # Answer columns for the lease holder citing its own lease.
+        self.lease = {
+            "assignment_id": self.assignment_id,
+            "respondent_delegation_id": self.owner_delegation,
+        }
 
 
 # --- schema --------------------------------------------------------------------------------
@@ -227,6 +234,7 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
         "status",
         "granted_tier",
         "responded_at",
+        "responder_delegation_id",
         "created_at",
         "updated_at",
     }
@@ -354,7 +362,12 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
             "ck_question_events_event_type",
             "ck_question_events_delegation_requires_actor",
         },
-        "answers": {"ck_answers_body_length", "ck_answers_audience", "ck_answers_status"},
+        "answers": {
+            "ck_answers_body_length",
+            "ck_answers_audience",
+            "ck_answers_status",
+            "ck_answers_assignment_requires_delegation",
+        },
         "answer_evidence": {
             "ck_answer_evidence_category_length",
             "ck_answer_evidence_proposed_audience",
@@ -377,6 +390,11 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
                 "respondent_delegation_id",
             ],
             "uq_assignments_question_id_id": ["question_id", "id"],
+            "uq_assignments_question_id_id_respondent_delegation_id": [
+                "question_id",
+                "id",
+                "respondent_delegation_id",
+            ],
         },
         "question_events": {},
         "answers": {"uq_answers_profile_id_id": ["profile_id", "id"]},
@@ -403,6 +421,10 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
             "fk_connection_requests_target_user_id_users": (["target_user_id"], "users", ["id"]),
             "fk_connection_requests_requester_delegation_agent_delegations": (
                 ["requester_delegation_id", "requester_user_id"],
+                *delegation,
+            ),
+            "fk_connection_requests_responder_delegation_agent_delegations": (
+                ["responder_delegation_id", "target_user_id"],
                 *delegation,
             ),
         },
@@ -442,9 +464,9 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
                 ["profile_id", "id"],
             ),
             "fk_answers_assignment_id_assignments": (
-                ["question_id", "assignment_id"],
+                ["question_id", "assignment_id", "respondent_delegation_id"],
                 "assignments",
-                ["question_id", "id"],
+                ["question_id", "id", "respondent_delegation_id"],
             ),
             "fk_answers_respondent_user_id_users": (["respondent_user_id"], "users", ["id"]),
             "fk_answers_respondent_delegation_id_agent_delegations": (
@@ -504,6 +526,7 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
             "ix_questions_profile_id_status": ["profile_id", "status"],
             "ix_questions_requester_user_id_status": ["requester_user_id", "status"],
             "ix_questions_status_expires_at": ["status", "expires_at"],
+            "ix_questions_requester_user_id_created_at": ["requester_user_id", "created_at"],
         },
         "assignments": {
             "uq_assignments_question_id_human_contact": ["question_id"],
@@ -685,8 +708,7 @@ def test_answer_delegation_must_belong_to_respondent(conn: Connection) -> None:
         s.question_id,
         s.profile_id,
         s.owner,
-        respondent_delegation_id=s.owner_delegation,
-        assignment_id=s.assignment_id,
+        **s.lease,
     )
 
 
@@ -790,7 +812,15 @@ def test_question_checks(conn: Connection) -> None:
         )
 
     question_id = _question(conn, profile_id, requester)
-    row = conn.execute(select(Question).where(Question.id == question_id)).one()
+    row = conn.execute(
+        select(
+            Question.status,
+            Question.private_purpose,
+            Question.closed_at,
+            Question.escalation_permitted,
+            Question.routing_step,
+        ).where(Question.id == question_id)
+    ).one()
     assert row.status == "open" and row.private_purpose == {} and row.closed_at is None
     assert row.escalation_permitted is False and row.routing_step is None
     _question(conn, profile_id, requester, status="answered", routing_step=1)
@@ -959,7 +989,7 @@ def test_answer_question_and_assignment_consistency(conn: Connection) -> None:
     _rejects(
         conn,
         "fk_answers_assignment_id_assignments",
-        lambda: _answer(conn, other_question, s.profile_id, s.owner, assignment_id=s.assignment_id),
+        lambda: _answer(conn, other_question, s.profile_id, s.owner, **s.lease),
     )
     for kwargs, constraint in (
         ({"body": ""}, "ck_answers_body_length"),
@@ -972,9 +1002,7 @@ def test_answer_question_and_assignment_consistency(conn: Connection) -> None:
             constraint,
             lambda kwargs=kwargs: _answer(conn, s.question_id, s.profile_id, s.owner, **kwargs),
         )
-    answer_id = _answer(
-        conn, s.question_id, s.profile_id, s.owner, assignment_id=s.assignment_id, body="x" * 2000
-    )
+    answer_id = _answer(conn, s.question_id, s.profile_id, s.owner, **s.lease, body="x" * 2000)
     assert (
         conn.execute(select(Answer.status).where(Answer.id == answer_id)).scalar_one() == "accepted"
     )
@@ -992,6 +1020,124 @@ def test_one_accepted_answer_per_question(conn: Connection) -> None:
     )
     other = _question(conn, s.profile_id, s.requester)
     _answer(conn, other, s.profile_id, s.owner)
+
+
+def test_answer_must_cite_a_lease_it_holds(conn: Connection) -> None:
+    s = _Scene(conn)
+    lease_fk = "fk_answers_assignment_id_assignments"
+    # The same owner's other delegation cites the lease held by owner_delegation.
+    other_own_delegation = _delegation(conn, s.owner)
+    _rejects(
+        conn,
+        lease_fk,
+        lambda: _answer(
+            conn,
+            s.question_id,
+            s.profile_id,
+            s.owner,
+            assignment_id=s.assignment_id,
+            respondent_delegation_id=other_own_delegation,
+        ),
+    )
+    # An assignment with a NULL delegation would bypass the MATCH SIMPLE FK.
+    _rejects(
+        conn,
+        "ck_answers_assignment_requires_delegation",
+        lambda: _answer(
+            conn, s.question_id, s.profile_id, _user(conn), assignment_id=s.assignment_id
+        ),
+    )
+    # A user who does not own the lease's delegation cannot answer under it.
+    _rejects(
+        conn,
+        "fk_answers_respondent_delegation_id_agent_delegations",
+        lambda: _answer(conn, s.question_id, s.profile_id, s.requester, **s.lease),
+    )
+    # A user with their own delegation still cannot cite someone else's lease.
+    _rejects(
+        conn,
+        lease_fk,
+        lambda: _answer(
+            conn,
+            s.question_id,
+            s.profile_id,
+            s.requester,
+            assignment_id=s.assignment_id,
+            respondent_delegation_id=s.requester_delegation,
+        ),
+    )
+    _answer(conn, s.question_id, s.profile_id, s.owner, **s.lease)
+
+
+def test_question_restricted_columns_raise_unless_undeferred(conn: Connection) -> None:
+    s = _Scene(conn)
+    conn.execute(
+        update(Question)
+        .where(Question.id == s.question_id)
+        .values(private_purpose={"occasion": "birthday"}, escalation_context={"ok": True})
+    )
+    with Session(bind=conn) as session:
+        question = session.get(Question, s.question_id)
+        assert question is not None and question.status == "open"
+        for attribute in ("private_purpose", "escalation_context"):
+            with pytest.raises(InvalidRequestError, match="raiseload"):
+                getattr(question, attribute)
+        session.expunge_all()
+        loaded = session.scalars(
+            select(Question)
+            .where(Question.id == s.question_id)
+            .options(undefer(Question.private_purpose), undefer(Question.escalation_context))
+        ).one()
+        assert loaded.private_purpose == {"occasion": "birthday"}
+        assert loaded.escalation_context == {"ok": True}
+
+
+def test_contribution_policy_question_controls(conn: Connection) -> None:
+    profile_id, owner = _profile(conn)
+    conn.execute(
+        insert(ContributionPolicy).values(
+            profile_id=profile_id, version=1, approved_by_user_id=owner
+        )
+    )
+    settings = {"blocked_categories": ["health"], "trusted_circle_may_answer": True}
+    conn.execute(
+        insert(ContributionPolicy).values(
+            profile_id=profile_id,
+            version=2,
+            approved_by_user_id=owner,
+            questions_enabled=False,
+            enrichment_enabled=False,
+            question_settings=settings,
+        )
+    )
+    rows = conn.execute(
+        select(
+            ContributionPolicy.version,
+            ContributionPolicy.questions_enabled,
+            ContributionPolicy.enrichment_enabled,
+            ContributionPolicy.question_settings,
+        )
+        .where(ContributionPolicy.profile_id == profile_id)
+        .order_by(ContributionPolicy.version)
+    ).all()
+    assert [tuple(r) for r in rows] == [(1, True, True, {}), (2, False, False, settings)]
+
+
+def test_responder_delegation_must_belong_to_target(conn: Connection) -> None:
+    a, b = _user(conn), _user(conn)
+    approve = {"status": "approved", "granted_tier": "connections", "responded_at": NOW}
+    _rejects(
+        conn,
+        "fk_connection_requests_responder_delegation_agent_delegations",
+        lambda: _request(conn, a, b, responder_delegation_id=_delegation(conn, a), **approve),
+    )
+    target_delegation = _delegation(conn, b)
+    request_id = _request(conn, a, b, responder_delegation_id=target_delegation, **approve)
+    stored = conn.execute(
+        select(ConnectionRequest.responder_delegation_id).where(ConnectionRequest.id == request_id)
+    ).scalar_one()
+    assert stored == target_delegation
+    _request(conn, b, a)  # pending or UI response: no responder delegation
 
 
 # --- answer evidence -----------------------------------------------------------------------
@@ -1075,7 +1221,7 @@ def test_deletes_with_dependents_restricted(conn: Connection) -> None:
     _request(conn, s.requester, s.owner)
     _event(conn, s.question_id, assignment_id=s.assignment_id)
     claim_id = _claim(conn, s.profile_id, s.owner)
-    answer_id = _answer(conn, s.question_id, s.profile_id, s.owner, assignment_id=s.assignment_id)
+    answer_id = _answer(conn, s.question_id, s.profile_id, s.owner, **s.lease)
     _evidence(conn, answer_id, s.profile_id, claim_id=claim_id)
 
     _rejects(

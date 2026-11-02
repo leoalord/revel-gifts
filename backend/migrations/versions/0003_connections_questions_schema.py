@@ -12,7 +12,8 @@ follow revel.db.base.NAMING_CONVENTION (or are given explicitly in the models) a
 literally (op.f marks them final), and CHECK expressions are literal strings, so this migration
 stays fixed if models or enums change.
 
-Also adds UNIQUE (id, user_id) on agent_delegations and replaces the single-column delegation FKs
+Also adds enrichment_enabled, questions_enabled and question_settings to contribution_policies,
+and UNIQUE (id, user_id) on agent_delegations and replaces the single-column delegation FKs
 on claims and claim_events with composite (delegation_id, user_id) FKs under the same names, so a
 delegation can never be attributed to a different user. Downgrade restores the 0002 form.
 """
@@ -92,6 +93,28 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         )
 
+    op.add_column(
+        "contribution_policies",
+        sa.Column(
+            "enrichment_enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False
+        ),
+    )
+    op.add_column(
+        "contribution_policies",
+        sa.Column(
+            "questions_enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False
+        ),
+    )
+    op.add_column(
+        "contribution_policies",
+        sa.Column(
+            "question_settings",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+    )
+
     op.create_table(
         "handles",
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -116,6 +139,7 @@ def upgrade() -> None:
         sa.Column("status", sa.Text(), server_default="pending", nullable=False),
         sa.Column("granted_tier", sa.Text(), nullable=True),
         sa.Column("responded_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("responder_delegation_id", sa.Uuid(), nullable=True),
         _now("created_at"),
         _now("updated_at"),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_connection_requests")),
@@ -125,6 +149,11 @@ def upgrade() -> None:
             "fk_connection_requests_requester_delegation_agent_delegations",
             "requester_delegation_id",
             "requester_user_id",
+        ),
+        _delegation_fk(
+            "fk_connection_requests_responder_delegation_agent_delegations",
+            "responder_delegation_id",
+            "target_user_id",
         ),
         _ck("connection_requests", "not_self_request", "requester_user_id <> target_user_id"),
         _ck(
@@ -227,6 +256,11 @@ def upgrade() -> None:
         op.f("ix_questions_requester_user_id_status"), "questions", ["requester_user_id", "status"]
     )
     op.create_index(op.f("ix_questions_status_expires_at"), "questions", ["status", "expires_at"])
+    op.create_index(
+        op.f("ix_questions_requester_user_id_created_at"),
+        "questions",
+        ["requester_user_id", "created_at"],
+    )
 
     op.create_table(
         "assignments",
@@ -252,6 +286,12 @@ def upgrade() -> None:
             name=op.f("uq_assignments_question_id_respondent_delegation_id"),
         ),
         sa.UniqueConstraint("question_id", "id", name=op.f("uq_assignments_question_id_id")),
+        sa.UniqueConstraint(
+            "question_id",
+            "id",
+            "respondent_delegation_id",
+            name=op.f("uq_assignments_question_id_id_respondent_delegation_id"),
+        ),
         _ck(
             "assignments",
             "status",
@@ -360,8 +400,8 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["question_id", "assignment_id"],
-            ["assignments.question_id", "assignments.id"],
+            ["question_id", "assignment_id", "respondent_delegation_id"],
+            ["assignments.question_id", "assignments.id", "assignments.respondent_delegation_id"],
             name=op.f("fk_answers_assignment_id_assignments"),
             ondelete="RESTRICT",
         ),
@@ -379,6 +419,11 @@ def upgrade() -> None:
             "audience IN ('public', 'connections', 'trusted_circle', 'only_me')",
         ),
         _ck("answers", "status", "status IN ('accepted', 'withdrawn')"),
+        _ck(
+            "answers",
+            "assignment_requires_delegation",
+            "assignment_id IS NULL OR respondent_delegation_id IS NOT NULL",
+        ),
     )
     op.create_index(op.f("ix_answers_question_id"), "answers", ["question_id"])
     op.create_index(
@@ -463,6 +508,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_assignments_respondent_delegation_id_status"), table_name="assignments")
     op.drop_index(op.f("uq_assignments_question_id_human_contact"), table_name="assignments")
     op.drop_table("assignments")
+    op.drop_index(op.f("ix_questions_requester_user_id_created_at"), table_name="questions")
     op.drop_index(op.f("ix_questions_status_expires_at"), table_name="questions")
     op.drop_index(op.f("ix_questions_requester_user_id_status"), table_name="questions")
     op.drop_index(op.f("ix_questions_profile_id_status"), table_name="questions")
@@ -480,6 +526,9 @@ def downgrade() -> None:
     )
     op.drop_table("connection_requests")
     op.drop_table("handles")
+    op.drop_column("contribution_policies", "question_settings")
+    op.drop_column("contribution_policies", "questions_enabled")
+    op.drop_column("contribution_policies", "enrichment_enabled")
 
     for table, name, delegation_column, _ in reversed(_RETROFITS):
         op.drop_constraint(op.f(name), table, type_="foreignkey")

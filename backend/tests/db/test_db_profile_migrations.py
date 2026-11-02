@@ -121,6 +121,10 @@ def test_profile_schema_after_upgrade(migrated_engine: Engine) -> None:
         "require_review_all",
         "category_settings",
         "created_at",
+        # Added by 0003_connections_questions.
+        "enrichment_enabled",
+        "questions_enabled",
+        "question_settings",
     }
     assert policy_cols["public_opt_in"]["default"] == "false"
     assert policy_cols["share_provisional"]["default"] == "true"

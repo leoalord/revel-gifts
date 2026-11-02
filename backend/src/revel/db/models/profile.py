@@ -95,6 +95,18 @@ class ContributionPolicy(Base):
     require_review_all: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # Owners turn enrichment (contributions) and questions on/off independently.
+    enrichment_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    questions_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    # Shape owned by F7 and validated in the service (e.g. per-category question blocks and
+    # whether the Trusted Circle may answer).
+    question_settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=_EMPTY_JSONB
+    )
     # Shape owned by F5 and validated in the service.
     category_settings: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=_EMPTY_JSONB

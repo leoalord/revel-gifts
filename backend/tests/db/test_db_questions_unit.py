@@ -5,6 +5,8 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -27,6 +29,7 @@ from revel.db.models import (
     AnswerEvidence,
     Assignment,
     ConnectionRequest,
+    ContributionPolicy,
     Handle,
     Question,
     QuestionEvent,
@@ -191,6 +194,10 @@ def test_constraint_and_index_names() -> None:
         "ix_questions_profile_id_status",
         "ix_questions_requester_user_id_status",
         "ix_questions_status_expires_at",
+        "ix_questions_requester_user_id_created_at",
+        "fk_connection_requests_responder_delegation_agent_delegations",
+        "uq_assignments_question_id_id_respondent_delegation_id",
+        "ck_answers_assignment_requires_delegation",
         "pk_assignments",
         "fk_assignments_question_id_questions",
         "fk_assignments_respondent_delegation_id_agent_delegations",
@@ -238,12 +245,11 @@ def test_constraint_and_index_names() -> None:
     ):
         assert name in ddl, name
         assert len(name) <= 63, name
-    assert ddl.count("ON DELETE RESTRICT") == 19
+    assert ddl.count("ON DELETE RESTRICT") == 20
     assert "ON DELETE CASCADE" not in ddl
     # Delegation-ownership composite FKs (new tables).
-    assert (
-        ddl.count("REFERENCES agent_delegations (id, user_id)") == 4
-    )  # connection_requests, questions, question_events, answers
+    # connection_requests (requester, responder), questions, question_events, answers
+    assert ddl.count("REFERENCES agent_delegations (id, user_id)") == 5
     for fragment in (
         "FOREIGN KEY(requester_delegation_id, requester_user_id) REFERENCES agent_delegations "
         "(id, user_id)",
@@ -253,8 +259,15 @@ def test_constraint_and_index_names() -> None:
         "(id, user_id)",
         "CONSTRAINT fk_question_events_assignment_id_assignments FOREIGN KEY(question_id, "
         "assignment_id) REFERENCES assignments (question_id, id)",
-        "CONSTRAINT fk_answers_assignment_id_assignments FOREIGN KEY(question_id, assignment_id) "
-        "REFERENCES assignments (question_id, id)",
+        "CONSTRAINT fk_answers_assignment_id_assignments FOREIGN KEY(question_id, assignment_id, "
+        "respondent_delegation_id) REFERENCES assignments (question_id, id, "
+        "respondent_delegation_id)",
+        "CONSTRAINT uq_assignments_question_id_id_respondent_delegation_id UNIQUE "
+        "(question_id, id, respondent_delegation_id)",
+        "CONSTRAINT ck_answers_assignment_requires_delegation CHECK (assignment_id IS NULL OR "
+        "respondent_delegation_id IS NOT NULL)",
+        "CONSTRAINT fk_connection_requests_responder_delegation_agent_delegations FOREIGN KEY("
+        "responder_delegation_id, target_user_id) REFERENCES agent_delegations (id, user_id)",
         "CONSTRAINT fk_answers_question_id_questions FOREIGN KEY(profile_id, question_id) "
         "REFERENCES questions (profile_id, id)",
         "CONSTRAINT fk_answer_evidence_answer_id_answers FOREIGN KEY(profile_id, answer_id) "
@@ -285,6 +298,31 @@ def test_retrofitted_delegation_ownership_fks() -> None:
         "actor_delegation_id, actor_user_id) REFERENCES agent_delegations (id, user_id)" in ddl
     )
     assert "REFERENCES agent_delegations (id)" not in ddl
+
+
+def test_question_restricted_columns_are_raiseload_deferred() -> None:
+    """A plain Question load never materializes private_purpose/escalation_context."""
+    mapper = sa_inspect(Question)
+    for name in ("private_purpose", "escalation_context"):
+        prop = mapper.attrs[name]
+        assert prop.deferred and prop.raiseload, name
+    eager = {p.key for p in mapper.column_attrs if not p.deferred}
+    assert not eager & {"private_purpose", "escalation_context"}
+    compiled = str(select(Question).compile(dialect=postgresql.dialect()))
+    assert "private_purpose" not in compiled and "escalation_context" not in compiled
+    assert "requested_information" in compiled
+    assert "undefer" in Question.__doc__
+    # Access on a loaded instance raising is checked against PostgreSQL in
+    # test_db_questions_migrations.test_question_restricted_columns_raise_unless_undeferred.
+
+
+def test_contribution_policy_question_controls() -> None:
+    policies = ContributionPolicy.__table__.c
+    assert policies.questions_enabled.server_default.arg.text == "true"
+    assert policies.enrichment_enabled.server_default.arg.text == "true"
+    assert policies.question_settings.server_default.arg.text == "'{}'::jsonb"
+    for name in ("questions_enabled", "enrichment_enabled", "question_settings"):
+        assert not policies[name].nullable, name
 
 
 def test_model_columns() -> None:
