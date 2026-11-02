@@ -1,0 +1,51 @@
+# Local development services: PostgreSQL (app database `revel` + OpenFGA database `openfga`)
+# and OpenFGA. Local-only credentials; never reuse them elsewhere.
+# Host ports can be overridden: POSTGRES_HOST_PORT, OPENFGA_HTTP_HOST_PORT, OPENFGA_GRPC_HOST_PORT.
+name: revel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: revel
+      POSTGRES_PASSWORD: revel
+      POSTGRES_DB: revel
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./dev/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U revel -d revel && pg_isready -U revel -d openfga"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  openfga-migrate:
+    image: openfga/openfga:v1.22.1
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://revel:revel@postgres:5432/openfga?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  openfga:
+    image: openfga/openfga:v1.22.1
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://revel:revel@postgres:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+      OPENFGA_LOG_FORMAT: json
+    ports:
+      - "${OPENFGA_HTTP_HOST_PORT:-8080}:8080"
+      - "${OPENFGA_GRPC_HOST_PORT:-8081}:8081"
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:

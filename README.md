@@ -1,6 +1,6 @@
 # Revel Gifts
 
-Agent-first gifting context and collaboration. This repository currently contains a directory skeleton, implementation guidance and historical research reports; no runnable application or verified integration exists yet.
+Agent-first gifting context and collaboration. This repository contains a backend scaffold (FastAPI + MCP), local services, implementation guidance and historical research reports; no verified deployed integration exists yet.
 
 Coding agents and orchestrators: read [AGENTS.md](AGENTS.md) for source references, ownership and review gates.
 
@@ -20,4 +20,4 @@ Coding agents and orchestrators: read [AGENTS.md](AGENTS.md) for source referenc
 | `dev/` | Local development and synthetic fixtures |
 | `docs/` | Implementation and operating guidance |
 
-Keep the remote repository private as directed by Notion. Setup commands will be documented when implemented. See [deployment guidance](docs/deployment.md).
+Keep the remote repository private as directed by Notion. Setup: [backend](backend/README.md), [local services](dev/README.md). See [deployment guidance](docs/deployment.md).
