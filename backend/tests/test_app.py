@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 import httpx2
 import pytest
+from auth.authkit import TestAuthKit
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from mcp import Client
@@ -25,6 +26,23 @@ INITIALIZE = {
 }
 
 
+@pytest.fixture
+def settings() -> Settings:
+    """Test settings with the mocked AuthKit (tests/auth/authkit.py) installed.
+
+    The MCP endpoint requires a WorkOS AuthKit bearer token (F2). The app's real verifier
+    is used; only its outbound HTTP client is mocked to serve a local test JWKS.
+    """
+    settings = TestAuthKit.settings(public_base_url="http://localhost:8000")
+    TestAuthKit().install(settings)
+    return settings
+
+
+@pytest.fixture
+def token(settings: Settings) -> str:
+    return TestAuthKit.token(settings)
+
+
 def test_healthz(client: TestClient) -> None:
     response = client.get("/healthz")
     assert response.status_code == 200
@@ -35,14 +53,15 @@ def _rpc(client: TestClient, payload: dict[str, Any], **headers: str) -> httpx.R
     return client.post("/mcp", json=payload, headers={**MCP_HEADERS, **headers})
 
 
-def test_mcp_raw_jsonrpc_initialize_list_call(client: TestClient) -> None:
-    init = _rpc(client, INITIALIZE)
+def test_mcp_raw_jsonrpc_initialize_list_call(client: TestClient, token: str) -> None:
+    auth = {"Authorization": f"Bearer {token}"}
+    init = _rpc(client, INITIALIZE, **auth)
     assert init.status_code == 200, init.text
     assert init.json()["result"]["serverInfo"]["name"] == "revel"
 
-    tools = _rpc(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    tools = _rpc(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, **auth)
     assert tools.status_code == 200, tools.text
-    assert [t["name"] for t in tools.json()["result"]["tools"]] == ["ping"]
+    assert "ping" in [t["name"] for t in tools.json()["result"]["tools"]]
 
     call = _rpc(
         client,
@@ -52,58 +71,88 @@ def test_mcp_raw_jsonrpc_initialize_list_call(client: TestClient) -> None:
             "method": "tools/call",
             "params": {"name": "ping", "arguments": {}},
         },
+        **auth,
     )
     assert call.status_code == 200, call.text
     assert call.json()["result"]["content"][0]["text"] == "pong"
 
 
-def test_mcp_endpoint_exact_path_no_redirect(client: TestClient) -> None:
-    response = client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS, follow_redirects=False)
+def test_mcp_endpoint_exact_path_no_redirect(client: TestClient, token: str) -> None:
+    response = client.post(
+        "/mcp",
+        json=INITIALIZE,
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+    )
     assert response.status_code == 200
 
 
 @pytest.mark.anyio
-async def test_mcp_sdk_client_over_streamable_http(app: FastAPI) -> None:
+async def test_mcp_sdk_client_over_streamable_http(app: FastAPI, token: str) -> None:
     async with app.router.lifespan_context(app):
         transport = httpx2.ASGITransport(app=app)
-        async with httpx2.AsyncClient(transport=transport, base_url="http://localhost:8000") as hc:
+        async with httpx2.AsyncClient(
+            transport=transport,
+            base_url="http://localhost:8000",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as hc:
             streams = streamable_http_client("http://localhost:8000/mcp", http_client=hc)
             async with Client(streams) as mcp_client:
                 tools = await mcp_client.list_tools()
-                assert [t.name for t in tools.tools] == ["ping"]
+                assert "ping" in [t.name for t in tools.tools]
                 result = await mcp_client.call_tool("ping", {})
                 assert result.content[0].text == "pong"
 
 
-def test_mcp_rejects_disallowed_host(client: TestClient) -> None:
-    response = _rpc(client, INITIALIZE, Host="evil.example.com")
+def test_mcp_unauthenticated_401(client: TestClient) -> None:
+    response = _rpc(client, INITIALIZE)
+    assert response.status_code == 401
+    challenge = response.headers["www-authenticate"]
+    assert challenge.startswith("Bearer ")
+    assert (
+        'resource_metadata="http://localhost:8000/.well-known/oauth-protected-resource/mcp"'
+        in challenge
+    )
+
+
+def test_mcp_rejects_disallowed_host(client: TestClient, token: str) -> None:
+    # Bearer auth runs before the transport's Host check, so this needs a valid token.
+    response = _rpc(client, INITIALIZE, Host="evil.example.com", Authorization=f"Bearer {token}")
     assert response.status_code == 421
 
 
-def test_mcp_rejects_disallowed_origin(client: TestClient) -> None:
-    response = _rpc(client, INITIALIZE, Origin="https://evil.example.com")
+def test_mcp_unauthenticated_disallowed_host_401(client: TestClient) -> None:
+    response = _rpc(client, INITIALIZE, Host="evil.example.com")
+    assert response.status_code == 401
+
+
+def test_mcp_rejects_disallowed_origin(client: TestClient, token: str) -> None:
+    response = _rpc(
+        client, INITIALIZE, Origin="https://evil.example.com", Authorization=f"Bearer {token}"
+    )
     assert response.status_code == 403
 
 
 def test_mcp_allows_public_origin_in_production() -> None:
-    settings = Settings(
-        _env_file=None,
+    settings = TestAuthKit.settings(
         app_env="production",
         public_base_url="https://api.revel.gifts",
         allowed_hosts="revel-abc123-uc.a.run.app",
     )
+    TestAuthKit().install(settings)
+    auth = {"Authorization": f"Bearer {TestAuthKit.token(settings)}"}
     app = create_app(settings)
     with TestClient(app, base_url="https://api.revel.gifts") as client:
-        ok = _rpc(client, INITIALIZE, Origin="https://api.revel.gifts")
+        ok = _rpc(client, INITIALIZE, Origin="https://api.revel.gifts", **auth)
         assert ok.status_code == 200, ok.text
-        cloud_run = _rpc(client, INITIALIZE, Host="revel-abc123-uc.a.run.app")
+        cloud_run = _rpc(client, INITIALIZE, Host="revel-abc123-uc.a.run.app", **auth)
         assert cloud_run.status_code == 200, cloud_run.text
         # localhost is only allowed in development/test.
-        assert _rpc(client, INITIALIZE, Host="localhost:8000").status_code == 421
+        assert _rpc(client, INITIALIZE, Host="localhost:8000", **auth).status_code == 421
 
 
 def test_root_routes_not_shadowed_by_mcp_mount(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     router = APIRouter()
 
@@ -118,7 +167,7 @@ def test_root_routes_not_shadowed_by_mcp_mount(
         assert response.status_code == 200
         assert response.json() == {"served_by": "fastapi"}
         assert client.get("/healthz").status_code == 200
-        assert _rpc(client, INITIALIZE).status_code == 200
+        assert _rpc(client, INITIALIZE, Authorization=f"Bearer {token}").status_code == 200
 
 
 def test_mcp_resource_url(settings: Settings) -> None:

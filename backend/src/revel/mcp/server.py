@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
+from revel.mcp import identity_tools
 from revel.settings import Settings
 
 
@@ -23,6 +24,7 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     def ping() -> str:
         return "pong"
 
+    identity_tools.register(server, settings)
     return server
 
 
