@@ -10,10 +10,13 @@ this module reuses. Run DB suites serially.
 
 import dataclasses
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import anyio
+import anyio.from_thread
 import pytest
 from authz_fakes import FakeFga, Principal
 from mcp.server.auth.provider import AccessToken
@@ -489,6 +492,205 @@ async def test_prune_covers_v2_relations(
     assert tier_tuple(pid, t.id, ConnectionTier.CONNECTIONS) in fake_fga.tuples
     assert set(question_tuples(question.id, pid, t.id)) <= fake_fga.tuples
     assert summary.pruned_tuples == len(orphans)
+
+
+# --- Barrier bounds and failure ---------------------------------------------------------------
+
+WAITING_SHARE_LOCK = text(
+    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+    "WHERE c.relname = 'connection_requests' AND l.mode = 'ShareLock' AND NOT l.granted"
+)
+
+
+def hold_row_lock(
+    factory: sessionmaker[Session], request_id: object, seconds: float, held: threading.Event
+) -> threading.Thread:
+    """An in-flight writer: an uncommitted UPDATE on connection_requests for ``seconds``."""
+
+    def run() -> None:
+        with factory() as other, other.begin():
+            other.execute(
+                text("UPDATE connection_requests SET updated_at = now() WHERE id = :id"),
+                {"id": request_id},
+            )
+            held.set()
+            threading.Event().wait(seconds)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert held.wait(5)
+    return thread
+
+
+def fast_barrier(monkeypatch: pytest.MonkeyPatch, *, lock: float, attempts: int) -> None:
+    monkeypatch.setattr(fga_reconcile, "BARRIER_LOCK_TIMEOUT_SECONDS", lock)
+    monkeypatch.setattr(fga_reconcile, "BARRIER_ATTEMPTS", attempts)
+    monkeypatch.setattr(fga_reconcile, "_retry_delay", lambda: 0.2)
+
+
+async def test_writer_queued_behind_a_waiting_barrier_proceeds_within_the_bound(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIFO lock queue: a writer arriving while the barrier waits is held at most one lock
+    attempt (lock_timeout), not until the in-flight writer finishes; reconcile still succeeds
+    by retrying."""
+    a, t, c = people.alex, people.tia, people.cal
+    busy = add_request(session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.CONNECTIONS)
+    other_row = add_request(session, c, a, ConnectionRequestStatus.PENDING)
+    session.commit()
+    lock_seconds = 1.0
+    fast_barrier(monkeypatch, lock=lock_seconds, attempts=6)
+    holder = hold_row_lock(factory, busy.id, 2.5, threading.Event())
+    queued: dict[str, float] = {}
+
+    def queued_writer() -> None:
+        with factory() as probe:
+            deadline = time.monotonic() + 5
+            while probe.execute(WAITING_SHARE_LOCK).scalar_one() == 0:
+                probe.rollback()
+                assert time.monotonic() < deadline, "barrier never queued"
+                threading.Event().wait(0.02)
+            probe.rollback()
+        started = time.monotonic()
+        with factory() as writer, writer.begin():
+            writer.execute(
+                text("UPDATE connection_requests SET updated_at = now() WHERE id = :id"),
+                {"id": other_row.id},
+            )
+        queued["elapsed"] = time.monotonic() - started
+
+    writer = threading.Thread(target=queued_writer, daemon=True)
+    writer.start()
+    summary = await _reconcile(fake_fga, factory, prune=False)
+    writer.join(10)
+    holder.join(10)
+    assert queued["elapsed"] < lock_seconds + 0.75, queued
+    assert summary.connection_tuples == 1
+
+
+async def test_barrier_failure_is_raised_and_skips_prune(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, t = people.alex, people.tia
+    busy = add_request(session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.CONNECTIONS)
+    session.commit()
+    orphan = tier_tuple(uuid4(), uuid4(), ConnectionTier.CONNECTIONS)
+    _old(fake_fga, orphan)
+    fast_barrier(monkeypatch, lock=0.3, attempts=2)
+    holder = hold_row_lock(factory, busy.id, 3.0, threading.Event())
+    started = time.monotonic()
+    with pytest.raises(fga_reconcile.BarrierNotApplied, match="re-run reconcile"):
+        await _reconcile(fake_fga, factory, prune=True)
+    assert time.monotonic() - started < 2.5
+    assert orphan in fake_fga.tuples  # --prune did not run after the failed barrier
+    holder.join(10)
+
+
+async def test_barrier_apply_is_bounded_and_releases_the_locks(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenFGA hanging while the locks are held: the apply bound rolls back (locks released at
+    once), retries, then fails loudly."""
+    a, t = people.alex, people.tia
+    approved = add_request(
+        session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.CONNECTIONS
+    )
+    session.commit()
+    fast_barrier(monkeypatch, lock=1.0, attempts=2)
+    monkeypatch.setattr(fga_reconcile, "BARRIER_APPLY_SECONDS", 0.3)
+    real_snapshot, real_barrier = fga_reconcile._snapshot, fga_reconcile._barrier
+
+    def snapshot_then_revoke(provider: fga_reconcile.SessionFactory) -> fga_reconcile.Snapshot:
+        snap = real_snapshot(provider)
+        with factory() as other, other.begin():
+            other.execute(
+                update(ConnectionRequest)
+                .where(ConnectionRequest.id == approved.id)
+                .values(status="revoked", granted_tier=None)
+            )
+        return snap
+
+    def slow_barrier(factory_: fga_reconcile.SessionFactory, apply):  # type: ignore[no-untyped-def]
+
+        def hanging_apply(fresh: fga_reconcile.Snapshot) -> None:
+            anyio.from_thread.run(_hang_fga, fake_fga)
+            apply(fresh)
+
+        return real_barrier(factory_, hanging_apply)
+
+    monkeypatch.setattr(fga_reconcile, "_snapshot", snapshot_then_revoke)
+    monkeypatch.setattr(fga_reconcile, "_barrier", slow_barrier)
+    started = time.monotonic()
+    with pytest.raises(fga_reconcile.BarrierNotApplied):
+        await _reconcile(fake_fga, factory, prune=False)
+    assert time.monotonic() - started < 3
+    # The locks were released: a writer goes through immediately.
+    began = time.monotonic()
+    with factory() as writer, writer.begin():
+        writer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+        writer.execute(text("UPDATE connection_requests SET updated_at = now()"))
+    assert time.monotonic() - began < 0.5
+
+
+async def _hang_fga(fga: FakeFga) -> None:
+    """Make every later OpenFGA write/delete of this fake hang (until cancelled)."""
+
+    async def hang(*_: object, **__: object) -> None:
+        await anyio.sleep(30)
+
+    fga.write_tuples = hang  # type: ignore[method-assign]
+    fga.delete_tuples = hang  # type: ignore[method-assign]
+
+
+def test_cli_exits_non_zero_when_the_barrier_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def failing_run(**_: object) -> fga_reconcile.ReconcileSummary:
+        raise fga_reconcile.BarrierNotApplied(
+            "barrier not applied after 4 attempts (OperationalError); re-run reconcile"
+        )
+
+    monkeypatch.setattr(fga_reconcile, "run", failing_run)
+    assert fga_reconcile.main([]) == fga_reconcile.EXIT_BARRIER_NOT_APPLIED == 3
+    err = capsys.readouterr().err
+    assert "barrier not applied" in err and "re-run reconcile" in err
+
+
+async def test_reconcile_removes_a_grant_left_by_a_rolled_back_transaction(
+    factory: sessionmaker[Session], session: Session, fake_fga: FakeFga, people: People
+) -> None:
+    """Backstop for a caller that broke the post-commit rule: the grant hook ran, then the
+    approval rolled back. The pair's committed state (declined) wins on the next reconcile."""
+    a, t = people.alex, people.tia
+    add_request(session, t, a, ConnectionRequestStatus.DECLINED)
+    session.commit()
+    configure_authz(fake_fga)
+    with factory() as tx, tx.begin():
+        tx.execute(
+            update(ConnectionRequest)
+            .where(ConnectionRequest.requester_user_id == t.id)
+            .values(status="approved", granted_tier="trusted_circle")
+        )
+        await authz.on_connection_granted(
+            profile_id=people.profile.id, viewer_user_id=t.id, tier="trusted_circle"
+        )
+        tx.rollback()
+    leaked = tier_tuple(people.profile.id, t.id, ConnectionTier.TRUSTED_CIRCLE)
+    assert leaked in fake_fga.tuples
+    await _reconcile(fake_fga, factory, prune=False)
+    assert leaked not in fake_fga.tuples
 
 
 # --- Real OpenFGA end to end ------------------------------------------------------------------

@@ -1,8 +1,12 @@
 """Model v2 service behavior with the in-memory fake: tiers, v2 hooks and ``disconnect_agent``.
 
 The real model is checked by ``authorization/tests`` (CLI) and ``test_authz_v2_openfga.py``.
+Hook timing (see ``revel.auth.authz``): revoke-class hooks run PRE-COMMIT and raise; grant
+hooks on existing users/profiles run POST-COMMIT and log instead of raising.
 """
 
+import inspect
+import logging
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
@@ -35,14 +39,14 @@ from revel.db.enums import ConnectionTier
 
 pytestmark = pytest.mark.anyio
 
-V2_HOOKS = (
-    "on_connection_granted",
+PRE_COMMIT = (
+    "on_connection_tier_changing",
     "on_connection_revoked",
     "on_blocked",
-    "on_unblocked",
-    "on_public_opt_in_changed",
     "on_question_created",
 )
+POST_COMMIT = ("on_connection_granted", "on_unblocked")
+V2_HOOKS = (*PRE_COMMIT, *POST_COMMIT, "on_public_opt_in_changed")
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +70,17 @@ async def tiers(fga: FakeFga, person: Person, profile_id: UUID) -> tuple[ViewerT
     )
 
 
+async def set_tier(profile_id: UUID, viewer_user_id: UUID, tier: str) -> None:
+    """F6's approval/tier-change sequence around its commit."""
+    await authz.on_connection_tier_changing(
+        profile_id=profile_id, viewer_user_id=viewer_user_id, tier=tier
+    )
+    # ... the caller commits the connection_requests row here ...
+    await authz.on_connection_granted(
+        profile_id=profile_id, viewer_user_id=viewer_user_id, tier=tier
+    )
+
+
 # --- Tiers ------------------------------------------------------------------------------------
 
 
@@ -74,12 +89,8 @@ async def test_tier_hierarchy_and_agent_inheritance(fake_fga: FakeFga) -> None:
     for person in (bob, tia, cal, sam):
         connected(fake_fga, person)
     configure_authz(fake_fga)
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
-    )
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=cal.user_id, tier=ConnectionTier.CONNECTIONS
-    )
+    await set_tier(bob.profile_id, tia.user_id, "trusted_circle")
+    await set_tier(bob.profile_id, cal.user_id, ConnectionTier.CONNECTIONS)
     assert await tiers(fake_fga, bob, bob.profile_id) == (ViewerTier.only_me,) * 2
     assert await tiers(fake_fga, tia, bob.profile_id) == (ViewerTier.trusted_circle,) * 2
     assert await tiers(fake_fga, cal, bob.profile_id) == (ViewerTier.connections,) * 2
@@ -92,25 +103,67 @@ async def test_tier_hierarchy_and_agent_inheritance(fake_fga: FakeFga) -> None:
     assert await tiers(fake_fga, cal, bob.profile_id) == (ViewerTier.connections,) * 2
 
 
-async def test_tier_change_is_one_call_and_leaves_one_tier(fake_fga: FakeFga) -> None:
+async def test_tier_change_contract(fake_fga: FakeFga) -> None:
+    """Pre-commit removes any higher tier (a downgrade's revoke); post-commit writes the tier."""
     bob, tia = make_person(), make_person()
     connected(fake_fga, bob)
     configure_authz(fake_fga)
-    for tier in ("trusted_circle", "connections", "trusted_circle", "trusted_circle"):
-        result = await authz.on_connection_granted(
-            profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier=tier
-        )
-        assert result is not None
-        held = {t for t in fake_fga.tuples if t.user == f"user:{tia.user_id}"}
-        assert held == {tier_tuple(bob.profile_id, tia.user_id, ConnectionTier(tier))}
-    assert (
-        await resolve_viewer_tier(fake_fga, tia.as_user(), bob.profile_id)
-        is ViewerTier.trusted_circle
+    tia_tiers = lambda: {t for t in fake_fga.tuples if t.user == f"user:{tia.user_id}"}  # noqa: E731
+    trusted = tier_tuple(bob.profile_id, tia.user_id, ConnectionTier.TRUSTED_CIRCLE)
+    connection = tier_tuple(bob.profile_id, tia.user_id, ConnectionTier.CONNECTIONS)
+
+    await set_tier(bob.profile_id, tia.user_id, "trusted_circle")
+    assert tia_tiers() == {trusted}
+    # Downgrade: the PRE-COMMIT half alone already removes trusted (a rollback over-denies).
+    fake_fga.calls.clear()
+    result = await authz.on_connection_tier_changing(
+        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="connections"
     )
-    with pytest.raises(ValueError):
-        await authz.on_connection_granted(
-            profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="only_me"
+    assert fake_fga.calls == ["delete"] and result.deleted == (trusted,)
+    assert tia_tiers() == set()
+    # The POST-COMMIT half only widens: it writes, then deletes the other (lower or gone) tier.
+    fake_fga.calls.clear()
+    await authz.on_connection_granted(
+        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="connections"
+    )
+    assert fake_fga.calls == ["write", "delete"]
+    assert tia_tiers() == {connection}
+    # Upgrade: the pre-commit half deletes nothing, so access never dips.
+    result = await authz.on_connection_tier_changing(
+        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
+    )
+    assert result.deleted == () and tia_tiers() == {connection}
+    await authz.on_connection_granted(
+        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
+    )
+    assert tia_tiers() == {trusted}
+    for hook in (authz.on_connection_tier_changing, authz.on_connection_granted):
+        with pytest.raises(ValueError):
+            await hook(profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="only_me")
+
+
+async def test_rolled_back_grant_never_grants(fake_fga: FakeFga) -> None:
+    """The post-commit contract: a transaction that rolls back skips the grant, so nothing is
+    granted; its pre-commit half (the only call made) only removes access."""
+    bob, tia = make_person(), make_person()
+    connected(fake_fga, bob)
+    connected(fake_fga, tia)
+    configure_authz(fake_fga)
+
+    async def approve(*, commit: bool) -> None:
+        await authz.on_connection_tier_changing(
+            profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
         )
+        if not commit:
+            return  # rollback: post-commit hooks are never called
+        await authz.on_connection_granted(
+            profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
+        )
+
+    await approve(commit=False)
+    assert await tiers(fake_fga, tia, bob.profile_id) == (ViewerTier.none,) * 2
+    await approve(commit=True)
+    assert await tiers(fake_fga, tia, bob.profile_id) == (ViewerTier.trusted_circle,) * 2
 
 
 async def test_revocation_and_public_withdrawal_remove_access(fake_fga: FakeFga) -> None:
@@ -118,9 +171,7 @@ async def test_revocation_and_public_withdrawal_remove_access(fake_fga: FakeFga)
     connected(fake_fga, bob)
     connected(fake_fga, tia)
     configure_authz(fake_fga)
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
-    )
+    await set_tier(bob.profile_id, tia.user_id, "trusted_circle")
     await authz.on_public_opt_in_changed(profile_id=bob.profile_id, enabled=True)
     for _ in range(2):  # idempotent
         await authz.on_connection_revoked(profile_id=bob.profile_id, viewer_user_id=tia.user_id)
@@ -136,22 +187,19 @@ async def test_block_overrides_every_tier_and_unblock_restores_nothing(fake_fga:
     connected(fake_fga, bob)
     connected(fake_fga, tia)
     configure_authz(fake_fga)
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
-    )
+    await set_tier(bob.profile_id, tia.user_id, "trusted_circle")
     await authz.on_public_opt_in_changed(profile_id=bob.profile_id, enabled=True)
     # Tia granted Bob a connection on her profile (the other direction).
-    await authz.on_connection_granted(
-        profile_id=tia.profile_id, viewer_user_id=bob.user_id, tier="connections"
-    )
+    await set_tier(tia.profile_id, bob.user_id, "connections")
 
     for _ in range(2):
         await authz.on_blocked(profile_id=bob.profile_id, blocked_user_id=tia.user_id)
     assert await tiers(fake_fga, tia, bob.profile_id) == (ViewerTier.none,) * 2
     # A stale tier tuple written afterwards (e.g. a lagging grant) does not beat the block.
-    fake_fga.tuples.add(tier_tuple(bob.profile_id, tia.user_id, ConnectionTier.TRUSTED_CIRCLE))
+    stale = tier_tuple(bob.profile_id, tia.user_id, ConnectionTier.TRUSTED_CIRCLE)
+    fake_fga.tuples.add(stale)
     assert await tiers(fake_fga, tia, bob.profile_id) == (ViewerTier.none,) * 2
-    fake_fga.tuples.discard(tier_tuple(bob.profile_id, tia.user_id, ConnectionTier.TRUSTED_CIRCLE))
+    fake_fga.tuples.discard(stale)
     # Directional: Bob keeps what Tia granted him.
     assert await tiers(fake_fga, bob, tia.profile_id) == (ViewerTier.connections,) * 2
 
@@ -188,44 +236,60 @@ async def test_question_created_writes_about_and_requester(fake_fga: FakeFga) ->
     for subject in (bob_agent, f"user:{bob.user_id}", rae_agent, f"user:{rae.user_id}"):
         assert await fake_fga.check(user=subject, relation="read_answer", object=q)
     assert not await fake_fga.check(user=f"user:{uuid4()}", relation="read_answer", object=q)
+    # read_answer does not follow the requester's tier (F7/#20 re-checks the facts).
+    await set_tier(bob.profile_id, rae.user_id, "connections")
+    await authz.on_connection_revoked(profile_id=bob.profile_id, viewer_user_id=rae.user_id)
+    assert await fake_fga.check(user=rae_agent, relation="read_answer", object=q)
 
 
 # --- Hook contract ----------------------------------------------------------------------------
 
 
-def _kwargs(name: str, *, enabled: bool = True, tier: str = "trusted_circle") -> dict[str, Any]:
+def _kwargs(name: str, **extra: Any) -> dict[str, Any]:
     profile_id, user_id = uuid4(), uuid4()
-    return {
+    kwargs = {
+        "on_connection_tier_changing": {
+            "profile_id": profile_id,
+            "viewer_user_id": user_id,
+            "tier": "connections",
+        },
         "on_connection_granted": {
             "profile_id": profile_id,
             "viewer_user_id": user_id,
-            "tier": tier,
+            "tier": "trusted_circle",
         },
         "on_connection_revoked": {"profile_id": profile_id, "viewer_user_id": user_id},
         "on_blocked": {"profile_id": profile_id, "blocked_user_id": user_id},
         "on_unblocked": {"profile_id": profile_id, "blocked_user_id": user_id},
-        "on_public_opt_in_changed": {"profile_id": profile_id, "enabled": enabled},
+        "on_public_opt_in_changed": {"profile_id": profile_id, "enabled": True},
         "on_question_created": {
             "question_id": uuid4(),
             "profile_id": profile_id,
             "requester_user_id": user_id,
         },
     }[name]
+    return {**kwargs, **extra}
 
 
-GRANT_CALLS = [
+# Post-commit grants on existing users/profiles: never raise once configured.
+POST_COMMIT_CALLS = [
+    ("on_connection_granted", {"tier": "connections"}),
     ("on_connection_granted", {"tier": "trusted_circle"}),
     ("on_unblocked", {}),
     ("on_public_opt_in_changed", {"enabled": True}),
-    ("on_question_created", {}),
 ]
+# Pre-commit revokes: raise when unconfigured and on any error.
 REVOKE_CALLS = [
-    ("on_connection_granted", {"tier": "connections"}),  # may be a downgrade
+    ("on_connection_tier_changing", {"tier": "connections"}),
+    ("on_connection_tier_changing", {"tier": "trusted_circle"}),
     ("on_connection_revoked", {}),
     ("on_blocked", {}),
     ("on_public_opt_in_changed", {"enabled": False}),
 ]
-ALL_CALLS = GRANT_CALLS + REVOKE_CALLS
+# Pre-commit grant naming a new row's ID: warns while unconfigured, raises once configured.
+PRE_COMMIT_GRANT_CALLS = [("on_question_created", {})]
+GRANT_CALLS = POST_COMMIT_CALLS + PRE_COMMIT_GRANT_CALLS
+RAISING_CALLS = REVOKE_CALLS + PRE_COMMIT_GRANT_CALLS
 
 
 def _call_id(call: tuple[str, dict[str, Any]]) -> str:
@@ -233,13 +297,17 @@ def _call_id(call: tuple[str, dict[str, Any]]) -> str:
 
 
 def test_v2_hooks_are_module_level_and_keyword_only() -> None:
-    import inspect
-
     for name in V2_HOOKS:
         fn = getattr(authz, name)
         assert inspect.iscoroutinefunction(fn)
         params = inspect.signature(fn).parameters.values()
         assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params)
+        doc = inspect.getdoc(fn) or ""
+        timing = "PRE-COMMIT" if name in PRE_COMMIT else "POST-COMMIT"
+        if name == "on_public_opt_in_changed":
+            assert "PRE-COMMIT" in doc and "POST-COMMIT" in doc
+        else:
+            assert timing in doc, name
 
 
 @pytest.mark.parametrize("configured", [False, True], ids=["never-configured", "ids-unset"])
@@ -270,8 +338,8 @@ async def test_revoke_hooks_raise_when_unconfigured(
     assert unconfigured.calls == []
 
 
-@pytest.mark.parametrize("call", ALL_CALLS, ids=_call_id)
-async def test_v2_hooks_raise_when_configured_client_errors(
+@pytest.mark.parametrize("call", RAISING_CALLS, ids=_call_id)
+async def test_pre_commit_hooks_raise_when_configured_client_errors(
     call: tuple[str, dict[str, Any]], fake_fga: FakeFga
 ) -> None:
     configure_authz(fake_fga)
@@ -279,6 +347,21 @@ async def test_v2_hooks_raise_when_configured_client_errors(
     name, extra = call
     with pytest.raises(RuntimeError, match="openfga unavailable"):
         await getattr(authz, name)(**_kwargs(name, **extra))
+
+
+@pytest.mark.parametrize("call", POST_COMMIT_CALLS, ids=_call_id)
+async def test_post_commit_grants_log_instead_of_raising(
+    call: tuple[str, dict[str, Any]], fake_fga: FakeFga, caplog: pytest.LogCaptureFixture
+) -> None:
+    configure_authz(fake_fga)
+    fake_fga.error = RuntimeError("openfga unavailable: secret-ish detail")
+    name, extra = call
+    caplog.set_level(logging.ERROR, logger="revel.auth.authz")
+    assert await getattr(authz, name)(**_kwargs(name, **extra)) is None
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    message = record.getMessage()
+    assert name in message and "RuntimeError" in message and "reconcile" in message
+    assert "secret-ish" not in message  # exception text (object IDs) is not logged
 
 
 class SlowFga(FakeFga):
@@ -289,7 +372,7 @@ class SlowFga(FakeFga):
         await anyio.sleep(30)
 
 
-@pytest.mark.parametrize("call", ALL_CALLS, ids=_call_id)
+@pytest.mark.parametrize("call", RAISING_CALLS + POST_COMMIT_CALLS, ids=_call_id)
 async def test_v2_hooks_time_out_promptly(
     call: tuple[str, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -297,26 +380,20 @@ async def test_v2_hooks_time_out_promptly(
     configure_authz(SlowFga())
     name, extra = call
     started = anyio.current_time()
-    with pytest.raises(TimeoutError):
-        await getattr(authz, name)(**_kwargs(name, **extra))
+    if call in POST_COMMIT_CALLS:
+        assert await getattr(authz, name)(**_kwargs(name, **extra)) is None
+    else:
+        with pytest.raises(TimeoutError):
+            await getattr(authz, name)(**_kwargs(name, **extra))
     assert anyio.current_time() - started < 2
 
 
-async def test_tier_change_deletes_before_writing(fake_fga: FakeFga) -> None:
-    """A failure between the two steps leaves no tier (fails closed)."""
+async def test_block_lands_before_tier_deletes(fake_fga: FakeFga) -> None:
     bob, tia = make_person(), make_person()
     configure_authz(fake_fga)
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="trusted_circle"
-    )
-    fake_fga.calls.clear()
-    await authz.on_connection_granted(
-        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="connections"
-    )
-    assert fake_fga.calls == ["delete", "write"]
     fake_fga.calls.clear()
     await authz.on_blocked(profile_id=bob.profile_id, blocked_user_id=tia.user_id)
-    assert fake_fga.calls == ["write", "delete"]  # the block lands first
+    assert fake_fga.calls == ["write", "delete"]
 
 
 # --- disconnect_agent -------------------------------------------------------------------------
@@ -352,41 +429,53 @@ async def test_agent_disconnects_itself(resolver: IdentityResolver, fake_fga: Fa
     assert agent_tuples(fake_fga, alex.delegation_id) == set()
 
 
-async def test_owner_disconnects_own_delegations_from_ui_or_sibling_agent(
+async def test_user_disconnects_any_own_delegation(
     resolver: IdentityResolver, fake_fga: FakeFga
 ) -> None:
     muse = await resolver.resolve(token("user_alex", "client_muse"), "mcp")
     other = await resolver.resolve(token("user_alex", "client_other"), "mcp")
-    third = await resolver.resolve(token("user_alex", "client_third"), "mcp")
     ui = Principal(user_id=muse.user_id, via="ui")
     await disconnect_agent(ui, muse.delegation_id, resolver=resolver)  # type: ignore[arg-type]
-    await disconnect_agent(other, third.delegation_id, resolver=resolver)  # type: ignore[arg-type]
     assert agent_tuples(fake_fga, muse.delegation_id) == set()
-    assert agent_tuples(fake_fga, third.delegation_id) == set()
     assert agent_tuples(fake_fga, other.delegation_id) == set(
         delegation_tuples(other.user_id, other.delegation_id)  # type: ignore[arg-type]
     )
 
 
-async def test_every_other_case_is_the_same_denial(
-    resolver: IdentityResolver, fake_fga: FakeFga
-) -> None:
+class CountingResolver(IdentityResolver):
+    calls = 0
+
+    async def disconnect_delegation(self, *, user_id: UUID, delegation_id: UUID) -> bool:
+        type(self).calls += 1
+        return await super().disconnect_delegation(user_id=user_id, delegation_id=delegation_id)
+
+
+async def test_every_other_case_is_the_same_denial(fake_fga: FakeFga) -> None:
+    configure_authz(fake_fga)
+    resolver = CountingResolver(InMemoryIdentityRepository(), hooks=ModuleAuthzHooks())
     alex = await resolver.resolve(token("user_alex"), "mcp")
+    sibling = await resolver.resolve(token("user_alex", "client_other"), "mcp")
     sam = await resolver.resolve(token("user_sam"), "mcp")
     gone = await resolver.resolve(token("user_alex", "client_gone"), "mcp")
     await disconnect_agent(gone, gone.delegation_id, resolver=resolver)  # type: ignore[arg-type]
     before = set(fake_fga.tuples)
-    denials = []
-    for principal, target in (
-        (sam, alex.delegation_id),  # another user's agent
-        (Principal(user_id=sam.user_id, via="ui"), alex.delegation_id),  # another user
-        (alex, uuid4()),  # unknown
-        (alex, gone.delegation_id),  # already disconnected
-    ):
+    CountingResolver.calls = 0
+    cases = [
+        (alex, sibling.delegation_id, False),  # an agent may not cut off a sibling
+        (alex, sam.delegation_id, False),  # nor another user's agent
+        (sam, alex.delegation_id, False),
+        (Principal(user_id=sam.user_id, via="ui"), alex.delegation_id, True),  # another user
+        (Principal(user_id=alex.user_id, via="ui"), uuid4(), True),  # unknown
+        (Principal(user_id=alex.user_id, via="ui"), gone.delegation_id, True),  # already gone
+    ]
+    denials = set()
+    for principal, target, reaches_f2 in cases:
+        calls = CountingResolver.calls
         with pytest.raises(AuthorizationDenied) as denied:
             await disconnect_agent(principal, target, resolver=resolver)  # type: ignore[arg-type]
-        denials.append((type(denied.value), str(denied.value), denied.value.args))
-    assert len(set(denials)) == 1
+        denials.add((type(denied.value), str(denied.value), denied.value.args))
+        assert CountingResolver.calls == calls + reaches_f2
+    assert len(denials) == 1
     assert fake_fga.tuples == before
 
 

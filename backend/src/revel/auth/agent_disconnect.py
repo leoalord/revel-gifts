@@ -6,12 +6,17 @@ disconnect tool call. It authorizes, then delegates to F2's primitive
 runs ``authz.on_agent_disconnected`` in one transaction (a hook failure, including
 unconfigured OpenFGA, rolls back and propagates here unchanged).
 
-Authorization: the principal's own ``user_id`` is always the one passed, and F2's guarded
-UPDATE only matches an ACTIVE delegation owned by that user. So a user (UI) may disconnect any
-of their own delegations, any of the user's active agents may disconnect itself or a sibling
-delegation of the same user, and nobody can disconnect another user's delegation. Every
-``False`` from F2 (already disconnected, another user's, unknown) raises the same
-``AuthorizationDenied``, so the result never reveals whether a delegation exists or whose it is.
+Authorization (the design agreed with F2 on the #14 task):
+
+- a user acting directly (``via="ui"``) may disconnect any of their own delegations;
+- an agent principal may disconnect only ITSELF (``delegation_id == principal.delegation_id``);
+  one connected assistant cannot cut off another.
+
+The principal's own ``user_id`` is always the one passed, and F2's guarded UPDATE only matches
+an ACTIVE delegation owned by that user. Every other case (an agent naming another delegation,
+another user's delegation, an unknown or already disconnected one, an inconsistent principal)
+raises the same ``AuthorizationDenied``, so the result never reveals whether a delegation
+exists or whose it is. An agent naming another delegation is refused without calling F2.
 
 Afterwards the delegation holds no OpenFGA tuple (``acts_for``, ``delegate``,
 ``connected_agent``), and F2's resolver rejects its still-valid tokens instead of re-inserting
@@ -38,12 +43,14 @@ async def disconnect_agent(
     resolver: IdentityResolver | None = None,
 ) -> None:
     """Disconnect ``delegation_id`` on behalf of ``principal``; raise ``AuthorizationDenied``
-    unless this call disconnected one of the principal's own active delegations.
+    unless this call disconnected a delegation the principal may disconnect.
 
     ``resolver`` defaults to the process runtime's (``runtime_for(get_settings())``); HTTP
     routes for an app built with other settings pass ``get_auth_runtime(request)``'s.
     """
     subject_for(principal)  # rejects inconsistent principals (AuthorizationDenied)
+    if principal.delegation_id is not None and delegation_id != principal.delegation_id:
+        raise AuthorizationDenied()
     resolver = resolver if resolver is not None else _default_resolver()
     disconnected = await resolver.disconnect_delegation(
         user_id=principal.user_id, delegation_id=delegation_id

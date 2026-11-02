@@ -29,6 +29,19 @@ Run explicitly (idempotent; never at app startup)::
    and, while still holding the locks, re-applies the exact current state of every delegation,
    pair and policy that changed since the snapshot. A change committed after step 1 therefore
    cannot be overwritten by steps 2-3, and one that starts later runs its hook after them.
+
+   Postgres lock queues are FIFO, so app writers queue behind a waiting barrier. The barrier is
+   therefore bounded: the lock wait (``lock_timeout``) and every statement under it
+   (``statement_timeout``) are ``BARRIER_LOCK_TIMEOUT_SECONDS`` (3s), and the OpenFGA work while
+   the locks are held is cut off after ``BARRIER_APPLY_SECONDS`` (3s, the same as
+   ``authz.HOOK_TIMEOUT_SECONDS``: no longer than a writer may already wait on an in-flight
+   hook), rolling back and releasing the locks. A writer queued behind the barrier waits at
+   most about 3s for the lock attempt plus the time the locks are held (bounded by the same
+   limits). Failed attempts are retried ``BARRIER_ATTEMPTS`` times with jittered delays.
+   If every attempt fails, ``BarrierNotApplied`` is raised and the CLI exits 3 with "re-run
+   reconcile": step 2 may have re-granted rows revoked after the snapshot, and only the barrier
+   corrects those, so a failed barrier is never reported as success (and ``--prune`` does not
+   run).
 5. ``--prune``: delete tuples of the relations above (except ``owner``) that the snapshot does
    not justify, only if written at least ``--min-age`` ago (default 10 minutes: covers hook
    writes whose transaction has not committed yet) and still unjustified in a fresh read.
@@ -38,6 +51,8 @@ Every step requires configured OpenFGA (revocation must never be skipped). Summa
 
 import argparse
 import asyncio
+import logging
+import random
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -47,6 +62,7 @@ from uuid import UUID
 import anyio.from_thread
 import anyio.to_thread
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.auth.authz import (
@@ -86,8 +102,12 @@ from revel.settings import get_settings
 
 DEFAULT_MIN_AGE = timedelta(minutes=10)
 DEFAULT_WINDOW = timedelta(minutes=2)
-# Bound the barrier's wait for in-flight writers (their hooks are bounded to a few seconds).
-BARRIER_LOCK_TIMEOUT = "30s"
+# Barrier bounds (see the module docstring, step 4).
+BARRIER_LOCK_TIMEOUT_SECONDS = 3.0
+BARRIER_APPLY_SECONDS = 3.0
+BARRIER_ATTEMPTS = 4
+BARRIER_RETRY_DELAY_SECONDS = (0.5, 2.0)  # jitter range between attempts
+EXIT_BARRIER_NOT_APPLIED = 3
 # Relations --prune may delete (owner tuples are only ever written).
 PRUNABLE = frozenset(
     {ACTS_FOR, DELEGATE, CONNECTED_AGENT, TRUSTED, CONNECTION, BLOCKED, PUBLIC_VIEWER}
@@ -95,6 +115,14 @@ PRUNABLE = frozenset(
 )
 
 SessionFactory = Callable[[], sessionmaker[Session]]
+logger = logging.getLogger(__name__)
+
+
+class BarrierNotApplied(RuntimeError):
+    """The barrier (step 4) failed every attempt: OpenFGA may still hold grants for rows revoked
+    after the snapshot. Re-run reconcile."""
+
+
 _EPOCH = datetime.fromtimestamp(0, UTC)
 _LIVE_REQUEST_VALUES = {s.value for s in LIVE_CONNECTION_REQUEST_STATUSES}
 
@@ -165,8 +193,11 @@ class ReconcileSummary:
 # --- Reads ------------------------------------------------------------------------------------
 
 
-def read_snapshot(session: Session) -> Snapshot:
-    """Every row reconcile needs, read in the caller's transaction (explicit columns only)."""
+def read_snapshot(session: Session, *, questions: bool = True) -> Snapshot:
+    """Every row reconcile needs, read in the caller's transaction (explicit columns only).
+
+    ``questions=False`` skips the (immutable) questions, e.g. while the barrier holds locks.
+    """
     taken_at = session.execute(select(func.now())).scalar_one()
     profiles = {
         user_id: profile_id
@@ -230,11 +261,13 @@ def read_snapshot(session: Session) -> Snapshot:
         )
     }
     # Explicit columns: private_purpose / escalation_context are never loaded.
-    questions = {
-        question_id: (profile_id, requester)
-        for question_id, profile_id, requester in session.execute(
-            select(Question.id, Question.profile_id, Question.requester_user_id)
-        )
+    question_rows = (
+        session.execute(select(Question.id, Question.profile_id, Question.requester_user_id))
+        if questions
+        else ()
+    )
+    question_map = {
+        question_id: (profile_id, requester) for question_id, profile_id, requester in question_rows
     }
     return Snapshot(
         profiles=profiles,
@@ -244,7 +277,7 @@ def read_snapshot(session: Session) -> Snapshot:
         delegation_changed=changed,
         pairs=pairs,
         policies=policies,
-        questions=questions,
+        questions=question_map,
     )
 
 
@@ -396,53 +429,80 @@ async def _grant_and_revoke(
 
 def _barrier(factory: SessionFactory, apply: Callable[[Snapshot], None]) -> Snapshot:
     """Lock the mutable tables (SHARE: waits for in-flight writers, blocks new ones), read them
-    fresh and run ``apply`` while the locks are held. Not read-only (SHARE needs it)."""
+    fresh and run ``apply`` while the locks are held. Not read-only (SHARE needs it). Any raise
+    (lock or statement timeout, ``apply`` timeout) rolls back and releases the locks."""
+    timeout_ms = int(BARRIER_LOCK_TIMEOUT_SECONDS * 1000)
     with factory()() as session, session.begin():
         connection = session.connection()
-        connection.exec_driver_sql(f"SET LOCAL lock_timeout = '{BARRIER_LOCK_TIMEOUT}'")
+        connection.exec_driver_sql(f"SET LOCAL lock_timeout = '{timeout_ms}ms'")
+        connection.exec_driver_sql(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
         connection.exec_driver_sql(
             "LOCK TABLE agent_delegations, connection_requests, contribution_policies IN SHARE MODE"
         )
-        fresh = read_snapshot(session)
+        fresh = read_snapshot(session, questions=False)
         apply(fresh)
         return fresh
+
+
+def _retry_delay() -> float:
+    return random.uniform(*BARRIER_RETRY_DELAY_SECONDS)
 
 
 async def _recheck(fga: FgaClient, factory: SessionFactory, snapshot: Snapshot) -> tuple[int, int]:
     """Barrier step: re-apply the exact fresh state of everything changed since the snapshot.
 
-    Returns ``(delegations revoked, changes re-applied)``.
+    Returns ``(delegations revoked, changes re-applied)``. Raises ``BarrierNotApplied`` after
+    ``BARRIER_ATTEMPTS`` failed attempts.
     """
     hooks = TupleHooks(fga)
     result = [0, 0]
 
     async def sync(fresh: Snapshot) -> None:
-        for delegation_id, user_id in snapshot.active.items():
-            if delegation_id in fresh.disconnected:
-                await hooks.on_agent_disconnected(user_id=user_id, delegation_id=delegation_id)
-                result[0] += 1
-        writes: list[RelationTuple] = []
-        deletes: list[RelationTuple] = []
-        for pair, state in snapshot.pairs.items():
-            if state.same_access(fresh.pairs.get(pair)):
-                continue
-            pair_writes, pair_deletes = _pair_sync(fresh, pair)
-            writes += pair_writes
-            deletes += pair_deletes
-            result[1] += 1
-        for profile_id in snapshot.profiles.values():
-            if snapshot.public_opt_in(profile_id) == fresh.public_opt_in(profile_id):
-                continue
-            target = writes if fresh.public_opt_in(profile_id) else deletes
-            target += public_tuples(profile_id)
-            result[1] += 1
-        await _apply(fga, writes, deletes)
+        result[:] = [0, 0]
+        with anyio.fail_after(BARRIER_APPLY_SECONDS):
+            for delegation_id, user_id in snapshot.active.items():
+                if delegation_id in fresh.disconnected:
+                    await hooks.on_agent_disconnected(user_id=user_id, delegation_id=delegation_id)
+                    result[0] += 1
+            writes: list[RelationTuple] = []
+            deletes: list[RelationTuple] = []
+            for pair, state in snapshot.pairs.items():
+                if state.same_access(fresh.pairs.get(pair)):
+                    continue
+                pair_writes, pair_deletes = _pair_sync(fresh, pair)
+                writes += pair_writes
+                deletes += pair_deletes
+                result[1] += 1
+            for profile_id in snapshot.profiles.values():
+                if snapshot.public_opt_in(profile_id) == fresh.public_opt_in(profile_id):
+                    continue
+                target = writes if fresh.public_opt_in(profile_id) else deletes
+                target += public_tuples(profile_id)
+                result[1] += 1
+            await _apply(fga, writes, deletes)
 
     def run_in_thread(fresh: Snapshot) -> None:
         anyio.from_thread.run(sync, fresh)
 
-    await anyio.to_thread.run_sync(_barrier, factory, run_in_thread)
-    return result[0], result[1]
+    last: BaseException | None = None
+    for attempt in range(1, BARRIER_ATTEMPTS + 1):
+        try:
+            await anyio.to_thread.run_sync(_barrier, factory, run_in_thread)
+            return result[0], result[1]
+        except (OperationalError, TimeoutError) as exc:
+            last = exc
+            logger.warning(
+                "reconcile barrier attempt %d/%d failed (%s)",
+                attempt,
+                BARRIER_ATTEMPTS,
+                type(exc).__name__,
+            )
+            if attempt < BARRIER_ATTEMPTS:
+                await anyio.sleep(_retry_delay())
+    raise BarrierNotApplied(
+        f"barrier not applied after {BARRIER_ATTEMPTS} attempts "
+        f"({type(last).__name__}); re-run reconcile"
+    ) from last
 
 
 async def _prune(
@@ -559,6 +619,13 @@ def main(argv: list[str] | None = None) -> int:
     except FgaConfigurationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except BarrierNotApplied as exc:
+        print(
+            f"error: {exc}. OpenFGA may still grant access revoked after the snapshot; "
+            "re-run reconcile.",
+            file=sys.stderr,
+        )
+        return EXIT_BARRIER_NOT_APPLIED
     print(summary, file=sys.stderr)
     return 0
 

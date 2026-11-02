@@ -76,5 +76,7 @@ type question
     define respond: owner_agent from about
     # The requester side reads the answer unless the owner has since blocked the requester;
     # the owner side always can. F7 still releases an answer only when the requester can see
-    # the facts it relies on (Privacy).
+    # the facts it relies on (Privacy). read_answer does NOT follow the requester's tier: it
+    # survives revoking the requester's connection (only a block removes it), so F7 (#20) must
+    # re-check, when releasing an answer, that the requester can still see those facts.
     define read_answer: owner from about or owner_agent from about or ((requester or requester_agent) but not blocked_any from about)

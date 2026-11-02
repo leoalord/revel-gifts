@@ -126,7 +126,12 @@ async def test_tiers_blocks_revocation_and_public_on_real_server(
     assert await tiers(fga, sam, bob.profile_id) == {ViewerTier.none}
     await authz.on_public_opt_in_changed(profile_id=bob.profile_id, enabled=True)
 
-    # Tier change, then revocation.
+    # Downgrade (pre-commit half removes trusted, post-commit half writes connections),
+    # then revocation.
+    await authz.on_connection_tier_changing(
+        profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="connections"
+    )
+    assert await tiers(fga, tia, bob.profile_id) == {ViewerTier.public}
     await authz.on_connection_granted(
         profile_id=bob.profile_id, viewer_user_id=tia.user_id, tier="connections"
     )
@@ -143,13 +148,44 @@ async def test_tiers_blocks_revocation_and_public_on_real_server(
     assert await tiers(fga, tia, bob.profile_id) == {ViewerTier.none}
     assert await tiers(fga, bob, tia.profile_id) == {ViewerTier.trusted_circle}
     await authz.on_unblocked(profile_id=bob.profile_id, blocked_user_id=tia.user_id)
-    # The stale trusted tuple written after the block is back in effect once unblocked; F6
-    # never writes one for a blocked pair (on_blocked deleted the real one).
+    # Only a tuple written AFTER the block (never by F6 for a blocked pair) survives an
+    # unblock; test_block_then_unblock_does_not_restore_the_old_tier covers the real flow.
     assert await tiers(fga, tia, bob.profile_id) == {ViewerTier.trusted_circle}
 
     # Owner blocking self is harmless.
     await authz.on_blocked(profile_id=bob.profile_id, blocked_user_id=bob.user_id)
     assert await tiers(fga, bob, bob.profile_id) == {ViewerTier.only_me}
+
+
+async def test_block_then_unblock_does_not_restore_the_old_tier(
+    fga: OpenFgaServiceClient,
+) -> None:
+    bob, tia, cal = make_person(), make_person(), make_person()
+    for person in (bob, tia, cal):
+        await connect(fga, person)
+    for viewer, tier in ((tia, "trusted_circle"), (cal, "connections")):
+        await authz.on_connection_tier_changing(
+            profile_id=bob.profile_id, viewer_user_id=viewer.user_id, tier=tier
+        )
+        await authz.on_connection_granted(
+            profile_id=bob.profile_id, viewer_user_id=viewer.user_id, tier=tier
+        )
+    assert await tiers(fga, tia, bob.profile_id) == {ViewerTier.trusted_circle}
+    assert await tiers(fga, cal, bob.profile_id) == {ViewerTier.connections}
+
+    for viewer in (tia, cal):
+        await authz.on_blocked(profile_id=bob.profile_id, blocked_user_id=viewer.user_id)
+        assert await tiers(fga, viewer, bob.profile_id) == {ViewerTier.none}
+        await authz.on_unblocked(profile_id=bob.profile_id, blocked_user_id=viewer.user_id)
+        # No tier comes back without a new approval (no Public opt-in here either).
+        assert await tiers(fga, viewer, bob.profile_id) == {ViewerTier.none}
+        held = await fga.read_tuples(
+            object=f"profile:{bob.profile_id}", user=f"user:{viewer.user_id}"
+        )
+        assert held == []
+    # With Public on, an unblocked user is back to Public only.
+    await authz.on_public_opt_in_changed(profile_id=bob.profile_id, enabled=True)
+    assert await tiers(fga, tia, bob.profile_id) == {ViewerTier.public}
 
 
 async def test_question_relations_on_real_server(fga: OpenFgaServiceClient) -> None:
@@ -174,7 +210,13 @@ async def test_question_relations_on_real_server(fga: OpenFgaServiceClient) -> N
     for subject in (f"agent:{sam.delegation_id}", f"user:{sam.user_id}"):
         assert not await allowed(subject, "read_answer")
         assert not await allowed(subject, "respond")
-    # A block on the requester stops requester-side answer reads.
+    # Revoking the requester's tier does NOT remove read_answer (F7/#20 re-checks the facts)...
+    await authz.on_connection_granted(
+        profile_id=bob.profile_id, viewer_user_id=rae.user_id, tier="connections"
+    )
+    await authz.on_connection_revoked(profile_id=bob.profile_id, viewer_user_id=rae.user_id)
+    assert await allowed(rae_agent, "read_answer")
+    # ...but a block on the requester stops requester-side answer reads.
     await authz.on_blocked(profile_id=bob.profile_id, blocked_user_id=rae.user_id)
     assert not await allowed(rae_agent, "read_answer")
     assert not await allowed(f"user:{rae.user_id}", "read_answer")

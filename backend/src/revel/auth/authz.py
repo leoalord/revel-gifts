@@ -18,38 +18,58 @@ stay thin. It implements model v2 (``authorization/model.fga``; additive over v1
   ``profile:<B>#blocked@user:<A>`` tuple removes A and A's agents from every tier on B's profile
   (directional; never the owner). Grants come from F6 (``on_connection_granted``) and F5
   (``on_public_opt_in_changed``); F7 writes ``question`` tuples (``on_question_created``).
+  ``question#read_answer`` does not follow the requester's tier: only a block removes it, so
+  F7 (#20) must re-check that the requester can still see the facts an answer relies on.
 
-Tuple hooks (module-level ``on_*`` functions over a process-wide ``TupleHooks`` installed by
-``configure_authz``) are called by F2 on sign-in, agent connect and disconnect. F2 awaits them
-INSIDE its inserting database transaction, BEFORE commit: a raise rolls the insert back and the
-next request retries both, so they are idempotent (retries, duplicate writes and deletes of
-missing tuples are safe). A commit failure after a successful hook can leave orphan tuples whose
-IDs match no row; they are unreachable (no principal carries those IDs) and are pruned by
-reconciliation. Identity hooks never touch the database (no second pooled connection or worker
-thread while F2 holds its transaction), and every OpenFGA call they make is bounded by
-``HOOK_TIMEOUT_SECONDS``: on timeout they raise, so F2 rolls back promptly instead of holding its
-pooled connection.
+Tuple hooks are module-level ``on_*`` functions over a process-wide ``TupleHooks`` installed by
+``configure_authz``. Every hook is keyword-only, idempotent (retries, duplicate writes and deletes
+of missing tuples are safe), OpenFGA-only (no database access: no second pooled connection or
+worker thread while the caller holds its transaction) and bounded by ``HOOK_TIMEOUT_SECONDS``.
 
-Hook failure rule (follow it for every new hook, e.g. v2 revoke, block, tier downgrade):
+WHEN to call a hook, relative to the caller's commit, is part of its contract:
 
-- GRANT hooks (``on_user_created``, ``on_agent_delegated``, ``visibility.on_profile_created``,
-  ``on_connection_granted`` with ``trusted_circle``, ``on_unblocked``,
-  ``on_public_opt_in_changed(enabled=True)``, ``on_question_created``) log one warning and
-  return ``None`` only while OpenFGA is unconfigured (``configure_authz`` not called, or
-  store/model IDs unset): a skipped grant only denies.
-- REVOKE hooks (anything whose skipping would leave access in place: ``on_agent_disconnected``,
-  ``on_connection_revoked``, ``on_blocked``, ``on_public_opt_in_changed(enabled=False)`` and
-  ``on_connection_granted`` with ``connections``, which may be a downgrade from Trusted Circle)
-  raise ``FgaConfigurationError`` when unconfigured.
-- Once configured, any OpenFGA error on a grant or a revoke propagates; never swallow it.
-- Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, later ``visible_claims``)
-  raise ``FgaConfigurationError`` when unconfigured; they never allow by default.
+- PRE-COMMIT, raising (await inside the changing transaction; a raise rolls the row back):
+
+  - every REVOKE: ``on_agent_disconnected``, ``on_connection_tier_changing``,
+    ``on_connection_revoked``, ``on_blocked``, ``on_public_opt_in_changed(enabled=False)``.
+    A rollback after a successful revoke only over-denies (reconcile repairs it); a revoke
+    after commit would leave access live in between, or forever if it failed.
+  - grants that name a NEW, uncommitted row's random ID: F2's ``on_user_created`` /
+    ``on_agent_delegated`` (``agent:<new delegation id>``), ``visibility.on_profile_created``
+    (``profile:<new profile id>``) and ``on_question_created`` (``question:<new question
+    id>``). If the commit then fails, the tuples name an ID no row, token or principal carries,
+    so nothing can reach them; ``fga_reconcile --prune`` deletes them.
+
+- POST-COMMIT, never raising (await only after the row is committed): grants on EXISTING users
+  and profiles, ``on_connection_granted``, ``on_unblocked`` and
+  ``on_public_opt_in_changed(enabled=True)``. Run before commit, a later rollback (a failed
+  statement, a failed commit, a cancelled call the server had applied) would leave a reachable
+  grant: a declined user with access, a blocked user back on Public, a private profile
+  public. After commit, a failure only denies: the hook logs an ERROR and returns ``None``,
+  the request still succeeds and ``fga_reconcile`` restores the grant. A rolled-back
+  transaction never calls them, so it never grants.
+
+- Tier changes (F6) are split: before commit ``on_connection_tier_changing(tier=new)`` deletes
+  any HIGHER tier (the revoke part of a downgrade; a no-op for an upgrade or first approval);
+  after commit ``on_connection_granted(tier=new)`` writes the new tier and deletes the other.
+
+Unconfigured OpenFGA (``configure_authz`` not called, or store/model IDs unset): grant hooks log
+one warning and return ``None`` (a skipped grant only denies); revoke hooks raise
+``FgaConfigurationError`` (a skipped delete would leave access in place). Pre-commit hooks
+propagate every configured OpenFGA error and ``TimeoutError``; post-commit hooks log them.
+Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, ``visible_claims``) raise
+``FgaConfigurationError`` when unconfigured; they never allow by default.
+
+Known residual: a post-commit grant delayed past a LATER revoke of the same row (approve, then
+revoke within the grant's latency) can land after the revoke's delete. F6 should serialize
+changes per pair (e.g. run the post-commit grant before releasing a per-pair lock, or re-read
+the row after it); ``fga_reconcile`` repairs it either way.
 
 Policy lives in Notion (Relationships, Discovery & Privacy); this module implements it.
 """
 
 import logging
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -192,6 +212,9 @@ def delegation_tuples(
     )
 
 
+# Granted tiers, lowest first.
+TIER_ORDER: tuple[ConnectionTier, ...] = (ConnectionTier.CONNECTIONS, ConnectionTier.TRUSTED_CIRCLE)
+
 # Granted tier (``connection_requests.granted_tier``) -> the profile relation holding it.
 TIER_RELATION: dict[ConnectionTier, str] = {
     ConnectionTier.CONNECTIONS: CONNECTION,
@@ -294,20 +317,26 @@ class TupleHooks:
 
     # --- v2: connections, blocks, Public opt-in, questions (F5, F6, F7) ---
 
+    async def on_connection_tier_changing(
+        self, *, profile_id: UUID, viewer_user_id: UUID, tier: ConnectionTier | str
+    ) -> TupleSync:
+        """Pre-commit half of an approval or tier change: delete every tier above ``tier``."""
+        rank = TIER_ORDER.index(ConnectionTier(tier))
+        deletes = tuple(tier_tuple(profile_id, viewer_user_id, t) for t in TIER_ORDER[rank + 1 :])
+        await self._fga.delete_tuples(deletes)
+        return TupleSync(deleted=deletes)
+
     async def on_connection_granted(
         self, *, profile_id: UUID, viewer_user_id: UUID, tier: ConnectionTier | str
     ) -> TupleSync:
-        """Approval or tier change: the viewer holds exactly ``tier`` on the profile.
-
-        Deletes the other tier's tuple FIRST, then writes ``tier``'s: a failure in between
-        leaves no tier (fails closed) and raises, so the caller rolls back and retries.
-        """
+        """Post-commit half: write ``tier``, then delete the other tier (never a widening)."""
         tier = ConnectionTier(tier)
-        other = next(t for t in ConnectionTier if t is not tier)
-        deletes = (tier_tuple(profile_id, viewer_user_id, other),)
         writes = (tier_tuple(profile_id, viewer_user_id, tier),)
-        await self._fga.delete_tuples(deletes)
+        deletes = tuple(
+            tier_tuple(profile_id, viewer_user_id, t) for t in ConnectionTier if t is not tier
+        )
         await self._fga.write_tuples(writes)
+        await self._fga.delete_tuples(deletes)
         return TupleSync(written=writes, deleted=deletes)
 
     async def on_connection_revoked(self, *, profile_id: UUID, viewer_user_id: UUID) -> TupleSync:
@@ -423,6 +452,31 @@ async def bounded[T](call: Awaitable[T]) -> T:
         return await call
 
 
+async def _post_commit(
+    name: str, call: Callable[[TupleHooks], Awaitable[TupleSync]]
+) -> TupleSync | None:
+    """Run a post-commit grant: ``None`` while unconfigured (one warning) or on failure.
+
+    The row is already committed, so raising would only fail a request that succeeded; the
+    grant stays missing (access denied) until a retry or ``fga_reconcile``. Cancellation still
+    propagates.
+    """
+    hooks = _hooks_or_none()
+    if hooks is None:
+        return None
+    try:
+        return await bounded(call(hooks))
+    except Exception as exc:  # logged; a missing grant only denies
+        # The exception text may carry object IDs; the class name is enough here.
+        logger.error(
+            "OpenFGA post-commit grant %s failed (%s); access stays denied until reconcile "
+            "(python -m revel.auth.fga_reconcile) restores it",
+            name,
+            type(exc).__name__,
+        )
+        return None
+
+
 async def on_user_created(*, user_id: UUID) -> TupleSync | None:
     hooks = _hooks_or_none()
     return None if hooks is None else await bounded(hooks.on_user_created(user_id=user_id))
@@ -449,33 +503,44 @@ async def on_agent_disconnected(
     )
 
 
-# v2 hooks for F5, F6 and F7. Same contract as the identity hooks: keyword-only, idempotent,
-# OpenFGA-only (no database access), each invocation bounded by HOOK_TIMEOUT_SECONDS. Call them
-# inside the transaction that changes the matching row, before commit, so a raise rolls the row
-# back. Grant-class calls warn and return None while unconfigured; revoke-class calls raise.
+# v2 hooks for F5, F6 and F7. Pre-commit (revoke-class, raising) or post-commit (grant-class,
+# logging); see the module docstring. Every call is keyword-only and idempotent.
+
+
+async def on_connection_tier_changing(
+    *, profile_id: UUID, viewer_user_id: UUID, tier: ConnectionTier | str
+) -> TupleSync:
+    """F6, PRE-COMMIT, on every approval or tier change to ``tier``: deletes any tier above it
+    (the revoke part of a downgrade; a no-op otherwise). Revoke-class: raises when unconfigured.
+    Pair it with ``on_connection_granted`` after commit."""
+    tier = ConnectionTier(tier)
+    hooks = _revoke_hooks()
+    return await bounded(
+        hooks.on_connection_tier_changing(
+            profile_id=profile_id, viewer_user_id=viewer_user_id, tier=tier
+        )
+    )
 
 
 async def on_connection_granted(
     *, profile_id: UUID, viewer_user_id: UUID, tier: ConnectionTier | str
 ) -> TupleSync | None:
-    """F6: the profile's owner approved ``viewer_user_id`` at ``tier`` (``connections`` or
-    ``trusted_circle``) or changed their tier; the other tier's tuple is deleted, so one call
-    sets the tier. ``connections`` may be a downgrade, so it is revoke-class (raises while
-    unconfigured); ``trusted_circle`` only widens and is grant-class."""
+    """F6, POST-COMMIT: the profile's owner approved ``viewer_user_id`` at ``tier``
+    (``connections`` or ``trusted_circle``), or changed their tier. Writes ``tier`` and deletes
+    the other tier. Never raises for OpenFGA failures (logs, returns ``None``); an invalid
+    ``tier`` raises ``ValueError`` before any call."""
     tier = ConnectionTier(tier)
-    if tier is ConnectionTier.CONNECTIONS:
-        hooks: TupleHooks | None = _revoke_hooks()
-    else:
-        hooks = _hooks_or_none()
-    if hooks is None:
-        return None
-    return await bounded(
-        hooks.on_connection_granted(profile_id=profile_id, viewer_user_id=viewer_user_id, tier=tier)
+    return await _post_commit(
+        "on_connection_granted",
+        lambda hooks: hooks.on_connection_granted(
+            profile_id=profile_id, viewer_user_id=viewer_user_id, tier=tier
+        ),
     )
 
 
 async def on_connection_revoked(*, profile_id: UUID, viewer_user_id: UUID) -> TupleSync:
-    """F6: the owner revoked the viewer's access to the profile (both tiers). Revoke-class."""
+    """F6, PRE-COMMIT: the owner revoked the viewer's access to the profile (both tiers).
+    Revoke-class."""
     hooks = _revoke_hooks()
     return await bounded(
         hooks.on_connection_revoked(profile_id=profile_id, viewer_user_id=viewer_user_id)
@@ -483,33 +548,43 @@ async def on_connection_revoked(*, profile_id: UUID, viewer_user_id: UUID) -> Tu
 
 
 async def on_blocked(*, profile_id: UUID, blocked_user_id: UUID) -> TupleSync:
-    """F6: the profile's owner blocked ``blocked_user_id``: that user and their agents lose
-    every tier on this profile only, and the tier tuples are deleted. Revoke-class."""
+    """F6, PRE-COMMIT: the profile's owner blocked ``blocked_user_id``: that user and their
+    agents lose every tier on this profile only, and the tier tuples are deleted, so an unblock
+    never restores a tier without a new approval. Revoke-class."""
     hooks = _revoke_hooks()
     return await bounded(hooks.on_blocked(profile_id=profile_id, blocked_user_id=blocked_user_id))
 
 
 async def on_unblocked(*, profile_id: UUID, blocked_user_id: UUID) -> TupleSync | None:
-    """F6: the owner lifted a block. Grant-class (a skipped delete only keeps denying)."""
-    hooks = _hooks_or_none()
-    if hooks is None:
-        return None
-    return await bounded(hooks.on_unblocked(profile_id=profile_id, blocked_user_id=blocked_user_id))
+    """F6, POST-COMMIT: the owner lifted a block (deletes ``blocked``; restores no tier).
+    Grant-class: logs and returns ``None`` on failure."""
+    return await _post_commit(
+        "on_unblocked",
+        lambda hooks: hooks.on_unblocked(profile_id=profile_id, blocked_user_id=blocked_user_id),
+    )
 
 
 async def on_public_opt_in_changed(*, profile_id: UUID, enabled: bool) -> TupleSync | None:
-    """F5: a new contribution-policy version changed ``public_opt_in``. Enabling is
-    grant-class; withdrawing is revoke-class (raises while unconfigured)."""
-    hooks = _hooks_or_none() if enabled else _revoke_hooks()
-    if hooks is None:
-        return None
-    return await bounded(hooks.on_public_opt_in_changed(profile_id=profile_id, enabled=enabled))
+    """F5: a new contribution-policy version changed ``public_opt_in``.
+
+    ``enabled=False`` (withdrawal) is PRE-COMMIT and revoke-class: it raises. ``enabled=True``
+    is POST-COMMIT and grant-class: it logs and returns ``None`` on failure.
+    """
+    if not enabled:
+        hooks = _revoke_hooks()
+        return await bounded(hooks.on_public_opt_in_changed(profile_id=profile_id, enabled=False))
+    return await _post_commit(
+        "on_public_opt_in_changed",
+        lambda hooks: hooks.on_public_opt_in_changed(profile_id=profile_id, enabled=True),
+    )
 
 
 async def on_question_created(
     *, question_id: UUID, profile_id: UUID, requester_user_id: UUID
 ) -> TupleSync | None:
-    """F7: a question about ``profile_id`` by ``requester_user_id`` was created. Grant-class."""
+    """F7, PRE-COMMIT in the inserting transaction: a question about ``profile_id`` by
+    ``requester_user_id`` was created. Grant-class (warns while unconfigured) but raising when
+    configured: on rollback the tuples name a question ID no row has, which F7 never serves."""
     hooks = _hooks_or_none()
     if hooks is None:
         return None
