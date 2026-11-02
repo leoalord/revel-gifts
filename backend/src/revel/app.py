@@ -12,6 +12,7 @@ from revel.api import routers
 from revel.auth.authz import configure_authz, reset_authz
 from revel.auth.fga import create_fga_client
 from revel.auth.mcp_auth import mcp_auth_kwargs
+from revel.auth.visibility import resolve_profile_for_user
 from revel.mcp.server import build_mcp_asgi_app, create_mcp_server
 from revel.settings import Settings, get_settings
 
@@ -29,7 +30,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # The OpenFGA client opens an HTTP session, so it is created inside the event loop.
         # configure_authz makes no network calls, so the app boots before fga_bootstrap has run.
         app.state.fga = create_fga_client(settings)
-        configure_authz(app.state.fga)
+        # The profile resolver opens its own short read-only session per lookup (lazy engine).
+        configure_authz(app.state.fga, resolve_profile_for_user)
         try:
             # The MCP sub-app's own lifespan is not run; the parent owns MCP startup/shutdown.
             async with mcp_server.session_manager.run():
