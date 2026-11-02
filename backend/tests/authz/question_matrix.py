@@ -19,6 +19,8 @@ from revel.auth.authz import (
     delegation_tuples,
     owner_tuple,
     require_respond,
+    resolve_viewer_tier,
+    subject_for,
 )
 from revel.auth.fga import FgaClient
 
@@ -33,8 +35,8 @@ async def connect(fga: FgaClient, person: Person) -> None:
 
 
 async def run_question_matrix(fga: FgaClient) -> None:
-    bob, rae, sam, cal = (make_person() for _ in range(4))
-    for person in (bob, rae, sam, cal):
+    bob, rae, sam, cal, tom = (make_person() for _ in range(5))
+    for person in (bob, rae, sam, cal, tom):
         await connect(fga, person)
     hooks = TupleHooks(fga)
     question = uuid4()
@@ -70,6 +72,23 @@ async def run_question_matrix(fga: FgaClient) -> None:
     assert await release(bob.as_user()) is ViewerTier.only_me
     assert await release(sam.as_user()) is None
     assert await release(sam.as_agent(uuid4())) is None
+    # A NON-requester holding a tier on the asked-about profile gets nothing (read_answer is
+    # what refuses them), at connections and, separately, at trusted_circle.
+    for tier in ("connections", "trusted_circle"):
+        await hooks.on_connection_tier_changing(
+            profile_id=bob.profile_id, viewer_user_id=tom.user_id, tier=tier
+        )
+        await hooks.on_connection_granted(
+            profile_id=bob.profile_id, viewer_user_id=tom.user_id, tier=tier
+        )
+        held = await resolve_viewer_tier(fga, tom.as_user(), bob.profile_id)
+        assert held is ViewerTier(tier)  # the tier is really held
+        for principal in (tom.as_user(), tom.as_agent(uuid4())):
+            assert not await fga.check(
+                user=subject_for(principal), relation="read_answer", object=q
+            )
+            assert await release(principal) is None
+            assert not await can_respond(principal, question, fga=fga)
     # An unknown question releases nothing, even with a tier on the profile.
     assert await can_release_answer(rae.as_user(), uuid4(), bob.profile_id, fga=fga) is None
 
