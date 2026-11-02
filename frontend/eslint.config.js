@@ -19,5 +19,20 @@ export default defineConfig([
       ecmaVersion: 2022,
       globals: globals.browser,
     },
+    rules: {
+      // Server and agent strings are rendered as React text only.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message: "Render server/agent strings as text; dangerouslySetInnerHTML is not allowed.",
+        },
+      ],
+      "no-restricted-properties": [
+        "error",
+        { property: "innerHTML", message: "Do not write HTML from strings." },
+        { property: "outerHTML", message: "Do not write HTML from strings." },
+      ],
+    },
   },
 ]);

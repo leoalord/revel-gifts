@@ -1,23 +1,38 @@
 import { useCallback, useEffect, useState } from "react";
 import type { MouseEvent } from "react";
 
-import { ApiError, UnauthorizedError, browserNavigation, getSession, postLogout } from "./api";
+import {
+  ApiError,
+  UnauthorizedError,
+  browserNavigation,
+  clearLoginMarker,
+  getSession,
+  onSignInLoop,
+  postLogout,
+  startSignIn,
+} from "./api";
 import type { WhoAmI } from "./api";
+import { ContributionsScreen } from "./ContributionsScreen";
+import { PolicyScreen } from "./PolicyScreen";
 
 type SessionState =
   | { kind: "loading" }
   | { kind: "signed-in"; session: WhoAmI }
   | { kind: "redirecting" }
-  | { kind: "not-configured" }
+  | { kind: "sign-in-loop" }
+  | { kind: "unavailable"; detail: string | null }
   | { kind: "error"; message: string };
 
-// Placeholder screens; each will be built against its owning backend contract.
+// Screens; Connections waits for its owning backend contract (F6).
 const SCREENS = [
   { path: "/app/", label: "Home" },
   { path: "/app/policy", label: "Policy" },
   { path: "/app/contributions", label: "Contributions" },
   { path: "/app/connections", label: "Connections" },
 ] as const;
+
+// F2's 503 detail when browser sign-in has no configuration (revel.auth.ui).
+const NOT_CONFIGURED_DETAIL = "Browser sign-in is not configured";
 
 function normalizePath(pathname: string): string {
   return pathname === "/app" ? "/app/" : pathname.replace(/\/+$/, "") || "/app/";
@@ -68,6 +83,8 @@ function Screen({ path }: { path: string }) {
   if (!screen || screen.path === "/app/") {
     return <p>Welcome to Revel Gifts.</p>;
   }
+  if (screen.path === "/app/policy") return <PolicyScreen />;
+  if (screen.path === "/app/contributions") return <ContributionsScreen />;
   return (
     <section>
       <h2>{screen.label}</h2>
@@ -81,17 +98,26 @@ export function App() {
   const [path, setPath] = useState(() => normalizePath(window.location.pathname));
   const [signingOut, setSigningOut] = useState(false);
 
+  useEffect(() => onSignInLoop(() => setState({ kind: "sign-in-loop" })), []);
+
   useEffect(() => {
     const controller = new AbortController();
     getSession(controller.signal)
-      .then((session) => setState({ kind: "signed-in", session }))
+      .then((session) => {
+        clearLoginMarker();
+        setState({ kind: "signed-in", session });
+      })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         if (error instanceof UnauthorizedError) {
-          // The api client's unauthorized handler is already navigating to sign-in.
-          setState({ kind: "redirecting" });
+          // The api client's unauthorized handler is navigating to sign-in, or has reported a
+          // redirect loop (its listener already set "sign-in-loop").
+          setState((s) => (s.kind === "sign-in-loop" ? s : { kind: "redirecting" }));
         } else if (error instanceof ApiError && error.status === 503) {
-          setState({ kind: "not-configured" });
+          // 503 covers both "not configured" and a temporarily unavailable identity store.
+          const detail =
+            error.detail === NOT_CONFIGURED_DETAIL ? NOT_CONFIGURED_DETAIL : null;
+          setState({ kind: "unavailable", detail });
         } else {
           setState({ kind: "error", message: errorMessage(error) });
         }
@@ -134,8 +160,23 @@ export function App() {
     case "redirecting":
       body = <p role="status">Loading…</p>;
       break;
-    case "not-configured":
-      body = <p role="alert">Sign-in is not configured.</p>;
+    case "unavailable":
+      body = (
+        <div role="alert">
+          <p>Sign-in is temporarily unavailable.</p>
+          {state.detail && <p>{state.detail}.</p>}
+        </div>
+      );
+      break;
+    case "sign-in-loop":
+      body = (
+        <div role="alert">
+          <p>Sign-in didn&apos;t stick. Your browser may be blocking cookies for this site.</p>
+          <button type="button" onClick={startSignIn}>
+            Retry sign-in
+          </button>
+        </div>
+      );
       break;
     case "error":
       body = <p role="alert">{state.message}</p>;
