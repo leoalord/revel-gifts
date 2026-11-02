@@ -12,6 +12,7 @@ from revel.api import routers
 from revel.auth.authz import configure_authz, reset_authz
 from revel.auth.fga import create_fga_client
 from revel.auth.mcp_auth import mcp_auth_kwargs
+from revel.auth.session_cookie import RefreshedSessionCookieMiddleware
 from revel.mcp.server import build_mcp_asgi_app, create_mcp_server
 from revel.settings import Settings, get_settings
 
@@ -41,6 +42,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Revel Gifts", lifespan=lifespan)
     app.state.settings = settings
     app.state.mcp_server = mcp_server
+    # F2: deliver a refreshed browser session cookie even on error/Response-returning routes.
+    app.add_middleware(RefreshedSessionCookieMiddleware)
 
     # Cloud Run reserves some paths ending in "z", so /healthz may never reach the app on
     # *.run.app (https://docs.cloud.google.com/run/docs/known-issues, "Reserved URL paths").
