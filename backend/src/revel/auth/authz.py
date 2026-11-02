@@ -34,6 +34,35 @@ WHEN to call a hook, relative to the caller's commit, is part of its contract:
     ``on_connection_revoked``, ``on_blocked``, ``on_public_opt_in_changed(enabled=False)``.
     A rollback after a successful revoke only over-denies (reconcile repairs it); a revoke
     after commit would leave access live in between, or forever if it failed.
+
+    ROW WRITE FIRST: in that transaction, run the changing UPDATE/INSERT on
+    ``agent_delegations``, ``connection_requests`` or ``contribution_policies`` BEFORE awaiting
+    the revoke hook (flush it if the ORM would defer it), so the transaction holds ROW
+    EXCLUSIVE on the table before the tuple is deleted. ``fga_reconcile``'s barrier waits only
+    for transactions holding a lock on those tables; a writer that deletes the tuple first and
+    writes the row afterwards can be overtaken by a reconcile that re-grants from its earlier
+    snapshot, reads the row as unchanged and leaves the revoked access live until the next
+    reconcile. On ``connection_requests`` and ``contribution_policies`` a ``SELECT ... FOR
+    UPDATE`` before the hook is also waited for (EXCLUSIVE there); on ``agent_delegations`` it
+    is not (SHARE there, so foreign-key checks naming a delegation never wait or deadlock), and
+    an advisory lock, or no lock, never is: those writers rely entirely on this rule.
+
+    Lock-order rules (so the barrier, which locks ``connection_requests``, then
+    ``contribution_policies``, then ``agent_delegations``, cannot deadlock with a writer): do
+    not write or row-lock ``connection_requests`` in a transaction AFTER writing
+    ``contribution_policies``, ``claims`` or ``claim_events`` (do it first, or separately); and
+    a transaction that writes ``agent_delegations`` writes nothing else (F2's do). Required
+    order:
+
+    - F6 approve or tier change (``connection_requests``): UPDATE the row (status, tier) ->
+      ``on_connection_tier_changing(tier=new)`` -> commit -> ``on_connection_granted(tier=new)``.
+    - F6 revoke: UPDATE the row -> ``on_connection_revoked`` -> commit.
+    - F6 block: UPDATE (or INSERT) the row -> ``on_blocked`` -> commit.
+    - F5 Public opt-out: INSERT the new ``contribution_policies`` version ->
+      ``on_public_opt_in_changed(enabled=False)`` -> commit. (Opt-in: INSERT -> commit ->
+      ``on_public_opt_in_changed(enabled=True)``.)
+    - F2 disconnect (already conforming): UPDATE ``agent_delegations`` ->
+      ``on_agent_disconnected`` -> commit.
   - grants that name a NEW, uncommitted row's random ID: F2's ``on_user_created`` /
     ``on_agent_delegated`` (``agent:<new delegation id>``), ``visibility.on_profile_created``
     (``profile:<new profile id>``) and ``on_question_created`` (``question:<new question
@@ -49,21 +78,26 @@ WHEN to call a hook, relative to the caller's commit, is part of its contract:
   the request still succeeds and ``fga_reconcile`` restores the grant. A rolled-back
   transaction never calls them, so it never grants.
 
-- Tier changes (F6) are split: before commit ``on_connection_tier_changing(tier=new)`` deletes
-  any HIGHER tier (the revoke part of a downgrade; a no-op for an upgrade or first approval);
-  after commit ``on_connection_granted(tier=new)`` writes the new tier and deletes the other.
+- Tier changes (F6) are split: after the row UPDATE and before commit
+  ``on_connection_tier_changing(tier=new)`` deletes any HIGHER tier (the revoke part of a
+  downgrade; a no-op for an upgrade or first approval); after commit
+  ``on_connection_granted(tier=new)`` writes the new tier and deletes the other.
 
 Unconfigured OpenFGA (``configure_authz`` not called, or store/model IDs unset): grant hooks log
 one warning and return ``None`` (a skipped grant only denies); revoke hooks raise
 ``FgaConfigurationError`` (a skipped delete would leave access in place). Pre-commit hooks
 propagate every configured OpenFGA error and ``TimeoutError``; post-commit hooks log them.
 Checks (``can_contribute``, ``require_*``, ``resolve_viewer_tier``, ``visible_claims``) raise
-``FgaConfigurationError`` when unconfigured; they never allow by default.
+``FgaConfigurationError`` when unconfigured; they never allow by default. They are bounded:
+each OpenFGA check by ``CHECK_TIMEOUT_SECONDS`` and a whole tier resolution by
+``TIER_RESOLUTION_TIMEOUT_SECONDS``; past either they fail CLOSED with
+``AuthorizationCheckTimeout`` (a ``TimeoutError``, never a grant or a lower tier).
 
 Known residual: a post-commit grant delayed past a LATER revoke of the same row (approve, then
-revoke within the grant's latency) can land after the revoke's delete. F6 should serialize
-changes per pair (e.g. run the post-commit grant before releasing a per-pair lock, or re-read
-the row after it); ``fga_reconcile`` repairs it either way.
+revoke within the grant's latency) can land after the revoke's delete. Serialize changes to the
+same row: F6 per (requester, target) pair, F5 Public opt-in changes per profile (e.g. run the
+post-commit grant before releasing a per-row lock, or re-read the row after it);
+``fga_reconcile`` repairs it either way.
 
 Policy lives in Notion (Relationships, Discovery & Privacy); this module implements it.
 """
@@ -145,6 +179,15 @@ class AuthorizationDenied(Exception):
 
     def __init__(self) -> None:
         super().__init__("Not authorized")
+
+
+class AuthorizationCheckTimeout(TimeoutError):
+    """An OpenFGA check did not answer in time. Fail closed: map to a generic 5xx, never allow.
+
+    Carries no object IDs."""
+
+    def __init__(self) -> None:
+        super().__init__("OpenFGA authorization check timed out; access not granted")
 
 
 # --- Object IDs -------------------------------------------------------------------------------
@@ -510,9 +553,10 @@ async def on_agent_disconnected(
 async def on_connection_tier_changing(
     *, profile_id: UUID, viewer_user_id: UUID, tier: ConnectionTier | str
 ) -> TupleSync:
-    """F6, PRE-COMMIT, on every approval or tier change to ``tier``: deletes any tier above it
-    (the revoke part of a downgrade; a no-op otherwise). Revoke-class: raises when unconfigured.
-    Pair it with ``on_connection_granted`` after commit."""
+    """F6, PRE-COMMIT, on every approval or tier change to ``tier``, AFTER the row UPDATE in the
+    same transaction: deletes any tier above it (the revoke part of a downgrade; a no-op
+    otherwise). Revoke-class: raises when unconfigured. Pair it with ``on_connection_granted``
+    after commit."""
     tier = ConnectionTier(tier)
     hooks = _revoke_hooks()
     return await bounded(
@@ -539,8 +583,8 @@ async def on_connection_granted(
 
 
 async def on_connection_revoked(*, profile_id: UUID, viewer_user_id: UUID) -> TupleSync:
-    """F6, PRE-COMMIT: the owner revoked the viewer's access to the profile (both tiers).
-    Revoke-class."""
+    """F6, PRE-COMMIT, AFTER the row UPDATE: the owner revoked the viewer's access to the
+    profile (both tiers). Revoke-class."""
     hooks = _revoke_hooks()
     return await bounded(
         hooks.on_connection_revoked(profile_id=profile_id, viewer_user_id=viewer_user_id)
@@ -548,9 +592,10 @@ async def on_connection_revoked(*, profile_id: UUID, viewer_user_id: UUID) -> Tu
 
 
 async def on_blocked(*, profile_id: UUID, blocked_user_id: UUID) -> TupleSync:
-    """F6, PRE-COMMIT: the profile's owner blocked ``blocked_user_id``: that user and their
-    agents lose every tier on this profile only, and the tier tuples are deleted, so an unblock
-    never restores a tier without a new approval. Revoke-class."""
+    """F6, PRE-COMMIT, AFTER the row UPDATE/INSERT: the profile's owner blocked
+    ``blocked_user_id``: that user and their agents lose every tier on this profile only, and
+    the tier tuples are deleted, so an unblock never restores a tier without a new approval.
+    Revoke-class."""
     hooks = _revoke_hooks()
     return await bounded(hooks.on_blocked(profile_id=profile_id, blocked_user_id=blocked_user_id))
 
@@ -567,7 +612,8 @@ async def on_unblocked(*, profile_id: UUID, blocked_user_id: UUID) -> TupleSync 
 async def on_public_opt_in_changed(*, profile_id: UUID, enabled: bool) -> TupleSync | None:
     """F5: a new contribution-policy version changed ``public_opt_in``.
 
-    ``enabled=False`` (withdrawal) is PRE-COMMIT and revoke-class: it raises. ``enabled=True``
+    ``enabled=False`` (withdrawal) is PRE-COMMIT, AFTER the policy INSERT, and revoke-class: it
+    raises. ``enabled=True``
     is POST-COMMIT and grant-class: it logs and returns ``None`` on failure.
     """
     if not enabled:
@@ -618,6 +664,21 @@ async def reconcile_agent_tuples(fga: FgaClient, pairs: Iterable[tuple[UUID, UUI
 # --- Checks -----------------------------------------------------------------------------------
 
 
+# Bounds for read-path checks (the SDK default is 300s per request, with retries). A single
+# check, and a whole tier resolution (up to four checks), fail closed past these.
+CHECK_TIMEOUT_SECONDS = 3.0
+TIER_RESOLUTION_TIMEOUT_SECONDS = 5.0
+
+
+async def _bounded_check(client: FgaClient, *, user: str, relation: str, object: str) -> bool:
+    """One OpenFGA check, raising ``AuthorizationCheckTimeout`` after ``CHECK_TIMEOUT_SECONDS``."""
+    try:
+        with anyio.fail_after(CHECK_TIMEOUT_SECONDS):
+            return await client.check(user=user, relation=relation, object=object)
+    except TimeoutError as exc:
+        raise AuthorizationCheckTimeout() from exc
+
+
 def _check_client(fga: FgaClient | None) -> FgaClient:
     """The client for a check: explicit, else the configured one. Never allow when unconfigured."""
     client = fga if fga is not None else (_state.fga if _state is not None else None)
@@ -628,8 +689,11 @@ def _check_client(fga: FgaClient | None) -> FgaClient:
 
 async def can_contribute(fga: FgaClient | None, principal: PrincipalLike, profile_id: UUID) -> bool:
     """Whether the principal may contribute to the profile. ``fga=None`` uses the configured one."""
-    return await _check_client(fga).check(
-        user=subject_for(principal), relation=CONTRIBUTE, object=profile_object(profile_id)
+    return await _bounded_check(
+        _check_client(fga),
+        user=subject_for(principal),
+        relation=CONTRIBUTE,
+        object=profile_object(profile_id),
     )
 
 
@@ -659,13 +723,23 @@ async def resolve_viewer_tier(
     first allowed: one call for the owner and the owner's agents, at most four otherwise. Each
     tier relation includes the higher ones, so the order cannot under-rank a viewer. ``none``
     when nothing is held (blocked, revoked, disconnected or a stranger).
+
+    Bounded: each check by ``CHECK_TIMEOUT_SECONDS`` and the whole resolution by
+    ``TIER_RESOLUTION_TIMEOUT_SECONDS``; a timeout raises ``AuthorizationCheckTimeout`` (fail
+    closed: never a tier, not even a lower one already passed over).
     """
     client = _check_client(fga)
     subject = subject_for(principal)
     profile = profile_object(profile_id)
-    for relation, tier in TIER_CHECKS:
-        if await client.check(user=subject, relation=relation, object=profile):
-            return tier
+    try:
+        with anyio.fail_after(TIER_RESOLUTION_TIMEOUT_SECONDS):
+            for relation, tier in TIER_CHECKS:
+                if await _bounded_check(client, user=subject, relation=relation, object=profile):
+                    return tier
+    except AuthorizationCheckTimeout:
+        raise
+    except TimeoutError as exc:
+        raise AuthorizationCheckTimeout() from exc
     return ViewerTier.none
 
 
@@ -685,6 +759,6 @@ async def require_viewer(
 # do not read claims anywhere else. Like the checks above, they raise FgaConfigurationError when
 # OpenFGA is unconfigured (via resolve_viewer_tier -> _check_client).
 #
-# Adapters (MCP/HTTP) must map AuthorizationDenied to a generic denial and OpenFGA SDK or
-# FgaConfigurationError exceptions to a generic 5xx, and never return their text: SDK errors
-# contain object IDs (UUIDs).
+# Adapters (MCP/HTTP) must map AuthorizationDenied to a generic denial and OpenFGA SDK,
+# FgaConfigurationError or AuthorizationCheckTimeout exceptions to a generic 5xx, and never
+# return their text: SDK errors contain object IDs (UUIDs).

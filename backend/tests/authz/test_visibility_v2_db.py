@@ -60,7 +60,7 @@ from revel.auth.fga import create_fga_client
 from revel.auth.hooks import ModuleAuthzHooks
 from revel.auth.identity import DelegationDisconnected, IdentityResolver
 from revel.auth.repository import SqlAlchemyIdentityRepository
-from revel.auth.visibility import SharedClaim, VisibleClaim, visible_claims
+from revel.auth.visibility import SharedClaim, VisibleClaim, owner_claims, visible_claims
 from revel.db.enums import Audience, ClaimStatus, ConnectionRequestStatus, ConnectionTier
 from revel.db.models import AgentDelegation, Claim, ConnectionRequest, Profile, Question, User
 from revel.settings import Settings
@@ -225,6 +225,45 @@ async def test_other_people_get_permitted_audiences_as_projections(
     assert owner.tier is ViewerTier.only_me
     assert all(type(c) is VisibleClaim and isinstance(c.claim, Claim) for c in owner.claims)
     assert "only_me" in statements(owner)
+
+
+async def test_owner_claims_denies_every_non_owner_tier(
+    session: Session, fake_fga: FakeFga, people: People
+) -> None:
+    """Management reads need ``view_only_me``: holding Trusted Circle, Connections or Public is
+    not enough, for the user (UI) or their agent (MCP). The owner and the owner's agent pass."""
+    seed_connected(fake_fga, people)
+    seed_claims(session, people)
+    add_policy(session, people.profile, 1, share=True, public=True)
+    session.commit()
+    configure_authz(fake_fga)
+    pid = people.profile.id
+    await authz.on_connection_granted(
+        profile_id=pid, viewer_user_id=people.tia.id, tier="trusted_circle"
+    )
+    await authz.on_connection_granted(
+        profile_id=pid, viewer_user_id=people.cal.id, tier="connections"
+    )
+    await authz.on_public_opt_in_changed(profile_id=pid, enabled=True)
+
+    expected = {
+        "tia": ViewerTier.trusted_circle,
+        "cal": ViewerTier.connections,
+        "sam": ViewerTier.public,
+    }
+    for name, tier in expected.items():
+        user = getattr(people, name)
+        for principal in (ui(user), mcp(people.delegations[name])):
+            # The viewer really holds the tier (so the denial is owner_claims' own guard)...
+            assert (await visible_claims(session, principal, pid)).tier is tier
+            # ...and still cannot reach the management read.
+            with pytest.raises(AuthorizationDenied):
+                await owner_claims(session, principal, pid)
+            with pytest.raises(AuthorizationDenied):
+                await owner_claims(session, principal, pid, statuses=[ClaimStatus.ACTIVE])
+
+    for principal in (ui(people.alex), mcp(people.delegations["alex"])):
+        assert "only_me" in {c.statement for c in await owner_claims(session, principal, pid)}
 
 
 async def test_policy_tightening_and_public_withdrawal_apply_on_next_read(
@@ -467,6 +506,315 @@ async def test_barrier_waits_for_an_in_flight_revocation(
     assert tier_tuple(pid, t.id, ConnectionTier.TRUSTED_CIRCLE) not in fake_fga.tuples  # ...undone
 
 
+async def test_barrier_waits_for_a_row_locked_writer_that_revokes_before_its_update(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hook-then-UPDATE under ``SELECT ... FOR UPDATE`` (ROW SHARE only while the hook runs):
+    the contract asks for the UPDATE first, but the EXCLUSIVE barrier also waits for this
+    writer. Under a SHARE barrier the row reads as unchanged and the stale grant survives."""
+    a, t = people.alex, people.tia
+    pid = people.profile.id
+    approved = add_request(
+        session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.TRUSTED_CIRCLE
+    )
+    session.commit()
+    real_snapshot = fga_reconcile._snapshot
+    started, done = threading.Event(), threading.Event()
+
+    def lock_hook_then_update() -> None:
+        with factory() as other, other.begin():
+            other.execute(
+                text("SELECT id FROM connection_requests WHERE id = :id FOR UPDATE"),
+                {"id": approved.id},
+            )
+            # The revoke hook runs before the row write; the tuple is gone, the row unchanged.
+            fake_fga.tuples.discard(tier_tuple(pid, t.id, ConnectionTier.TRUSTED_CIRCLE))
+            started.set()
+            threading.Event().wait(0.5)
+            other.execute(
+                update(ConnectionRequest)
+                .where(ConnectionRequest.id == approved.id)
+                .values(status="revoked", granted_tier=None)
+            )
+        done.set()
+
+    def snapshot_then_revoke(provider: fga_reconcile.SessionFactory) -> fga_reconcile.Snapshot:
+        snap = real_snapshot(provider)
+        threading.Thread(target=lock_hook_then_update, daemon=True).start()
+        assert started.wait(5)
+        return snap
+
+    monkeypatch.setattr(fga_reconcile, "_snapshot", snapshot_then_revoke)
+    summary = await _reconcile(fake_fga, factory, prune=False)
+    # Granted from the stale snapshot, then undone by the barrier (the revocation holds).
+    assert summary.connection_tuples == 1
+    assert tier_tuple(pid, t.id, ConnectionTier.TRUSTED_CIRCLE) not in fake_fga.tuples
+    assert summary.rechecked_changes == 1
+    assert done.is_set()  # the barrier waited for the row-locked writer's commit
+
+
+def _timed_plain_select(factory: sessionmaker[Session]) -> float:
+    """A plain SELECT on each barrier table; fails (lock_timeout) if it has to wait."""
+    began = time.monotonic()
+    with factory() as reader, reader.begin():
+        reader.execute(text("SET LOCAL lock_timeout = '300ms'"))
+        for table in ("agent_delegations", "connection_requests", "contribution_policies"):
+            reader.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
+    return time.monotonic() - began
+
+
+async def test_plain_selects_are_not_blocked_by_a_held_barrier(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EXCLUSIVE admits ACCESS SHARE: reads (token resolution, visibility) run while the barrier
+    holds its locks."""
+    a, t = people.alex, people.tia
+    add_request(session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.CONNECTIONS)
+    session.commit()
+    real_barrier = fga_reconcile._barrier
+    elapsed: list[float] = []
+
+    def barrier_with_reader(factory_: fga_reconcile.SessionFactory, apply):  # type: ignore[no-untyped-def]
+
+        def read_while_locked(fresh: fga_reconcile.Snapshot) -> None:
+            with factory() as probe:
+                assert probe.execute(HELD_BARRIER_LOCK).scalar_one() == 3
+            reader = threading.Thread(target=lambda: elapsed.append(_timed_plain_select(factory)))
+            reader.start()
+            reader.join(5)
+            apply(fresh)
+
+        return real_barrier(factory_, read_while_locked)
+
+    monkeypatch.setattr(fga_reconcile, "_barrier", barrier_with_reader)
+    await _reconcile(fake_fga, factory, prune=False)
+    assert elapsed and elapsed[0] < 0.3, elapsed
+
+
+async def test_plain_select_is_not_queued_behind_a_waiting_barrier(
+    factory: sessionmaker[Session],
+    session: Session,
+    fake_fga: FakeFga,
+    people: People,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader arriving while the barrier waits for an in-flight writer is not held in the
+    FIFO lock queue (ACCESS SHARE does not conflict with the queued EXCLUSIVE request)."""
+    a, t = people.alex, people.tia
+    busy = add_request(session, t, a, ConnectionRequestStatus.APPROVED, ConnectionTier.CONNECTIONS)
+    session.commit()
+    fast_barrier(monkeypatch, lock=2.0, attempts=2)
+    holder = hold_row_lock(factory, busy.id, 1.0, threading.Event())
+    elapsed: list[float] = []
+
+    def reader() -> None:
+        with factory() as probe:
+            deadline = time.monotonic() + 5
+            while probe.execute(WAITING_BARRIER_LOCK).scalar_one() == 0:
+                probe.rollback()
+                assert time.monotonic() < deadline, "barrier never queued"
+                threading.Event().wait(0.02)
+            probe.rollback()
+        elapsed.append(_timed_plain_select(factory))
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    summary = await _reconcile(fake_fga, factory, prune=False)
+    thread.join(10)
+    holder.join(10)
+    assert elapsed and elapsed[0] < 0.3, elapsed
+    assert summary.connection_tuples == 1
+
+
+# --- Barrier lock order: no deadlock with FK-checking writers ---------------------------------
+
+
+def add_claim_citing(
+    session: Session, profile_id: object, delegation_id: object, policy_version: int
+) -> None:
+    """A claim naming a delegation and a policy version: its FK checks take ROW SHARE on
+    ``agent_delegations`` and ``contribution_policies`` (as F5's contribution writes will)."""
+    session.execute(
+        text(
+            "INSERT INTO claims (profile_id, category, statement, audience, evidence_type, "
+            "status, contributor_user_id, contributor_delegation_id, contributed_via, "
+            "policy_version) SELECT :p, 'likes', 'synthetic: cited', 'only_me', 'explicit', "
+            "'active', d.user_id, d.id, 'mcp', :v FROM agent_delegations d WHERE d.id = :d"
+        ),
+        {"p": profile_id, "d": delegation_id, "v": policy_version},
+    )
+
+
+def wait_until(factory: sessionmaker[Session], table: str, done: threading.Event) -> None:
+    """Block until a lock request on ``table`` is waiting, or ``done`` is set."""
+    deadline = time.monotonic() + 5
+    with factory() as probe:
+        while not done.is_set():
+            if probe.execute(WAITING_LOCK, {"table": table}).scalar_one():
+                return
+            probe.rollback()
+            assert time.monotonic() < deadline, f"nothing ever waited on {table}"
+            threading.Event().wait(0.02)
+
+
+def start_barrier(factory: sessionmaker[Session]) -> tuple[threading.Thread, dict, threading.Event]:
+    outcome: dict[str, str] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            fga_reconcile._barrier(lambda: factory, lambda fresh: None)
+            outcome["barrier"] = "ok"
+        except Exception as exc:  # recorded for the assertion
+            outcome["barrier"] = type(exc).__name__ + ": " + str(exc).splitlines()[0]
+        done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcome, done
+
+
+def run_writer(
+    factory: sessionmaker[Session], outcome: dict, steps: "list[object]"
+) -> threading.Thread:
+    """Run ``steps`` (callables taking the session) in one transaction; record the outcome."""
+
+    def run() -> None:
+        try:
+            with factory() as writer, writer.begin():
+                for step in steps:
+                    step(writer)  # type: ignore[operator]
+            outcome["writer"] = "committed"
+        except Exception as exc:  # recorded for the assertion
+            outcome["writer"] = type(exc).__name__ + ": " + str(exc).splitlines()[0]
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def claim_count(factory: sessionmaker[Session]) -> int:
+    with factory() as probe:
+        return probe.execute(text("SELECT count(*) FROM claims")).scalar_one()
+
+
+async def test_policy_writer_citing_a_delegation_does_not_deadlock_with_the_barrier(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """Reviewer B2: a transaction INSERTs a policy version, the barrier queues on
+    ``contribution_policies``, then the transaction inserts a claim naming a delegation. With
+    EXCLUSIVE on ``agent_delegations`` (taken first) the claim's FK check waited on the barrier
+    while the barrier waited on the policy: a deadlock that could abort the user's request."""
+    pid, delegation_id = people.profile.id, people.delegations["alex"].id
+    add_policy(session, people.profile, 1)
+    session.commit()
+    policy_held, outcome = threading.Event(), {}
+    barrier: list[tuple[threading.Thread, dict, threading.Event]] = []
+
+    def insert_policy(w: Session) -> None:
+        add_policy(w, w.get(Profile, pid), 2)  # type: ignore[arg-type]
+        policy_held.set()
+
+    def cite_after_barrier_queues(w: Session) -> None:
+        assert barrier_started.wait(5)
+        wait_until(factory, "contribution_policies", barrier[0][2])
+        add_claim_citing(w, pid, delegation_id, 1)
+
+    barrier_started = threading.Event()
+    writer = run_writer(factory, outcome, [insert_policy, cite_after_barrier_queues])
+    assert policy_held.wait(5)
+    barrier.append(start_barrier(factory))
+    barrier_started.set()
+    writer.join(10)
+    barrier[0][0].join(10)
+    outcome.update(barrier[0][1])
+    assert outcome == {"writer": "committed", "barrier": "ok"}, outcome
+    assert claim_count(factory) == 1
+
+
+async def test_delegation_reference_then_claim_does_not_deadlock_with_the_barrier(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """A transaction that first references a delegation (the FK check of a question, answer or
+    assignment insert: ``FOR KEY SHARE``) and then inserts a claim citing a policy. SHARE on
+    ``agent_delegations`` admits the reference, so the barrier never waits on it; EXCLUSIVE
+    (even taken last) would hold policies while waiting on the reference: a deadlock."""
+    pid, delegation_id = people.profile.id, people.delegations["alex"].id
+    add_policy(session, people.profile, 1)
+    session.commit()
+    referenced, outcome = threading.Event(), {}
+    barrier: list[tuple[threading.Thread, dict, threading.Event]] = []
+    barrier_started = threading.Event()
+
+    def reference_delegation(w: Session) -> None:
+        w.execute(
+            text("SELECT 1 FROM agent_delegations WHERE id = :d FOR KEY SHARE"),
+            {"d": delegation_id},
+        )
+        referenced.set()
+
+    def cite_after_barrier(w: Session) -> None:
+        assert barrier_started.wait(5)
+        wait_until(factory, "agent_delegations", barrier[0][2])  # returns once it finished
+        add_claim_citing(w, pid, delegation_id, 1)
+
+    writer = run_writer(factory, outcome, [reference_delegation, cite_after_barrier])
+    assert referenced.wait(5)
+    barrier.append(start_barrier(factory))
+    barrier_started.set()
+    writer.join(10)
+    barrier[0][0].join(10)
+    outcome.update(barrier[0][1])
+    assert outcome == {"writer": "committed", "barrier": "ok"}, outcome
+    assert claim_count(factory) == 1
+
+
+async def test_disconnect_is_not_held_while_the_barrier_waits_on_policies(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """``agent_delegations`` is locked LAST: while the barrier waits on an in-flight policy
+    writer it holds nothing there, so a disconnect (revocation) is not delayed by it."""
+    pid = people.profile.id
+    gone = people.delegations["cal"]
+    add_policy(session, people.profile, 1)
+    session.commit()
+    release, outcome = threading.Event(), {}
+    policy_held = threading.Event()
+
+    def insert_policy_and_hold(w: Session) -> None:
+        add_policy(w, w.get(Profile, pid), 2)  # type: ignore[arg-type]
+        policy_held.set()
+        assert release.wait(5)
+
+    writer = run_writer(factory, outcome, [insert_policy_and_hold])
+    assert policy_held.wait(5)
+    thread, barrier_outcome, barrier_done = start_barrier(factory)
+    try:
+        wait_until(factory, "contribution_policies", barrier_done)
+        began = time.monotonic()
+        with factory() as tx, tx.begin():
+            tx.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            tx.execute(
+                update(AgentDelegation)
+                .where(AgentDelegation.id == gone.id)
+                .values(status="disconnected", disconnected_at=datetime.now(UTC))
+            )
+        assert time.monotonic() - began < 0.4
+    finally:
+        release.set()
+        writer.join(10)
+        thread.join(10)
+    assert outcome == {"writer": "committed"} and barrier_outcome == {"barrier": "ok"}
+
+
 async def test_prune_covers_v2_relations(
     factory: sessionmaker[Session], session: Session, fake_fga: FakeFga, people: People
 ) -> None:
@@ -496,9 +844,19 @@ async def test_prune_covers_v2_relations(
 
 # --- Barrier bounds and failure ---------------------------------------------------------------
 
-WAITING_SHARE_LOCK = text(
+# The barrier's table lock (EXCLUSIVE MODE) as pg_locks shows it: queued, and held on all three.
+WAITING_BARRIER_LOCK = text(
     "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
-    "WHERE c.relname = 'connection_requests' AND l.mode = 'ShareLock' AND NOT l.granted"
+    "WHERE c.relname = 'connection_requests' AND l.mode = 'ExclusiveLock' AND NOT l.granted"
+)
+HELD_BARRIER_LOCK = text(
+    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE l.granted AND ("
+    "(c.relname IN ('connection_requests', 'contribution_policies') AND l.mode = 'ExclusiveLock')"
+    " OR (c.relname = 'agent_delegations' AND l.mode = 'ShareLock'))"
+)
+WAITING_LOCK = text(
+    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+    "WHERE c.relname = :table AND NOT l.granted"
 )
 
 
@@ -550,7 +908,7 @@ async def test_writer_queued_behind_a_waiting_barrier_proceeds_within_the_bound(
     def queued_writer() -> None:
         with factory() as probe:
             deadline = time.monotonic() + 5
-            while probe.execute(WAITING_SHARE_LOCK).scalar_one() == 0:
+            while probe.execute(WAITING_BARRIER_LOCK).scalar_one() == 0:
                 probe.rollback()
                 assert time.monotonic() < deadline, "barrier never queued"
                 threading.Event().wait(0.02)
