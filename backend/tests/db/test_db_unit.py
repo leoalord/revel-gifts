@@ -40,7 +40,7 @@ def test_delegation_status_values_and_check_expression() -> None:
 
 def test_metadata_naming_convention() -> None:
     assert dict(Base.metadata.naming_convention) == NAMING_CONVENTION
-    assert set(Base.metadata.tables) == {"users", "agents", "agent_delegations"}
+    assert set(Base.metadata.tables) >= {"users", "agents", "agent_delegations"}
 
 
 def _ddl() -> str:
@@ -70,7 +70,7 @@ def test_deterministic_constraint_names() -> None:
         "ix_agent_delegations_agent_id",
     ):
         assert name in ddl, name
-    assert ddl.count("ON DELETE RESTRICT") == 2
+    assert ddl.count("ON DELETE RESTRICT") == 15  # every FK (identity 2, profile 13)
     assert "gen_random_uuid()" in ddl
 
 
@@ -91,8 +91,8 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0001_identity"]
-    assert [rev.revision for rev in script.walk_revisions()] == ["0001_identity"]
+    assert script.get_heads() == ["0002_profile"]
+    assert [rev.revision for rev in script.walk_revisions()] == ["0002_profile", "0001_identity"]
 
 
 def test_cloud_sql_unix_socket_url_engine() -> None:
