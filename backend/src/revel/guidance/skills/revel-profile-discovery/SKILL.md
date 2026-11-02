@@ -1,7 +1,7 @@
 ---
 name: revel-profile-discovery
 description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.2.0
+version: 0.2.1
 status: draft
 ---
 
@@ -46,6 +46,8 @@ Sensitive information (health, religion, politics, sexual orientation, finances)
 - Never infer it and never ask for it.
 - Submit it only if the owner volunteers it and asks you to save it. Use category `sensitive` <!-- PROVISIONAL: validate against merged F5 contract -->
   with `evidence_type` `explicit`; anything else is rejected (`sensitive_not_explicit`). <!-- PROVISIONAL: validate against merged F5 contract -->
+- Leave `audience` unset: sensitive facts are always Only Me, and any other audience is <!-- PROVISIONAL: validate against merged F5 contract -->
+  rejected as `invalid_field`. <!-- PROVISIONAL: validate against merged F5 contract -->
 - Tell the owner it stays Only Me and waits for their approval in Revel. <!-- PROVISIONAL: validate against merged F5 contract -->
 
 For a diet or health-related exclusion, record only what to avoid ("no peanuts"), never why.

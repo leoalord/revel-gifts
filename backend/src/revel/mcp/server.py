@@ -19,7 +19,7 @@ from revel.settings import Settings
 def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     """Build the MCP server. ``server_kwargs`` (e.g. ``token_verifier``, ``auth``) go to
     ``MCPServer``."""
-    server = MCPServer(name="revel", instructions="Revel Gifts MCP server.", **server_kwargs)
+    server = MCPServer(name="revel", instructions=guidance.server_instructions(), **server_kwargs)
 
     @server.tool(description="Connectivity check. Returns 'pong'.")
     def ping() -> str:

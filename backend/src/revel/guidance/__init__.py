@@ -4,6 +4,7 @@ Canonical Markdown is package data under ``skills/`` (see ``loader``). ``render_
 the single renderer; ``register_mcp`` and ``router`` are the transport adapters.
 """
 
+from revel.guidance.instructions import server_instructions
 from revel.guidance.loader import Document, GuidanceError, documents, load_documents
 from revel.guidance.mcp_adapter import register_mcp, resource_uri
 from revel.guidance.render import (
@@ -27,5 +28,6 @@ __all__ = [
     "render_markdown",
     "resource_uri",
     "router",
+    "server_instructions",
     "skill_names",
 ]

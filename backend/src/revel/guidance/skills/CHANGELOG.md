@@ -1,11 +1,18 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.2.0
+version: 0.2.1
 status: draft
 ---
 
 # Revel agent guidance changelog
+
+## 0.2.1 (draft, 2026-11-02)
+
+- Discovery: leave the audience unset for sensitive facts (always Only Me; any other audience is
+  rejected).
+- Connections: every line describing F6 behavior is marked PROVISIONAL.
+- MCP server instructions now come from this package and name only registered tools.
 
 ## 0.2.0 (draft, 2026-11-02)
 
