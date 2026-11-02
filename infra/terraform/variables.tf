@@ -136,9 +136,9 @@ variable "app_secret_env" {
 }
 
 variable "app_max_instances" {
-  description = "Maximum revel-app instances. Keep (instances x DB pool) within the Cloud SQL connection budget (db-f1-micro allows 25)."
+  description = "Maximum revel-app instances. Keep (instances x DB pool) within the Cloud SQL connection budget (db-f1-micro allows about 25; see infra/README.md, \"Connection budget\"). Raise db_tier to db-g1-small before going above 2."
   type        = number
-  default     = 3
+  default     = 2
 }
 
 variable "db_tier" {

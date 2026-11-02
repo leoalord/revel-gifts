@@ -46,7 +46,8 @@ resource "google_cloud_scheduler_job" "fga_reconcile" {
   attempt_deadline = "60s"
 
   # Retries a failed jobs:run call (for example a transient 5xx). A failed execution (non-zero
-  # exit, such as 3 for "re-run reconcile") is not retried here; the next scheduled run repairs it.
+  # exit, such as 3 for "re-run reconcile") is not retried here: the job's task retries once
+  # (max_retries = 1 in run.tf), and the next scheduled run repairs anything still failing.
   retry_config {
     retry_count          = 2
     min_backoff_duration = "30s"
