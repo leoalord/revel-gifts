@@ -174,16 +174,33 @@ locals {
     var.app_extra_allowed_hosts,
   ))
 
-  app_env = {
-    APP_ENV         = "production"
-    PUBLIC_BASE_URL = var.public_base_url
-    MCP_PATH        = var.mcp_path
-    ALLOWED_HOSTS   = join(",", local.app_run_app_hosts)
-    ALLOWED_ORIGINS = join(",", [for h in local.app_run_app_hosts : "https://${h}"])
-    # Canonical run.app URL; the app also uses it as the Google ID-token audience.
-    OPENFGA_API_URL     = google_cloud_run_v2_service.openfga.uri
-    OPENFGA_GOOGLE_AUTH = "true"
-  }
+  # MCP resource indicator / expected WorkOS access-token audience. Built the same way as
+  # Settings.mcp_resource_url (base without trailing slash + "/" + path) and set explicitly so it
+  # stays https://api.revel.gifts/mcp even when the app is reached on its run.app host. It must
+  # equal the resource indicator configured in WorkOS.
+  app_mcp_resource_url = "${trimsuffix(var.public_base_url, "/")}/${trim(var.mcp_path, "/")}"
+
+  # WorkOS browser-session callback; defaults to https://api.revel.gifts/auth/callback.
+  app_workos_redirect_uri = var.workos_redirect_uri != "" ? var.workos_redirect_uri : "${trimsuffix(var.public_base_url, "/")}/auth/callback"
+
+  app_env = merge(
+    {
+      APP_ENV               = "production"
+      PUBLIC_BASE_URL       = var.public_base_url
+      MCP_PATH              = var.mcp_path
+      WORKOS_TOKEN_AUDIENCE = local.app_mcp_resource_url
+      WORKOS_REDIRECT_URI   = local.app_workos_redirect_uri
+      ALLOWED_HOSTS         = join(",", local.app_run_app_hosts)
+      ALLOWED_ORIGINS       = join(",", [for h in local.app_run_app_hosts : "https://${h}"])
+      # Canonical run.app URL; the app also uses it as the Google ID-token audience.
+      OPENFGA_API_URL     = google_cloud_run_v2_service.openfga.uri
+      OPENFGA_GOOGLE_AUTH = "true"
+    },
+    # Public AuthKit issuer (not a secret). Unset until configured: /mcp and /me fail closed.
+    var.workos_authkit_domain == "" ? {} : { WORKOS_AUTHKIT_DOMAIN = var.workos_authkit_domain },
+    # Public WorkOS client ID (not a secret), for the browser session.
+    var.workos_client_id == "" ? {} : { WORKOS_CLIENT_ID = var.workos_client_id },
+  )
 }
 
 resource "google_cloud_run_v2_service" "app" {
