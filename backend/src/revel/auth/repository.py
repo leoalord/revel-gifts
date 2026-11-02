@@ -22,7 +22,7 @@ from uuid import UUID
 import anyio
 import anyio.from_thread
 import anyio.to_thread
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -85,6 +85,8 @@ class IdentityRepository(Protocol):
     ) -> tuple[UserRecord, bool]: ...
 
     async def ensure_agent(self, oauth_client_id: str) -> tuple[AgentRecord, bool]: ...
+
+    async def set_agent_name_if_empty(self, agent_id: UUID, name: str) -> bool: ...
 
     async def ensure_delegation(
         self,
@@ -397,6 +399,32 @@ class SqlAlchemyIdentityRepository:
 
     async def ensure_agent(self, oauth_client_id: str) -> tuple[AgentRecord, bool]:
         return await anyio.to_thread.run_sync(self._ensure_agent, oauth_client_id)
+
+    # --- agent name ------------------------------------------------------------------
+
+    def _set_agent_name_if_empty(self, agent_id: UUID, name: str) -> bool:
+        # Its own transaction touching only ``agents`` (never combined with delegation
+        # writes). The WHERE clause makes it first-writer-wins and idempotent: a
+        # non-empty name is never overwritten, and concurrent callers serialize on the
+        # row lock, after which the loser matches nothing.
+        with self._session() as session, session.begin():
+            stmt = (
+                update(Agent)
+                .where(Agent.id == agent_id, or_(Agent.name.is_(None), Agent.name == ""))
+                .values(name=name, updated_at=func.now())
+                .returning(Agent.id)
+                .execution_options(synchronize_session=False)
+            )
+            return session.execute(stmt).scalar_one_or_none() is not None
+
+    async def set_agent_name_if_empty(self, agent_id: UUID, name: str) -> bool:
+        """Set ``agents.name`` only if it is NULL or empty. Returns whether it changed.
+
+        Callers pass an already-sanitized, non-empty name.
+        """
+        if not name:
+            raise ValueError("name must be non-empty")
+        return await anyio.to_thread.run_sync(self._set_agent_name_if_empty, agent_id, name)
 
     async def ensure_delegation(
         self,

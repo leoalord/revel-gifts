@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel
 
 from revel.auth.identity import Principal
 from revel.auth.repository import IdentityRepository
+
+DEFAULT_AGENT_LABEL = "Assistant"
+
+
+def agent_label(name: str | None, client_id: str) -> str:
+    """Display label for an acting assistant (shared by ``/api/agents``, ``whoami`` and
+    any other surface that names the assistant).
+
+    The agent's non-blank name, else an ``https`` client ID's host (CIMD client IDs are
+    URLs), else ``"Assistant"``. ``agents.name`` for DCR clients is filled from WorkOS's
+    record of the client registration (``revel.auth.workos_clients``).
+    """
+    if name is not None and name.strip():
+        return name.strip()
+    try:
+        parts = urlsplit(client_id.strip())
+        host = parts.hostname if parts.scheme.lower() == "https" else None
+    except ValueError:
+        host = None
+    return host or DEFAULT_AGENT_LABEL
 
 
 class WhoAmIUser(BaseModel):
@@ -23,6 +44,7 @@ class WhoAmIAgent(BaseModel):
     delegation_id: UUID
     client_id: str
     name: str | None
+    label: str  # always non-empty; see ``agent_label``
 
 
 class WhoAmI(BaseModel):
@@ -49,6 +71,7 @@ async def whoami(principal: Principal, repo: IdentityRepository) -> WhoAmI:
             delegation_id=principal.delegation_id,
             client_id=record.oauth_client_id,
             name=record.name,
+            label=agent_label(record.name, record.oauth_client_id),
         )
     return WhoAmI(
         user=WhoAmIUser(

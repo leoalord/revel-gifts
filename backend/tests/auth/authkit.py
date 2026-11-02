@@ -78,6 +78,11 @@ class TestAuthKit:
         }
     )
     user_api_status: int = 200
+    # WorkOS Connect Applications mock (``GET /connect/applications/{client_id}``). Empty by
+    # default, so unknown clients get 404 and ``agents.name`` stays NULL.
+    applications: dict[str, dict[str, Any]] = field(default_factory=dict)
+    application_requests: list[str] = field(default_factory=list)
+    application_auth_headers: list[str] = field(default_factory=list)
     # User Management authenticate mock: one-time codes and refresh tokens -> WorkOS user id.
     codes: dict[str, str] = field(default_factory=dict)
     refresh_tokens: dict[str, str] = field(default_factory=dict)
@@ -112,6 +117,15 @@ class TestAuthKit:
             return httpx.Response(200, json={"keys": [public_jwk(key, SESSION_KID)]})
         if url == f"{WORKOS_API}/user_management/authenticate" and request.method == "POST":
             return self._authenticate(json.loads(request.content))
+        app_prefix = f"{WORKOS_API}/connect/applications/"
+        if url.startswith(app_prefix) and request.method == "GET":
+            client_id = request.url.path.rsplit("/", 1)[-1]
+            self.application_requests.append(client_id)
+            self.application_auth_headers.append(request.headers.get("authorization", ""))
+            app = self.applications.get(client_id)
+            if app is None:
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, json=app)
         prefix = "https://api.workos.com/user_management/users/"
         if url.startswith(prefix):
             user_id = url[len(prefix) :]
@@ -124,6 +138,17 @@ class TestAuthKit:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json=user)
         return httpx.Response(599, json={"unexpected": url})
+
+    def register_application(self, client_id: str, name: str) -> None:
+        """A dynamically registered Connect application, shaped like WorkOS's response."""
+        self.applications[client_id] = {
+            "object": "connect_application",
+            "id": f"conn_app_{len(self.applications)}",
+            "client_id": client_id,
+            "name": name,
+            "application_type": "oauth",
+            "was_dynamically_registered": True,
+        }
 
     def _authenticate(self, body: dict[str, Any]) -> httpx.Response:
         self.authenticate_requests.append(body)

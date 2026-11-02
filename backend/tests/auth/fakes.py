@@ -36,6 +36,8 @@ class InMemoryIdentityRepository:
         self.connected_at: dict[UUID, datetime] = {}
         self.disconnected_at: dict[UUID, datetime] = {}
         self._lock = anyio.Lock()
+        self.agent_name_writes = 0
+        self.fail_agent_name_write = False
 
     async def get_user_by_workos_id(self, workos_user_id: str) -> UserRecord | None:
         return next((u for u in self.users.values() if u.workos_user_id == workos_user_id), None)
@@ -100,6 +102,19 @@ class InMemoryIdentityRepository:
             record = AgentRecord(uuid4(), oauth_client_id, None)
             self.agents[record.id] = record
             return record, True
+
+    async def set_agent_name_if_empty(self, agent_id: UUID, name: str) -> bool:
+        if not name:
+            raise ValueError("name must be non-empty")
+        self.agent_name_writes += 1
+        if self.fail_agent_name_write:
+            raise RuntimeError("database unavailable")
+        async with self._lock:
+            existing = self.agents.get(agent_id)
+            if existing is None or existing.name:
+                return False
+            self.agents[agent_id] = replace(existing, name=name)
+            return True
 
     async def ensure_delegation(
         self,
