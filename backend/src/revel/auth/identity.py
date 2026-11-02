@@ -9,6 +9,7 @@ an existing row: a disconnected delegation is rejected, never reactivated.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -16,7 +17,13 @@ from uuid import UUID
 from mcp.server.auth.provider import AccessToken
 
 from revel.auth.hooks import AuthzHooks, ModuleAuthzHooks
-from revel.auth.repository import DelegationRecord, IdentityRepository, UserRecord
+from revel.auth.repository import AgentRecord, DelegationRecord, IdentityRepository, UserRecord
+from revel.auth.workos_clients import (
+    ClientDirectory,
+    NullClientDirectory,
+    is_url_client_id,
+    sanitize_agent_name,
+)
 from revel.auth.workos_users import NullUserDirectory, UserDirectory, UserProfile
 
 logger = logging.getLogger(__name__)
@@ -70,10 +77,41 @@ class IdentityResolver:
         *,
         user_directory: UserDirectory | None = None,
         hooks: AuthzHooks | None = None,
+        client_directory: ClientDirectory | None = None,
+        name_retry_seconds: float = 300.0,
     ):
         self.repository = repository
         self._directory = user_directory or NullUserDirectory()
+        self._clients = client_directory or NullClientDirectory()
         self._hooks = hooks or ModuleAuthzHooks()
+        self._name_retry_seconds = name_retry_seconds
+        # client_id -> monotonic time before which no new name lookup is attempted.
+        self._name_lookup_not_before: dict[str, float] = {}
+
+    async def _capture_agent_name(self, agent: AgentRecord) -> None:
+        """Fill an unnamed agent's ``name`` from WorkOS's record of its OAuth client.
+
+        Best effort: never raises, never overwrites a non-empty name, and writes in its
+        own ``agents``-only transaction. Lookups per client are rate limited in-process
+        (one in flight, then one per ``name_retry_seconds`` while no name is found), so
+        an unnamed or unknown client costs at most one WorkOS call per interval.
+        """
+        client_id = agent.oauth_client_id
+        if agent.name or is_url_client_id(client_id):
+            return
+        now = time.monotonic()
+        if self._name_lookup_not_before.get(client_id, 0.0) > now:
+            return
+        if len(self._name_lookup_not_before) > 10_000:
+            self._name_lookup_not_before.clear()
+        self._name_lookup_not_before[client_id] = now + self._name_retry_seconds
+        try:
+            name = sanitize_agent_name(await self._clients.fetch_client_name(client_id))
+            if name is not None:
+                await self.repository.set_agent_name_if_empty(agent.id, name)
+                self._name_lookup_not_before.pop(client_id, None)
+        except Exception as exc:
+            logger.warning("agent name capture failed: %s", type(exc).__name__)
 
     async def _ensure_user(
         self, workos_user_id: str, profile: UserProfile | None = None
@@ -116,6 +154,9 @@ class IdentityResolver:
         )
         if delegation.status != "active":
             raise DelegationDisconnected("assistant delegation is disconnected")
+
+        if not agent.name:
+            await self._capture_agent_name(agent)
 
         return Principal(user_id=user.id, agent_id=agent.id, delegation_id=delegation.id, via=via)
 
