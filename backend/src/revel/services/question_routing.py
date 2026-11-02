@@ -7,15 +7,18 @@ published and otherwise uses a deterministic fallback:
 
 - respondent ids must be a non-empty subset of the candidate set Revel supplied (candidates are
   already constrained by OpenFGA and owner policy; the model cannot add anyone);
-- the minimized question must be non-empty, within ``MINIMIZED_QUESTION_MAX_LENGTH``, free of
-  spoilers (occasion, gift/surprise wording, money, dates, candidate ideas or any other private
-  purpose value) and free of identity claims. Requester and acting-assistant identity is always
-  composed server-side from the authenticated principal, never from model text.
+- the minimized question must be non-empty, within ``MINIMIZED_QUESTION_MAX_LENGTH`` and pass
+  ``publishable_question_problems`` (``find_spoilers`` documents the rules): no occasion, gift,
+  money or date wording; no occasion, date, budget or notes values; no candidate-idea term the
+  requester did not write themselves in ``requested_information``; no identity claim, requester
+  name/handle or assistant name. Requester and acting-assistant identity is always composed
+  server-side from the authenticated principal, never from question text.
 
 Fallback (timeout, unavailable, HTTP error, malformed or unsafe output): every eligible
-candidate, and the normalized ``requested_information``, which ``validate_requested_information``
-has already checked with the same guard. Unsafe ``requested_information`` is rejected up front,
-before any model call, so the fallback is always publishable.
+candidate, and the normalized ``requested_information``. That text is checked up front
+(``validate_requested_information``: spoilers and identity claims, before any model call) and
+the service runs the same publish gate on whatever text is about to be published, so neither
+path can publish unchecked text.
 
 Nothing here logs or returns question text, purpose values or model output; reasons are short
 category codes (``SpoilerCategory``) safe to store in ``question_events.details``.
@@ -111,12 +114,15 @@ class PrivatePurpose(BaseModel):
         values.extend(idea for idea in self.candidate_ideas if idea)
         return values
 
-    def strict_values(self) -> list[str]:
-        """Values whose every significant token is a spoiler (occasion, date, budget, ideas)."""
+    def fixed_values(self) -> list[str]:
+        """Occasion, occasion date and budget: never allowed in respondent-facing text."""
         values = [v for v in (self.occasion, self.occasion_date) if v]
-        if self.budget is not None and not isinstance(self.budget, bool):
+        if isinstance(self.budget, str) and self.budget:
+            values.append(self.budget)
+        elif isinstance(self.budget, int | float) and not isinstance(self.budget, bool):
             values.append(str(self.budget))
-        values.extend(idea for idea in self.candidate_ideas if idea)
+            if float(self.budget).is_integer():
+                values.append(str(int(self.budget)))
         return values
 
 
@@ -289,12 +295,17 @@ _DATE = re.compile(
     r"\d{1,2}(?:st|nd|rd|th)|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?)\b"
     r"|\bmay\s+\d|\b\d{1,2}\s+may\b"
 )
-# Wording that claims or describes who is asking. Identity is composed server-side.
-_IDENTITY = re.compile(
-    r"\b(?:asks?|asking|asked|wants to know|wondering|wonders|on behalf of|requester|"
-    r"requesting|this is|i am|i'm|my name|assistant|agent|anonymous|from (?:his|her|their)|"
-    r"through (?:his|her|their)|via (?:his|her|their))\b"
+# Wording that claims or describes who is asking. Identity is composed server-side from the
+# authenticated principal, so neither the requester nor the model may write it. A bare
+# "assistant" is not a claim ("Does Alex use a voice assistant?").
+_IDENTITY_CLAIM = re.compile(
+    r"\b(?:asks|asking|on behalf of|requester|requesting|this is|i am|i'm|my name|anonymous|"
+    r"wants to know|would like to know|wondering|wonders|"
+    r"(?:through|via|from|by) (?:his|her|their|my|our) (?:assistant|agent|ai))\b"
+    r"|'s (?:assistant|agent|ai)\b"
 )
+# In model output only: the model must not mention assistants unless the requester did.
+_ASSISTANT_WORDS = re.compile(r"\b(?:assistants?|agents?)\b")
 
 _LEXICON: tuple[tuple[re.Pattern[str], SpoilerCategory], ...] = (
     (_OCCASION, SpoilerCategory.OCCASION),
@@ -373,67 +384,109 @@ def find_spoilers(
     text: str,
     purpose: PrivatePurpose,
     *,
-    all_values_by_token: bool,
-    allowed_tokens: Iterable[str] = (),
+    requested_information: str,
+    model_output: bool,
     identity_terms: Iterable[str] = (),
-    check_identity: bool = False,
 ) -> set[SpoilerCategory]:
-    """Spoiler categories found in ``text`` (empty when safe). Never returns matched text.
+    """Spoiler and identity categories found in ``text`` (empty when safe). Never returns text.
 
-    Always: the occasion/gift/money/date lexicon; every purpose value, and every word pair of
-    a value with a significant word, as a phrase; every
-    significant token of the strict values (occasion, date, budget, candidate ideas).
-    ``all_values_by_token`` also matches significant tokens of ``notes``; ``allowed_tokens``
-    are exempt from token matching (the already-validated requested information).
-    ``check_identity`` adds identity-claim wording and ``identity_terms`` (names, handles).
+    ``requested_information`` is the requester's own (normalized) question; for the up-front
+    check of that question pass it as both ``text`` and ``requested_information`` with
+    ``model_output=False``. Rules:
+
+    - Always forbidden: the occasion/gift/money/date lexicon; the occasion, occasion date and
+      budget values (as phrases, word pairs and significant tokens); notes phrases and word
+      pairs; identity claims (``_IDENTITY_CLAIM``) and ``identity_terms`` (the requester's
+      name and handle, the acting assistant's name).
+    - Candidate ideas: a phrase (the idea or a word pair of it) or significant token is
+      allowed only when the requester wrote it: the phrase occurs in ``requested_information``,
+      or every significant token of it does. Other parts of the same idea stay forbidden
+      ("binoculars" asked about: "compact" and "field guide" are not). So the requester may ask
+      whether the owner has something, and the model can never add another idea term.
+    - ``model_output`` additionally forbids significant notes tokens the requester did not use
+      and a bare "assistant"/"agent" the requester did not use.
     """
     folded = _fold(text)
+    key = _phrase_key(text)
+    requested_key = _phrase_key(requested_information)
+    allowed = tokens(requested_information)
+    text_tokens = tokens(text)
     found: set[SpoilerCategory] = set()
+
     for pattern, category in _LEXICON:
         if pattern.search(folded):
             found.add(category)
 
-    key = _phrase_key(text)
-    phrases = [*purpose.string_values()]
-    for value in purpose.string_values():
-        phrases.extend(_word_pairs(value))
-    if any(_contains_phrase(key, phrase) for phrase in phrases):
+    # Occasion, date, budget and notes: never allowed, as phrases or word pairs.
+    fixed = purpose.fixed_values()
+    notes = [purpose.notes] if purpose.notes else []
+    for value in [*fixed, *notes]:
+        if any(_contains_phrase(key, p) for p in [value, *_word_pairs(value)]):
+            found.add(SpoilerCategory.PRIVATE_PURPOSE)
+    fixed_tokens: set[str] = set()
+    for value in fixed:
+        fixed_tokens |= significant_tokens(value)
+    if text_tokens & fixed_tokens:
         found.add(SpoilerCategory.PRIVATE_PURPOSE)
 
-    text_tokens = tokens(text) - set(allowed_tokens)
-    token_sources = purpose.string_values() if all_values_by_token else purpose.strict_values()
-    leak_tokens: set[str] = set()
-    for value in token_sources:
-        leak_tokens |= significant_tokens(value)
-    if text_tokens & leak_tokens:
+    # Candidate ideas: only the parts the requester explicitly asked about.
+    def requester_wrote(phrase: str) -> bool:
+        significant = significant_tokens(phrase)
+        return _contains_phrase(requested_key, phrase) or bool(
+            significant and significant <= allowed
+        )
+
+    for idea in purpose.candidate_ideas:
+        for phrase in [idea, *_word_pairs(idea)]:
+            if _contains_phrase(key, phrase) and not requester_wrote(phrase):
+                found.add(SpoilerCategory.PRIVATE_PURPOSE)
+        if text_tokens & (significant_tokens(idea) - allowed):
+            found.add(SpoilerCategory.PRIVATE_PURPOSE)
+
+    if model_output and notes and text_tokens & (significant_tokens(notes[0]) - allowed):
         found.add(SpoilerCategory.PRIVATE_PURPOSE)
 
-    if check_identity:
-        if _IDENTITY.search(folded):
-            found.add(SpoilerCategory.IDENTITY)
-        if any(_contains_phrase(key, term) for term in identity_terms if term):
-            found.add(SpoilerCategory.IDENTITY)
+    if _IDENTITY_CLAIM.search(folded):
+        found.add(SpoilerCategory.IDENTITY)
+    if model_output and _ASSISTANT_WORDS.search(folded) and not ({"assistant", "agent"} & allowed):
+        found.add(SpoilerCategory.IDENTITY)
+    if any(_contains_phrase(key, term) for term in identity_terms if term):
+        found.add(SpoilerCategory.IDENTITY)
     return found
 
 
+_PURPOSE_MESSAGE = (
+    "requested_information looks like it reveals private purpose details (such as an "
+    "occasion, gift or surprise, budget, date or other planning context). Ask only for the "
+    "information you need and keep purpose details in private_purpose."
+)
+_IDENTITY_MESSAGE = (
+    "requested_information must not say who is asking or on whose behalf (no names, handles "
+    "or 'asks' wording). Revel shows the person's assistants your verified identity and your "
+    "assistant itself."
+)
+
+
 class UnsafeRequestedInformation(ValueError):
-    """``requested_information`` carries purpose details. The message never echoes them."""
+    """``requested_information`` carries purpose details or an identity claim. The message
+    never echoes them."""
 
     def __init__(self, categories: set[SpoilerCategory]) -> None:
         self.categories = frozenset(categories)
-        super().__init__(
-            "requested_information looks like it reveals private purpose details (such as an "
-            "occasion, gift or surprise, budget, date or candidate idea). Ask only for the "
-            "information you need and keep purpose details in private_purpose."
-        )
+        identity_only = self.categories == {SpoilerCategory.IDENTITY}
+        super().__init__(_IDENTITY_MESSAGE if identity_only else _PURPOSE_MESSAGE)
 
 
-def validate_requested_information(text: str, purpose: PrivatePurpose) -> str:
-    """Normalize and spoiler-check the requester's question; returns the normalized text.
+def validate_requested_information(
+    text: str, purpose: PrivatePurpose, identity_terms: Iterable[str] = ()
+) -> str:
+    """Normalize and check the requester's question; returns the normalized text.
 
     Raises ``ValueError`` for empty/too-long text and ``UnsafeRequestedInformation`` when it
-    carries an occasion, gift, money or date term, any purpose value, or a significant token of
-    the occasion, date, budget or candidate ideas.
+    carries an occasion, gift, money or date term, an occasion/date/budget value, a notes
+    phrase, an identity claim or the requester's/assistant's name (``find_spoilers``).
+    Candidate-idea terms the requester writes here are allowed (and become the only idea terms
+    a minimized question may contain).
     """
     normalized = normalize_question_text(text)
     if not normalized:
@@ -442,10 +495,33 @@ def validate_requested_information(text: str, purpose: PrivatePurpose) -> str:
         raise ValueError(
             f"requested_information must be at most {REQUESTED_INFORMATION_MAX_LENGTH} characters"
         )
-    categories = find_spoilers(normalized, purpose, all_values_by_token=False)
+    categories = find_spoilers(
+        normalized,
+        purpose,
+        requested_information=normalized,
+        model_output=False,
+        identity_terms=identity_terms,
+    )
     if categories:
         raise UnsafeRequestedInformation(categories)
     return normalized
+
+
+def publishable_question_problems(
+    question: str,
+    *,
+    requested_information: str,
+    purpose: PrivatePurpose,
+    identity_terms: Iterable[str],
+) -> set[SpoilerCategory]:
+    """The final gate for any text a respondent will see (model output OR fallback)."""
+    return find_spoilers(
+        question,
+        purpose,
+        requested_information=requested_information,
+        model_output=True,
+        identity_terms=identity_terms,
+    )
 
 
 # --- Routing -----------------------------------------------------------------------------------
@@ -539,13 +615,11 @@ def validate_proposal(
     question = normalize_question_text(question)
     if not question or len(question) > MINIMIZED_QUESTION_MAX_LENGTH:
         return FallbackReason.INVALID_QUESTION
-    if find_spoilers(
+    if publishable_question_problems(
         question,
-        purpose,
-        all_values_by_token=True,
-        allowed_tokens=tokens(requested_information),
+        requested_information=requested_information,
+        purpose=purpose,
         identity_terms=identity_terms,
-        check_identity=True,
     ):
         return FallbackReason.UNSAFE_QUESTION
     chosen = tuple(by_id[i] for i in dict.fromkeys(ids))

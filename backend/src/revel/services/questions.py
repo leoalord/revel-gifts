@@ -13,19 +13,26 @@ submit_question (routing ladder steps 1-2; step 3 is the lease work of #20, step
    ``trusted_circle`` tier on it (OpenFGA; blocks remove every tier). Every refusal, including
    an unknown handle, is the same ``not_permitted`` so lookup reveals nothing.
 2. ``requested_information`` is spoiler-checked against ``private_purpose`` before any model
-   call; unsafe text is rejected without echoing the purpose.
+   call, and identity-checked (claims, the requester's name/handle, the assistant's name) once
+   those are read; unsafe text is rejected without echoing it. Candidate-idea terms the
+   requester writes are allowed ("Does Alex already own binoculars?").
 3. Step 1: the requester's currently permitted profile context (``visible_claims``) is returned.
 4. Step 2: the owner's ACTIVE delegations are the candidate pool; Muse Spark (or the fallback)
-   minimizes the question and picks respondents from it (``question_routing``).
+   minimizes the question and picks respondents from it (``question_routing``). The text about
+   to be published passes ``publishable_question_problems`` whichever path produced it.
 5. One transaction: per-requester advisory lock, rate limit (``RATE_LIMIT_MAX_QUESTIONS`` per
-   ``RATE_LIMIT_WINDOW``), INSERT question, ``on_question_created`` (pre-commit, per F4's hook
-   contract), confirm each chosen delegation with ``can_respond`` (``question#respond``), INSERT
-   ``available`` assignments and ``made_available`` events, commit.
+   ``RATE_LIMIT_WINDOW``), re-check of the requester's tier and ``questions_enabled`` (closes
+   the window across the model call), INSERT question, ``on_question_created`` (pre-commit, per
+   F4's hook contract), confirm each chosen delegation with ``respond_allowed``
+   (``question#respond``; an OpenFGA error rolls back with ``service_unavailable`` rather than
+   committing an unrouted question), INSERT ``available`` assignments and ``made_available``
+   events, commit.
 
 get_updates: the calling delegation's ``available``/``claimed``/``waiting_for_user`` assignments
 on open questions. Expiry is evaluated lazily HERE: an open question past ``expires_at`` is
 marked ``expired`` (``closed_at`` set, one ``expired`` event, guarded so concurrent readers write
-it once) and never returned. ``respond`` is re-checked at read time, so a disconnected delegation
+it once) and never returned. ``respond`` is re-checked at read time (an OpenFGA outage
+is ``service_unavailable``, not an empty inbox), so a disconnected delegation
 or a changed ownership returns nothing. Each returned item gets a ``retrieved`` event.
 
 Lock order (F4 gate): these transactions write only ``questions``, ``assignments`` and
@@ -49,6 +56,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import anyio.to_thread
@@ -61,7 +69,7 @@ from revel.auth.authz import (
     AuthorizationDenied,
     PrincipalLike,
     ViewerTier,
-    question_object,
+    resolve_viewer_tier,
 )
 from revel.auth.fga import FgaClient
 from revel.auth.identity import Principal
@@ -90,6 +98,7 @@ from revel.services.question_routing import (
     PrivatePurpose,
     RoutingPath,
     UnsafeRequestedInformation,
+    publishable_question_problems,
     route_question,
     validate_requested_information,
 )
@@ -323,34 +332,42 @@ def deps_for(settings: Any) -> QuestionDeps:
 # --- Authorization helpers --------------------------------------------------------------------
 
 
-async def can_respond(
+class RespondCheckUnavailable(Exception):
+    """OpenFGA could not answer a ``respond`` check (unconfigured, timeout or error)."""
+
+
+async def respond_allowed(
     principal: PrincipalLike, question_id: UUID, *, fga: FgaClient | None = None
 ) -> bool:
-    """Whether the principal may respond to the question (``question#respond``).
-
-    Internal stand-in for F4's planned ``can_respond``; same signature so it can be swapped.
-    Fails CLOSED: unconfigured OpenFGA, a timeout or any error returns ``False`` (logged by
-    class name only).
-    """
-    client = fga if fga is not None else authz.configured_client_or_none()
-    if client is None or not client.configured:
-        logger.warning("can_respond: OpenFGA is not configured; denying")
-        return False
+    """THE seam for ``question#respond``: F4's ``authz.can_respond`` (bounded at
+    ``CHECK_TIMEOUT_SECONDS``). ``True``/``False`` is an answer; an inconsistent principal is a
+    denial (``False``). ``AuthorizationCheckTimeout``, ``FgaConfigurationError`` and any SDK
+    error are NOT a denial: they raise ``RespondCheckUnavailable``, which callers map to
+    ``service_unavailable`` (with a rollback when writing), so an outage never commits an
+    unrouted question or silently empties an inbox."""
     try:
-        return bool(
-            await authz.bounded(
-                client.check(
-                    user=authz.subject_for(principal),
-                    relation=authz.RESPOND,
-                    object=question_object(question_id),
-                )
-            )
-        )
+        return await authz.can_respond(principal, question_id, fga=fga)
     except AuthorizationDenied:
         return False
-    except Exception as exc:  # fail closed
-        logger.warning("can_respond: check failed (%s); denying", type(exc).__name__)
-        return False
+    except Exception as exc:  # SDK errors carry object ids: keep only the class name
+        logger.warning("respond check unavailable (%s)", type(exc).__name__)
+        raise RespondCheckUnavailable() from None
+
+
+def acting_agent_label(name: str | None, client_id: str | None) -> str:
+    """Display label for an assistant: its name, else the host of an https client id (DCR
+    clients such as Muse register without a name), else "Assistant".
+
+    Single seam: F2 is adding ``revel.services.identity.agent_label`` with the same behavior;
+    swap this body for it once merged.
+    """
+    if name and name.strip():
+        return name.strip()
+    if client_id:
+        parts = urlsplit(client_id)
+        if parts.scheme == "https" and parts.hostname:
+            return parts.hostname
+    return "Assistant"
 
 
 def _respondent_principal(owner_user_id: UUID, candidate: Candidate) -> Principal:
@@ -441,7 +458,7 @@ def _questions_enabled(session: Session, profile_id: UUID) -> bool:
 def _candidates(session: Session, owner_user_id: UUID) -> tuple[Candidate, ...]:
     """The owner's ACTIVE delegations, with opaque ids and non-sensitive labels."""
     rows = session.execute(
-        select(AgentDelegation.id, AgentDelegation.agent_id, Agent.name)
+        select(AgentDelegation.id, AgentDelegation.agent_id, Agent.name, Agent.oauth_client_id)
         .join(Agent, Agent.id == AgentDelegation.agent_id)
         .where(
             AgentDelegation.user_id == owner_user_id,
@@ -454,34 +471,45 @@ def _candidates(session: Session, owner_user_id: UUID) -> tuple[Candidate, ...]:
             id=f"r{index}",
             delegation_id=row.id,
             agent_id=row.agent_id,
-            label=(row.name or "assistant")[:60],
+            label=acting_agent_label(row.name, row.oauth_client_id)[:60],
         )
         for index, row in enumerate(rows, start=1)
     )
 
 
-def _identity_terms(session: Session, principal: PrincipalLike) -> tuple[str, ...]:
-    """Requester display name/handle and acting assistant name (forbidden in model text)."""
-    terms: list[str] = []
-    name = session.execute(
-        select(User.display_name).where(User.id == principal.user_id)
-    ).scalar_one_or_none()
+def _person_terms(session: Session, user_id: UUID) -> tuple[str | None, str | None]:
+    name = session.execute(select(User.display_name).where(User.id == user_id)).scalar_one_or_none()
     handle = session.execute(
-        select(Handle.handle).where(Handle.user_id == principal.user_id)
+        select(Handle.handle).where(Handle.user_id == user_id)
     ).scalar_one_or_none()
-    agent_name = (
-        session.execute(
-            select(Agent.name).where(Agent.id == principal.agent_id)
-        ).scalar_one_or_none()
-        if principal.agent_id is not None
-        else None
-    )
-    for value in (name, handle, agent_name):
-        if value:
-            terms.append(value)
+    return name, handle
+
+
+def _identity_terms(
+    session: Session, principal: PrincipalLike, owner_user_id: UUID
+) -> tuple[str, ...]:
+    """Requester display name, name parts and handle, and the acting assistant's name and label:
+    forbidden in requested_information and in any published question. Name parts the owner
+    shares (two people called Alex) are left out so the owner can still be named."""
+    name, handle = _person_terms(session, principal.user_id)
+    owner_name, owner_handle = _person_terms(session, owner_user_id)
+    owner_parts = {p.lower() for p in (owner_name or "").split()} | {(owner_handle or "").lower()}
+    terms: list[str] = [v for v in (name, handle) if v]
     if name:
-        terms.extend(part for part in name.split() if len(part) >= 3)
-    return tuple(terms)
+        terms.extend(
+            part for part in name.split() if len(part) >= 3 and part.lower() not in owner_parts
+        )
+    if principal.agent_id is not None:
+        agent = session.execute(
+            select(Agent.name, Agent.oauth_client_id).where(Agent.id == principal.agent_id)
+        ).first()
+        if agent is not None:
+            if agent.name:
+                terms.append(agent.name)
+            label = acting_agent_label(agent.name, agent.oauth_client_id)
+            if label != "Assistant":
+                terms.append(label)
+    return tuple(dict.fromkeys(t for t in terms if t.lower() not in owner_parts))
 
 
 def _recent_count(session: Session, requester_user_id: UUID) -> int:
@@ -536,6 +564,26 @@ def _authz_unavailable(exc: BaseException) -> QuestionServiceUnavailable:
     return QuestionServiceUnavailable()
 
 
+def _unsafe(exc: UnsafeRequestedInformation) -> UnsafeRequestedInformationError:
+    return UnsafeRequestedInformationError(str(exc))
+
+
+async def _requester_still_permitted(
+    session: Session, principal: PrincipalLike, profile_id: UUID, fga: FgaClient | None
+) -> bool:
+    """Write-transaction re-check (closes the window across the model call): the requester
+    still holds a requester tier and the owner's current policy still allows questions."""
+    try:
+        tier = await resolve_viewer_tier(fga, principal, profile_id)
+    except AuthorizationDenied:
+        return False
+    except Exception as exc:
+        raise _authz_unavailable(exc) from None
+    if tier not in REQUESTER_TIERS:
+        return False
+    return await _in_thread(lambda: _questions_enabled(session, profile_id))
+
+
 async def submit_question(
     principal: PrincipalLike, request: SubmitQuestionRequest, *, deps: QuestionDeps
 ) -> SubmitQuestionResponse:
@@ -547,7 +595,7 @@ async def submit_question(
             request.requested_information, purpose
         )
     except UnsafeRequestedInformation as exc:
-        raise UnsafeRequestedInformationError(str(exc)) from None
+        raise _unsafe(exc) from None
     except ValueError as exc:
         raise QuestionValidationError(str(exc)) from None
     now = deps.now()
@@ -575,7 +623,7 @@ async def submit_question(
                 target=target,
                 questions_enabled=_questions_enabled(session, target.profile_id),
                 candidates=_candidates(session, target.owner_user_id),
-                identity_terms=_identity_terms(session, principal),
+                identity_terms=_identity_terms(session, principal, target.owner_user_id),
                 recent_count=_recent_count(session, principal.user_id),
             )
 
@@ -583,6 +631,13 @@ async def submit_question(
         session.rollback()  # end the read transaction before the model call
     if not prepared.questions_enabled:
         raise QuestionNotPermitted()
+    # Identity check needs the requester's and assistant's names (read above).
+    try:
+        validate_requested_information(
+            requested_information, purpose, identity_terms=prepared.identity_terms
+        )
+    except UnsafeRequestedInformation as exc:
+        raise _unsafe(exc) from None
     if prepared.recent_count >= RATE_LIMIT_MAX_QUESTIONS:
         with deps.sessionmaker() as session:
             retry = await _in_thread(lambda: _retry_after_seconds(session, principal.user_id))
@@ -596,13 +651,22 @@ async def submit_question(
         client=deps.muse,
         identity_terms=prepared.identity_terms,
     )
+    # Final gate on the text respondents will see, whichever path produced it.
+    problems = publishable_question_problems(
+        decision.minimized_question,
+        requested_information=requested_information,
+        purpose=purpose,
+        identity_terms=prepared.identity_terms,
+    )
+    if problems:
+        raise _unsafe(UnsafeRequestedInformation(problems))
 
     # Phase C: one write transaction.
     question_id = uuid.uuid4()
     with deps.sessionmaker() as session:
         try:
 
-            def insert_question() -> None:
+            def lock_and_count() -> None:
                 session.execute(
                     select(
                         func.pg_advisory_xact_lock(
@@ -612,6 +676,14 @@ async def submit_question(
                 )
                 if _recent_count(session, principal.user_id) >= RATE_LIMIT_MAX_QUESTIONS:
                     raise QuestionRateLimited(_retry_after_seconds(session, principal.user_id))
+
+            await _in_thread(lock_and_count)
+            if not await _requester_still_permitted(
+                session, principal, target.profile_id, deps.fga
+            ):
+                raise QuestionNotPermitted()
+
+            def insert_question() -> None:
                 session.add(
                     Question(
                         id=question_id,
@@ -646,10 +718,15 @@ async def submit_question(
             if synced is None:  # OpenFGA unconfigured: never publish an unreachable question
                 raise QuestionServiceUnavailable()
 
+            # An OpenFGA error is not a denial: roll back rather than commit an unrouted question.
             confirmed: list[Candidate] = []
             for candidate in decision.respondents:
                 respondent = _respondent_principal(target.owner_user_id, candidate)
-                if await can_respond(respondent, question_id, fga=deps.fga):
+                try:
+                    allowed = await respond_allowed(respondent, question_id, fga=deps.fga)
+                except RespondCheckUnavailable as exc:
+                    raise _authz_unavailable(exc) from None
+                if allowed:
                     confirmed.append(candidate)
 
             def publish() -> None:
@@ -787,11 +864,13 @@ def _people(
     agents: dict[UUID, AgentRef] = {}
     if delegation_ids:
         rows = session.execute(
-            select(AgentDelegation.id, Agent.name)
+            select(AgentDelegation.id, Agent.name, Agent.oauth_client_id)
             .join(Agent, Agent.id == AgentDelegation.agent_id)
             .where(AgentDelegation.id.in_(delegation_ids))
         ).all()
-        agents = {row.id: AgentRef(name=row.name) for row in rows}
+        agents = {
+            row.id: AgentRef(name=acting_agent_label(row.name, row.oauth_client_id)) for row in rows
+        }
     return people, agents
 
 
@@ -821,7 +900,11 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
     # Re-check respond at read time, outside any transaction.
     permitted: list[_InboxRow] = []
     for row in live:
-        if await can_respond(principal, row.question_id, fga=deps.fga):
+        try:
+            allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
+        except RespondCheckUnavailable as exc:
+            raise _authz_unavailable(exc) from None
+        if allowed:
             permitted.append(row)
         if len(permitted) >= MAX_UPDATES:
             break

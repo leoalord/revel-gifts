@@ -29,7 +29,7 @@ from revel.services.question_routing import (
     PrivatePurpose,
     SpoilerCategory,
     UnsafeRequestedInformation,
-    find_spoilers,
+    publishable_question_problems,
     route_question,
     validate_proposal,
     validate_requested_information,
@@ -39,6 +39,7 @@ from revel.services.questions import (
     MAX_DEADLINE,
     MIN_DEADLINE,
     SubmitQuestionRequest,
+    acting_agent_label,
     resolve_deadline,
 )
 
@@ -90,10 +91,9 @@ def test_safe_requested_information(text: str) -> None:
         ("What is her budget for books?", SpoilerCategory.MONEY),
         ("What does she do on 3/14?", SpoilerCategory.DATE),
         ("Plans for next week?", SpoilerCategory.DATE),
-        ("Would she like a peony bouquet?", SpoilerCategory.PRIVATE_PURPOSE),
-        ("Does she like peonies?", SpoilerCategory.PRIVATE_PURPOSE),
-        ("Is she into CERAMICS?", SpoilerCategory.PRIVATE_PURPOSE),
         ("Anything at the lake house?", SpoilerCategory.PRIVATE_PURPOSE),
+        ("Anything for a 30th?", SpoilerCategory.DATE),
+        ("Does she like peonies for her birthday?", SpoilerCategory.OCCASION),
     ],
 )
 def test_unsafe_requested_information(text: str, category: SpoilerCategory) -> None:
@@ -101,7 +101,7 @@ def test_unsafe_requested_information(text: str, category: SpoilerCategory) -> N
         validate_requested_information(text, PP)
     assert category in exc.value.categories
     # The message never echoes the text or purpose values.
-    for value in [*PP.string_values(), text, "peon", "ceramic"]:
+    for value in [*PP.fixed_values(), text]:
         assert value.lower() not in str(exc.value).lower()
 
 
@@ -112,35 +112,171 @@ def test_requested_information_length_and_empty() -> None:
         validate_requested_information("a" * 501, PP)
 
 
-def test_notes_tokens_only_checked_for_model_output() -> None:
-    # "pottery" is in the notes: requested_information may not quote the notes as a phrase but
-    # its individual tokens are only treated as leaks in model output (unless the requester
-    # already used them).
-    assert not find_spoilers("What flowers does she like?", PP, all_values_by_token=True)
-    assert find_spoilers("Does she like pottery?", PP, all_values_by_token=True) == {
-        SpoilerCategory.PRIVATE_PURPOSE
-    }
-    assert not find_spoilers(
-        "Does she like pottery?", PP, all_values_by_token=True, allowed_tokens={"pottery"}
+DEMO_PURPOSE = PrivatePurpose(
+    occasion="birthday",
+    occasion_date="next week",
+    budget="$100",
+    candidate_ideas=["compact binoculars", "bird field guide"],
+)
+DEMO_REQUESTED = "Does Alex already own binoculars?"
+
+
+def published(text: str, requested: str = DEMO_REQUESTED, **kw: Any) -> set[SpoilerCategory]:
+    return publishable_question_problems(
+        text,
+        requested_information=requested,
+        purpose=kw.pop("purpose", DEMO_PURPOSE),
+        identity_terms=kw.pop("identity_terms", ("Sam Example", "Sam", "sam")),
     )
 
 
-def test_identity_wording_detected() -> None:
+def test_demo_question_accepted() -> None:
+    assert validate_requested_information(DEMO_REQUESTED, DEMO_PURPOSE) == DEMO_REQUESTED
+    for text in (
+        "Does Alex own binoculars?",
+        "Does Alex already own a field guide?",
+        "Does Alex own compact binoculars?",
+    ):
+        assert validate_requested_information(text, DEMO_PURPOSE) == text
+    # The fallback (requested_information itself) passes the publish gate.
+    assert not published(DEMO_REQUESTED)
+    assert not published("Does Alex have binoculars already?")
+
+
+@pytest.mark.parametrize(
+    "model_text",
+    [
+        "Does Alex already own compact binoculars?",  # adds "compact"
+        "Does Alex own binoculars or a bird field guide?",  # adds another idea
+        "Does Alex have a field guide?",
+        "Does Alex like birds?",
+        "Does Alex already own binoculars for his birthday?",
+        "Does Alex already own binoculars? It is for next week.",
+        "Does Alex own binoculars under $100?",
+        "Does Alex own binoculars under 100?",
+        "Sam asks: does Alex already own binoculars?",
+        "Does Alex's assistant know if he owns binoculars?",
+    ],
+)
+def test_demo_model_output_adding_terms_is_unsafe(model_text: str) -> None:
+    assert published(model_text)
+
+
+def test_requester_wrote_whole_idea_allows_it() -> None:
+    asked = "Does Alex own compact binoculars?"
+    assert not published("Does Alex already have compact binoculars?", requested=asked)
+    assert published("Does Alex have compact binoculars or a field guide?", requested=asked)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Does Alex own binoculars for his birthday?",
+        "Does Alex own binoculars? Need to know by next week.",
+        "Does Alex own binoculars under $100?",
+    ],
+)
+def test_demo_requested_information_with_fixed_values_rejected(text: str) -> None:
+    with pytest.raises(UnsafeRequestedInformation):
+        validate_requested_information(text, DEMO_PURPOSE)
+
+
+def test_notes_phrases_always_and_tokens_in_model_output() -> None:
+    # Notes phrases (and word pairs) are never allowed in requested_information.
+    with pytest.raises(UnsafeRequestedInformation):
+        validate_requested_information("Has she been to the lake house?", PP)
+    # A single notes word is fine in the requester's own question...
+    assert validate_requested_information("Does she like pottery?", PP)
+    # ...and in model output only when the requester used it.
+    assert not publishable_question_problems(
+        "Is she into pottery?",
+        requested_information="Does she like pottery?",
+        purpose=PP,
+        identity_terms=(),
+    )
+    assert publishable_question_problems(
+        "Is she into pottery?", requested_information=REQUESTED, purpose=PP, identity_terms=()
+    ) == {SpoilerCategory.PRIVATE_PURPOSE}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Sam, through his assistant, asks whether Alex likes hiking.",
+        "Alex's boss is asking: does Alex like hiking?",
+        "On behalf of a friend, does Alex like hiking?",
+        "This is Sam: does Alex like hiking?",
+        "I'm wondering whether Alex likes hiking.",
+        "Sam's assistant wants to know if Alex likes hiking.",
+        "Does Alex like hiking? (anonymous)",
+        "Does Alex like hiking? Sam would like to know.",
+    ],
+)
+def test_identity_claims_rejected_in_requested_information(text: str) -> None:
+    with pytest.raises(UnsafeRequestedInformation) as exc:
+        validate_requested_information(text, PP, identity_terms=("Sam Example", "Sam", "sam"))
+    assert SpoilerCategory.IDENTITY in exc.value.categories
+    assert "Sam" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "terms",
+    [("Leo Example", "Leo", "leo"), ("Muse",), ("muse.example",)],
+)
+def test_requester_and_agent_names_rejected(terms: tuple[str, ...]) -> None:
+    text = f"Does Alex like hiking? {terms[-1]}"
+    with pytest.raises(UnsafeRequestedInformation) as exc:
+        validate_requested_information(text, PP, identity_terms=terms)
+    assert exc.value.categories == {SpoilerCategory.IDENTITY}
+    assert "verified identity" in str(exc.value)
+
+
+def test_bare_assistant_is_not_an_identity_claim() -> None:
+    text = "Does Alex use a voice assistant?"
+    assert validate_requested_information(text, PP, identity_terms=("Sam",)) == text
+    assert not publishable_question_problems(
+        "Which voice assistant does Alex use?",
+        requested_information=text,
+        purpose=PP,
+        identity_terms=("Sam",),
+    )
+    # The model may not bring up assistants on its own.
+    assert SpoilerCategory.IDENTITY in publishable_question_problems(
+        "Ask the assistant which flowers Chelsea likes.",
+        requested_information=REQUESTED,
+        purpose=PP,
+        identity_terms=(),
+    )
+
+
+def test_identity_wording_detected_in_model_output() -> None:
     for text in (
         "Taylor asks which flowers she likes.",
         "On behalf of Leo, which flowers?",
         "I am Leo's assistant: which flowers?",
-    ):
-        assert SpoilerCategory.IDENTITY in find_spoilers(
-            text, PP, all_values_by_token=True, check_identity=True, identity_terms=("Leo",)
-        )
-    assert SpoilerCategory.IDENTITY in find_spoilers(
         "Does leo know which flowers?",
-        PP,
-        all_values_by_token=True,
-        check_identity=True,
-        identity_terms=("Leo Example", "Leo"),
-    )
+    ):
+        assert SpoilerCategory.IDENTITY in publishable_question_problems(
+            text,
+            requested_information=REQUESTED,
+            purpose=PP,
+            identity_terms=("Leo Example", "Leo"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "client_id", "label"),
+    [
+        ("Muse", "https://muse.example/client.json", "Muse"),
+        (None, "https://muse.example/oauth/client.json", "muse.example"),
+        ("  ", "https://muse.example/x", "muse.example"),
+        (None, "client_01ABC", "Assistant"),
+        (None, "http://insecure.example/x", "Assistant"),
+        (None, None, "Assistant"),
+    ],
+)
+def test_acting_agent_label(name: str | None, client_id: str | None, label: str) -> None:
+    assert acting_agent_label(name, client_id) == label
 
 
 def test_validate_proposal() -> None:

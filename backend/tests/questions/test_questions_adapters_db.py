@@ -240,7 +240,7 @@ async def test_mcp_submit_and_get_updates(
             "submit_question",
             {
                 "handle": "chelsea",
-                "requested_information": "Would she like a peony bouquet?",
+                "requested_information": "Would she like a peony bouquet for her birthday?",
                 "private_purpose": PURPOSE,
             },
         )

@@ -22,7 +22,7 @@ from questions_support import (
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from revel.auth.authz import delegation_tuples, public_tuples, question_object
+from revel.auth.authz import can_respond, delegation_tuples, public_tuples, question_object
 from revel.auth.identity import Principal
 from revel.db.enums import DelegationStatus
 from revel.db.models import AgentDelegation, Assignment, Question, QuestionEvent
@@ -33,7 +33,6 @@ from revel.services.questions import (
     QuestionRateLimited,
     SubmitQuestionRequest,
     UnsafeRequestedInformationError,
-    can_respond,
     get_updates,
     submit_question,
 )
@@ -543,8 +542,8 @@ async def test_unavailable_provider_uses_fallback(
     "text",
     [
         "What does Chelsea want for her birthday?",
-        "Would Chelsea like a peony bouquet?",
-        "Does she like ceramics?",
+        "Would Chelsea like a peony bouquet for her 30th birthday?",
+        "Is the lake house a good place for her?",
         "What can I get her for under $80?",
         "Any ideas for March 14?",
         "What gift would she like?",
@@ -563,7 +562,7 @@ async def test_spoiler_in_requested_information_rejected_without_echo(
         )
     assert exc.value.code == "unsafe_requested_information"
     assert "private_purpose" in exc.value.message
-    for value in [*SECRET_VALUES, "peony", "ceramics", "14"]:
+    for value in [*SECRET_VALUES, "30th", "lake"]:
         assert value.lower() not in exc.value.message.lower()
     assert fake.requests == []
     with factory() as s:

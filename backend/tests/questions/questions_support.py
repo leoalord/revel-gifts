@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -173,6 +173,8 @@ class FakeMuse:
     delay: float = 0.0
     exc: Exception | None = None
     requests: list[httpx.Request] | None = None
+    # Runs inside the model call (e.g. to change permissions while the model is "thinking").
+    on_request: Callable[[], Awaitable[None]] | None = None
 
     def client(self, *, timeout: float = 2.0, provider: str = "fireworks") -> MuseSparkClient:
         self.requests = []
@@ -180,6 +182,8 @@ class FakeMuse:
         async def handler(request: httpx.Request) -> httpx.Response:
             assert self.requests is not None
             self.requests.append(request)
+            if self.on_request is not None:
+                await self.on_request()
             if self.delay:
                 await anyio.sleep(self.delay)
             if self.exc is not None:
