@@ -16,7 +16,7 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
 | `registry.tf` | Artifact Registry `revel` (our images) and `dockerhub` (Docker Hub pull-through remote repository) |
 | `iam.tf` | Service accounts `revel-app`, `revel-openfga`; `cloudsql.client`; invoker bindings |
 | `database.tf` | Cloud SQL PostgreSQL 16 `revel-db` (db-f1-micro, Enterprise, zonal, 10 GB SSD), databases `revel` and `openfga`, users `revel_app` and `openfga` |
-| `secrets.tf` | `DATABASE_URL`, `OPENFGA_DATASTORE_URI` (generated) and empty placeholders `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FIREWORKS_API_KEY`, `META_API_KEY`; per-secret accessor grants |
+| `secrets.tf` | `DATABASE_URL`, `OPENFGA_DATASTORE_URI` (generated) and empty placeholders `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `FIREWORKS_API_KEY`, `META_API_KEY`; per-secret accessor grants. `WORKOS_CLIENT_ID` is not a secret (plain variable, see [WorkOS configuration](#workos-configuration)) |
 | `run.tf` | Cloud Run services `revel-app`, `revel-openfga`; jobs `revel-migrate`, `revel-openfga-migrate`; optional domain mapping; `google_project` data source (project number for the run.app `ALLOWED_HOSTS`) |
 | `outputs.tf` | URLs, connection name, repository path, service accounts, DNS record |
 
@@ -76,7 +76,8 @@ A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to abou
    ```
 3. Build and push the app image, then run the app migration and deploy it (below).
 4. Add secret versions, then list those secret IDs in `app_secret_env` and `terraform apply`.
-5. Custom domain (below).
+5. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401.
+6. Custom domain (below).
 
 ## Images
 
@@ -147,6 +148,49 @@ add_secret WORKOS_API_KEY
 Values with inline comments (`KEY=abc # note`) are not handled; keep `.env` lines to `KEY=value`.
 
 Then add the secret ID to `app_secret_env` in `terraform.tfvars` and apply. Cloud Run refuses to deploy a revision that references a secret with no versions, so only list secrets that have one. The env var name equals the secret ID.
+
+## WorkOS configuration
+
+Names match `backend/src/revel/settings.py`. Non-secret values are Terraform variables (plain env vars on `revel-app`); secrets go through Secret Manager and `app_secret_env`.
+
+| Env var on `revel-app` | Source | Default | Used by |
+| --- | --- | --- | --- |
+| `WORKOS_AUTHKIT_DOMAIN` | variable `workos_authkit_domain` (set only when non-empty) | unset | MCP auth: token issuer and JWKS |
+| `WORKOS_TOKEN_AUDIENCE` | always `public_base_url` + `mcp_path` | `https://api.revel.gifts/mcp` | MCP auth: expected token audience (`Settings.mcp_resource_url`) and RFC 9728 resource metadata |
+| `WORKOS_API_KEY` | secret, via `app_secret_env` | not wired | MCP auth: profile lookup on a user's first sign-in |
+| `WORKOS_CLIENT_ID` | variable `workos_client_id` (set only when non-empty) | unset | Browser session (F2, in progress) |
+| `WORKOS_REDIRECT_URI` | variable `workos_redirect_uri`; empty means `public_base_url` + `/auth/callback` | `https://api.revel.gifts/auth/callback` | Browser session (F2, in progress); register it in WorkOS |
+| `WORKOS_COOKIE_PASSWORD` | secret, via `app_secret_env` | not wired | Browser session (F2, in progress) |
+
+**`/mcp` fails closed until the AuthKit domain is set.** While `WORKOS_AUTHKIT_DOMAIN` is unset (or a placeholder), every `/mcp` and `/me` request gets 401. `WORKOS_TOKEN_AUDIENCE` is set explicitly so the audience stays `https://api.revel.gifts/mcp` even when the app is reached on its `run.app` host; it must equal the resource indicator configured in WorkOS. Changing `public_base_url` or `mcp_path` changes it too.
+
+Set the AuthKit domain (public, from the WorkOS dashboard, e.g. `https://<tenant>.authkit.app`, no path) in `terraform.tfvars` and re-apply:
+
+```hcl
+workos_authkit_domain = "https://<tenant>.authkit.app"
+```
+
+```sh
+terraform plan -out=rg7.tfplan    # expect revel-app to update in place with WORKOS_AUTHKIT_DOMAIN
+terraform apply rg7.tfplan        # only after approval
+```
+
+Set `workos_client_id = "client_..."` the same way when the browser session needs it.
+
+**Secrets.** Add versions first (Cloud Run rejects a revision that references a secret with no versions), then list them in `app_secret_env` and re-apply:
+
+```sh
+add_secret WORKOS_API_KEY        # helper from the Secrets section; reads .env without printing
+# Cookie password: random, 32+ characters, never printed or stored locally
+openssl rand -base64 48 | tr -d '\n' | gcloud secrets versions add WORKOS_COOKIE_PASSWORD --data-file=- >/dev/null \
+  && echo "WORKOS_COOKIE_PASSWORD: version added"
+```
+
+```hcl
+app_secret_env = ["WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD"]
+```
+
+List only secrets that have a version (for example `["WORKOS_API_KEY"]` alone for MCP auth before the browser session is ready). `openssl rand -base64 48` produces 64 characters. After rotating a secret, deploy a new revision so every instance reads the new `latest` version.
 
 ## Custom domain (api.revel.gifts)
 
