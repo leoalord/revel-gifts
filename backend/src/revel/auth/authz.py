@@ -42,9 +42,17 @@ WHEN to call a hook, relative to the caller's commit, is part of its contract:
     for transactions holding a lock on those tables; a writer that deletes the tuple first and
     writes the row afterwards can be overtaken by a reconcile that re-grants from its earlier
     snapshot, reads the row as unchanged and leaves the revoked access live until the next
-    reconcile. ``SELECT ... FOR UPDATE`` before the hook is also waited for (the barrier is
-    EXCLUSIVE), but an advisory lock, or no lock, is not: neither orders a writer against
-    reconcile. Required order:
+    reconcile. On ``connection_requests`` and ``contribution_policies`` a ``SELECT ... FOR
+    UPDATE`` before the hook is also waited for (EXCLUSIVE there); on ``agent_delegations`` it
+    is not (SHARE there, so foreign-key checks naming a delegation never wait or deadlock), and
+    an advisory lock, or no lock, never is: those writers rely entirely on this rule.
+
+    Lock-order rules (so the barrier, which locks ``connection_requests``, then
+    ``contribution_policies``, then ``agent_delegations``, cannot deadlock with a writer): do
+    not write or row-lock ``connection_requests`` in a transaction AFTER writing
+    ``contribution_policies``, ``claims`` or ``claim_events`` (do it first, or separately); and
+    a transaction that writes ``agent_delegations`` writes nothing else (F2's do). Required
+    order:
 
     - F6 approve or tier change (``connection_requests``): UPDATE the row (status, tier) ->
       ``on_connection_tier_changing(tier=new)`` -> commit -> ``on_connection_granted(tier=new)``.

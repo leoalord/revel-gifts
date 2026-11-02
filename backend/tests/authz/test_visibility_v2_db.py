@@ -634,6 +634,187 @@ async def test_plain_select_is_not_queued_behind_a_waiting_barrier(
     assert summary.connection_tuples == 1
 
 
+# --- Barrier lock order: no deadlock with FK-checking writers ---------------------------------
+
+
+def add_claim_citing(
+    session: Session, profile_id: object, delegation_id: object, policy_version: int
+) -> None:
+    """A claim naming a delegation and a policy version: its FK checks take ROW SHARE on
+    ``agent_delegations`` and ``contribution_policies`` (as F5's contribution writes will)."""
+    session.execute(
+        text(
+            "INSERT INTO claims (profile_id, category, statement, audience, evidence_type, "
+            "status, contributor_user_id, contributor_delegation_id, contributed_via, "
+            "policy_version) SELECT :p, 'likes', 'synthetic: cited', 'only_me', 'explicit', "
+            "'active', d.user_id, d.id, 'mcp', :v FROM agent_delegations d WHERE d.id = :d"
+        ),
+        {"p": profile_id, "d": delegation_id, "v": policy_version},
+    )
+
+
+def wait_until(factory: sessionmaker[Session], table: str, done: threading.Event) -> None:
+    """Block until a lock request on ``table`` is waiting, or ``done`` is set."""
+    deadline = time.monotonic() + 5
+    with factory() as probe:
+        while not done.is_set():
+            if probe.execute(WAITING_LOCK, {"table": table}).scalar_one():
+                return
+            probe.rollback()
+            assert time.monotonic() < deadline, f"nothing ever waited on {table}"
+            threading.Event().wait(0.02)
+
+
+def start_barrier(factory: sessionmaker[Session]) -> tuple[threading.Thread, dict, threading.Event]:
+    outcome: dict[str, str] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            fga_reconcile._barrier(lambda: factory, lambda fresh: None)
+            outcome["barrier"] = "ok"
+        except Exception as exc:  # recorded for the assertion
+            outcome["barrier"] = type(exc).__name__ + ": " + str(exc).splitlines()[0]
+        done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcome, done
+
+
+def run_writer(
+    factory: sessionmaker[Session], outcome: dict, steps: "list[object]"
+) -> threading.Thread:
+    """Run ``steps`` (callables taking the session) in one transaction; record the outcome."""
+
+    def run() -> None:
+        try:
+            with factory() as writer, writer.begin():
+                for step in steps:
+                    step(writer)  # type: ignore[operator]
+            outcome["writer"] = "committed"
+        except Exception as exc:  # recorded for the assertion
+            outcome["writer"] = type(exc).__name__ + ": " + str(exc).splitlines()[0]
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def claim_count(factory: sessionmaker[Session]) -> int:
+    with factory() as probe:
+        return probe.execute(text("SELECT count(*) FROM claims")).scalar_one()
+
+
+async def test_policy_writer_citing_a_delegation_does_not_deadlock_with_the_barrier(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """Reviewer B2: a transaction INSERTs a policy version, the barrier queues on
+    ``contribution_policies``, then the transaction inserts a claim naming a delegation. With
+    EXCLUSIVE on ``agent_delegations`` (taken first) the claim's FK check waited on the barrier
+    while the barrier waited on the policy: a deadlock that could abort the user's request."""
+    pid, delegation_id = people.profile.id, people.delegations["alex"].id
+    add_policy(session, people.profile, 1)
+    session.commit()
+    policy_held, outcome = threading.Event(), {}
+    barrier: list[tuple[threading.Thread, dict, threading.Event]] = []
+
+    def insert_policy(w: Session) -> None:
+        add_policy(w, w.get(Profile, pid), 2)  # type: ignore[arg-type]
+        policy_held.set()
+
+    def cite_after_barrier_queues(w: Session) -> None:
+        assert barrier_started.wait(5)
+        wait_until(factory, "contribution_policies", barrier[0][2])
+        add_claim_citing(w, pid, delegation_id, 1)
+
+    barrier_started = threading.Event()
+    writer = run_writer(factory, outcome, [insert_policy, cite_after_barrier_queues])
+    assert policy_held.wait(5)
+    barrier.append(start_barrier(factory))
+    barrier_started.set()
+    writer.join(10)
+    barrier[0][0].join(10)
+    outcome.update(barrier[0][1])
+    assert outcome == {"writer": "committed", "barrier": "ok"}, outcome
+    assert claim_count(factory) == 1
+
+
+async def test_delegation_reference_then_claim_does_not_deadlock_with_the_barrier(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """A transaction that first references a delegation (the FK check of a question, answer or
+    assignment insert: ``FOR KEY SHARE``) and then inserts a claim citing a policy. SHARE on
+    ``agent_delegations`` admits the reference, so the barrier never waits on it; EXCLUSIVE
+    (even taken last) would hold policies while waiting on the reference: a deadlock."""
+    pid, delegation_id = people.profile.id, people.delegations["alex"].id
+    add_policy(session, people.profile, 1)
+    session.commit()
+    referenced, outcome = threading.Event(), {}
+    barrier: list[tuple[threading.Thread, dict, threading.Event]] = []
+    barrier_started = threading.Event()
+
+    def reference_delegation(w: Session) -> None:
+        w.execute(
+            text("SELECT 1 FROM agent_delegations WHERE id = :d FOR KEY SHARE"),
+            {"d": delegation_id},
+        )
+        referenced.set()
+
+    def cite_after_barrier(w: Session) -> None:
+        assert barrier_started.wait(5)
+        wait_until(factory, "agent_delegations", barrier[0][2])  # returns once it finished
+        add_claim_citing(w, pid, delegation_id, 1)
+
+    writer = run_writer(factory, outcome, [reference_delegation, cite_after_barrier])
+    assert referenced.wait(5)
+    barrier.append(start_barrier(factory))
+    barrier_started.set()
+    writer.join(10)
+    barrier[0][0].join(10)
+    outcome.update(barrier[0][1])
+    assert outcome == {"writer": "committed", "barrier": "ok"}, outcome
+    assert claim_count(factory) == 1
+
+
+async def test_disconnect_is_not_held_while_the_barrier_waits_on_policies(
+    factory: sessionmaker[Session], session: Session, people: People
+) -> None:
+    """``agent_delegations`` is locked LAST: while the barrier waits on an in-flight policy
+    writer it holds nothing there, so a disconnect (revocation) is not delayed by it."""
+    pid = people.profile.id
+    gone = people.delegations["cal"]
+    add_policy(session, people.profile, 1)
+    session.commit()
+    release, outcome = threading.Event(), {}
+    policy_held = threading.Event()
+
+    def insert_policy_and_hold(w: Session) -> None:
+        add_policy(w, w.get(Profile, pid), 2)  # type: ignore[arg-type]
+        policy_held.set()
+        assert release.wait(5)
+
+    writer = run_writer(factory, outcome, [insert_policy_and_hold])
+    assert policy_held.wait(5)
+    thread, barrier_outcome, barrier_done = start_barrier(factory)
+    try:
+        wait_until(factory, "contribution_policies", barrier_done)
+        began = time.monotonic()
+        with factory() as tx, tx.begin():
+            tx.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            tx.execute(
+                update(AgentDelegation)
+                .where(AgentDelegation.id == gone.id)
+                .values(status="disconnected", disconnected_at=datetime.now(UTC))
+            )
+        assert time.monotonic() - began < 0.4
+    finally:
+        release.set()
+        writer.join(10)
+        thread.join(10)
+    assert outcome == {"writer": "committed"} and barrier_outcome == {"barrier": "ok"}
+
+
 async def test_prune_covers_v2_relations(
     factory: sessionmaker[Session], session: Session, fake_fga: FakeFga, people: People
 ) -> None:
@@ -669,9 +850,13 @@ WAITING_BARRIER_LOCK = text(
     "WHERE c.relname = 'connection_requests' AND l.mode = 'ExclusiveLock' AND NOT l.granted"
 )
 HELD_BARRIER_LOCK = text(
+    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE l.granted AND ("
+    "(c.relname IN ('connection_requests', 'contribution_policies') AND l.mode = 'ExclusiveLock')"
+    " OR (c.relname = 'agent_delegations' AND l.mode = 'ShareLock'))"
+)
+WAITING_LOCK = text(
     "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
-    "WHERE c.relname IN ('agent_delegations', 'connection_requests', 'contribution_policies') "
-    "AND l.mode = 'ExclusiveLock' AND l.granted"
+    "WHERE c.relname = :table AND NOT l.granted"
 )
 
 

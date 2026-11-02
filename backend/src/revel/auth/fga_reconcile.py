@@ -23,21 +23,25 @@ Run explicitly (idempotent; never at app startup)::
    ``blocked`` pair (the target blocked the requester) gets ``profile:<target>#blocked@user:
    <requester>`` and loses its tiers; a profile whose current policy has no Public opt-in loses
    ``public_viewer``.
-4. Barrier: a short transaction takes EXCLUSIVE locks on ``agent_delegations``,
-   ``connection_requests`` and ``contribution_policies`` (waiting for in-flight disconnects,
-   connection changes and policy versions to commit, and holding new ones back), re-reads them
-   and, while still holding the locks, re-applies the exact current state of every delegation,
-   pair and policy that changed since the snapshot. A change committed after step 1 therefore
-   cannot be overwritten by steps 2-3, and one that starts later runs its hook after them.
+4. Barrier: a short transaction locks ``connection_requests`` (EXCLUSIVE),
+   ``contribution_policies`` (EXCLUSIVE) and ``agent_delegations`` (SHARE), in that order
+   (waiting for in-flight connection changes, policy versions and disconnects to commit, and
+   holding new ones back), re-reads them and, while still holding the locks, re-applies the
+   exact current state of every delegation, pair and policy that changed since the snapshot. A
+   change committed after step 1 therefore cannot be overwritten by steps 2-3, and one that
+   starts later runs its hook after them.
 
    This relies on the hook-ordering contract (``authz`` module docstring): a writer runs its
    UPDATE/INSERT on these tables BEFORE awaiting a revoke hook, so by the time its tuple is
-   deleted it holds ROW EXCLUSIVE and the barrier waits for its commit. EXCLUSIVE (rather than
-   SHARE) also waits for writers holding only ROW SHARE (``SELECT ... FOR UPDATE``) who called
-   the hook before their UPDATE. A writer holding no lock on these tables at all (none, or only
-   an advisory lock) when it runs a revoke hook cannot be seen by any table lock: it MUST follow
-   the contract. Plain SELECTs (ACCESS SHARE) are never blocked; inserts into tables with a
-   foreign key to these (their ``FOR KEY SHARE`` check takes ROW SHARE) wait like writers.
+   deleted it holds ROW EXCLUSIVE and the barrier waits for its commit. On connection requests
+   and policies, EXCLUSIVE also waits for writers holding only ROW SHARE (``SELECT ... FOR
+   UPDATE``) who called the hook before their UPDATE; on ``agent_delegations`` (SHARE) such a
+   writer relies on the contract, which F2's disconnect follows. A writer holding no lock on
+   these tables (none, or only an advisory lock) when it runs a revoke hook cannot be seen by
+   any table lock: it MUST follow the contract. Plain SELECTs are never blocked; inserts into
+   claims/claim_events (FK to ``contribution_policies``) wait like writers, inserts naming only
+   a delegation do not. ``_barrier`` explains the modes and why the lock order cannot deadlock
+   with the current schema.
 
    Postgres lock queues are FIFO, so app writers queue behind a waiting barrier. The barrier is
    therefore bounded: the lock wait (``lock_timeout``) and every statement under it
@@ -63,6 +67,7 @@ import asyncio
 import logging
 import random
 import sys
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -436,29 +441,60 @@ async def _grant_and_revoke(
     return counts
 
 
-def _barrier(factory: SessionFactory, apply: Callable[[Snapshot], None]) -> Snapshot:
-    """Lock the mutable tables in EXCLUSIVE mode, read them fresh and run ``apply`` while the
-    locks are held. Any raise (lock or statement timeout, ``apply`` timeout) rolls back and
-    releases the locks.
+# The barrier's table locks, taken one statement at a time IN THIS ORDER (see ``_barrier``).
+BARRIER_LOCKS: tuple[tuple[str, str], ...] = (
+    ("connection_requests", "EXCLUSIVE"),
+    ("contribution_policies", "EXCLUSIVE"),
+    ("agent_delegations", "SHARE"),
+)
 
-    EXCLUSIVE waits for, and holds back, every transaction holding ROW EXCLUSIVE (an UPDATE,
-    INSERT or DELETE on the table) or ROW SHARE (``SELECT ... FOR UPDATE/FOR SHARE``, including
-    the ``FOR KEY SHARE`` of a foreign-key check from a referencing insert). It still admits
-    ACCESS SHARE, so plain SELECTs (token resolution, visibility reads) never wait on it. SHARE
-    was not enough: a writer that row-locked with FOR UPDATE and awaited its revoke hook before
-    its UPDATE held only ROW SHARE, so the barrier read its row as unchanged and kept the
-    snapshot's stale grant. A writer holding no table lock (only an advisory lock, or none)
-    before its hook is still invisible here; the hook-ordering contract in ``authz`` (row write
-    BEFORE any revoke hook) covers that case. Not read-only (the lock needs it)."""
+
+def _barrier(factory: SessionFactory, apply: Callable[[Snapshot], None]) -> Snapshot:
+    """Lock the mutable tables (``BARRIER_LOCKS``), read them fresh and run ``apply`` while the
+    locks are held. Any raise (lock or statement timeout, ``apply`` timeout) rolls back and
+    releases the locks. Not read-only (the locks need it).
+
+    Modes. EXCLUSIVE on ``connection_requests`` and ``contribution_policies`` waits for, and
+    holds back, every transaction holding ROW EXCLUSIVE (UPDATE/INSERT/DELETE) or ROW SHARE
+    (``SELECT ... FOR UPDATE/FOR SHARE``) on them, so a writer that row-locked with FOR UPDATE
+    and awaited its revoke hook before its UPDATE is still waited for. ``agent_delegations``
+    gets only SHARE (waits for ROW EXCLUSIVE writers, not ROW SHARE): seven tables (claims,
+    claim_events, connection_requests, questions, assignments, question_events, answers) have
+    foreign keys to it, and EXCLUSIVE there would hold back, and deadlock with, every insert
+    whose FK check (``FOR KEY SHARE``, ROW SHARE) names a delegation. F2's disconnect UPDATEs
+    the row before its hook, so SHARE suffices under the contract. Every mode admits ACCESS
+    SHARE: plain SELECTs never wait.
+
+    Order, and why no deadlock remains with the current schema (FKs as of migration 0003; a
+    cycle needs a writer holding a lock that conflicts with the one the barrier waits for,
+    then requesting one that conflicts with a lock the barrier already holds):
+
+    1. ``connection_requests``: the barrier holds nothing yet, so waiting cannot close a cycle.
+    2. ``contribution_policies``, holding (1): a writer holding a lock here (a policy INSERT,
+       or the ROW SHARE of a claims/claim_events FK check) would have to then request a lock
+       conflicting with EXCLUSIVE on ``connection_requests``. No table has a foreign key to
+       ``connection_requests``, so only a transaction that writes or row-locks a connection
+       request AFTER writing policies or claims could; F5/F6 must not combine those in that
+       order (connection request first, or separate transactions). Claim inserts naming a
+       delegation (FK to ``agent_delegations``) proceed: the barrier holds nothing there yet.
+    3. ``agent_delegations`` SHARE, holding (1) and (2): only a writer holding ROW EXCLUSIVE
+       on ``agent_delegations`` (a delegation INSERT/UPDATE) blocks it, and would have to then
+       touch connection requests, policies, claims or claim_events. F2's connect and disconnect
+       transactions write only ``agent_delegations`` (hooks do no database access). FK checks
+       from other inserts take ROW SHARE, which SHARE admits, so they never block step 3.
+
+    Bounds: ``BARRIER_LOCK_TIMEOUT_SECONDS`` covers all three LOCK statements together (each
+    gets the time remaining), then every statement under the locks."""
     timeout_ms = int(BARRIER_LOCK_TIMEOUT_SECONDS * 1000)
+    deadline = time.monotonic() + BARRIER_LOCK_TIMEOUT_SECONDS
     with factory()() as session, session.begin():
         connection = session.connection()
-        connection.exec_driver_sql(f"SET LOCAL lock_timeout = '{timeout_ms}ms'")
+        for table, mode in BARRIER_LOCKS:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            connection.exec_driver_sql(f"SET LOCAL lock_timeout = '{remaining_ms}ms'")
+            connection.exec_driver_sql(f"SET LOCAL statement_timeout = '{remaining_ms}ms'")
+            connection.exec_driver_sql(f"LOCK TABLE {table} IN {mode} MODE")
         connection.exec_driver_sql(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
-        connection.exec_driver_sql(
-            "LOCK TABLE agent_delegations, connection_requests, contribution_policies "
-            "IN EXCLUSIVE MODE"
-        )
         fresh = read_snapshot(session, questions=False)
         apply(fresh)
         return fresh
