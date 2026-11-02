@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from revel.api import routers
+from revel.auth.authz import configure_authz, reset_authz
+from revel.auth.fga import create_fga_client
 from revel.auth.mcp_auth import mcp_auth_kwargs
 from revel.mcp.server import build_mcp_asgi_app, create_mcp_server
 from revel.settings import Settings, get_settings
@@ -23,10 +25,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mcp_app = build_mcp_asgi_app(mcp_server, settings)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # The MCP sub-app's own lifespan is not run; the parent owns MCP startup/shutdown.
-        async with mcp_server.session_manager.run():
-            yield
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # The OpenFGA client opens an HTTP session, so it is created inside the event loop.
+        # configure_authz makes no network calls, so the app boots before fga_bootstrap has run.
+        app.state.fga = create_fga_client(settings)
+        configure_authz(app.state.fga)
+        try:
+            # The MCP sub-app's own lifespan is not run; the parent owns MCP startup/shutdown.
+            async with mcp_server.session_manager.run():
+                yield
+        finally:
+            reset_authz(app.state.fga)
+            await app.state.fga.close()
 
     app = FastAPI(title="Revel Gifts", lifespan=lifespan)
     app.state.settings = settings
