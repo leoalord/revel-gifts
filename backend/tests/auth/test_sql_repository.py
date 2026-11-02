@@ -53,7 +53,7 @@ def migrated_engine() -> Iterator[Engine]:
 @pytest.fixture
 def sql_repo(migrated_engine: Engine) -> SqlAlchemyIdentityRepository:
     with migrated_engine.begin() as conn:
-        conn.execute(text("TRUNCATE agent_delegations, agents, users"))
+        conn.execute(text("TRUNCATE agent_delegations, agents, users CASCADE"))
     # Pooled engine so concurrent worker threads get separate connections.
     engine = create_engine(DATABASE_URL, pool_size=10)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
