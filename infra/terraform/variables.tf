@@ -71,6 +71,65 @@ variable "workos_redirect_uri" {
   }
 }
 
+variable "fireworks_model" {
+  description = "Fireworks model ID for Muse Spark (e.g. accounts/fireworks/models/<model>). Not a secret. Sets FIREWORKS_MODEL on revel-app only when non-empty. FIREWORKS_API_KEY is a secret, via app_secret_env."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !can(regex("[[:space:]]", var.fireworks_model))
+    error_message = "fireworks_model must not contain whitespace."
+  }
+
+  validation {
+    condition     = !strcontains(lower(var.fireworks_model), "replace-with")
+    error_message = "fireworks_model still contains the example placeholder (replace-with-...). Set the real Fireworks model ID, or leave it empty."
+  }
+}
+
+variable "meta_model" {
+  description = "Meta model ID for Muse Spark when muse_spark_provider is \"meta\". Not a secret. Sets META_MODEL on revel-app only when non-empty. META_API_KEY is a secret, via app_secret_env."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !can(regex("[[:space:]]", var.meta_model))
+    error_message = "meta_model must not contain whitespace."
+  }
+
+  validation {
+    condition     = !strcontains(lower(var.meta_model), "replace-with")
+    error_message = "meta_model still contains the example placeholder (replace-with-...). Set the real Meta model ID, or leave it empty."
+  }
+}
+
+variable "muse_spark_provider" {
+  description = "Muse Spark provider (MUSE_SPARK_PROVIDER): \"fireworks\" or \"meta\". Empty leaves it unset, so the app default (fireworks) applies. Sets MUSE_SPARK_PROVIDER on revel-app only when non-empty."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "fireworks", "meta"], var.muse_spark_provider)
+    error_message = "muse_spark_provider must be empty, \"fireworks\" or \"meta\"."
+  }
+}
+
+variable "muse_spark_timeout_seconds" {
+  description = "Muse Spark request timeout in seconds (MUSE_SPARK_TIMEOUT_SECONDS), as a string, e.g. \"8\" or \"12.5\". Empty leaves it unset, so the app default (8.0) applies. Sets the env var on revel-app only when non-empty."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.muse_spark_timeout_seconds == "" || can(regex("^[0-9]+(\\.[0-9]+)?$", var.muse_spark_timeout_seconds))
+    error_message = "muse_spark_timeout_seconds must be empty or a positive number of seconds, e.g. \"8\" or \"12.5\"."
+  }
+
+  validation {
+    condition     = var.muse_spark_timeout_seconds == "" || try(tonumber(var.muse_spark_timeout_seconds) > 0, false)
+    error_message = "muse_spark_timeout_seconds must be greater than zero."
+  }
+}
+
 variable "openfga_store_id" {
   description = "OpenFGA store ID (a 26-character ULID) printed by `revel.auth.fga_bootstrap`. Not a secret. Sets OPENFGA_STORE_ID on revel-app and revel-fga-admin only when non-empty."
   type        = string

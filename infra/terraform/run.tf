@@ -207,6 +207,11 @@ locals {
     var.workos_authkit_domain == "" ? {} : { WORKOS_AUTHKIT_DOMAIN = var.workos_authkit_domain },
     # Public WorkOS client ID (not a secret), for the browser session.
     var.workos_client_id == "" ? {} : { WORKOS_CLIENT_ID = var.workos_client_id },
+    # Muse Spark (non-secret; API keys come from app_secret_env). Unset values use the app defaults.
+    var.fireworks_model == "" ? {} : { FIREWORKS_MODEL = var.fireworks_model },
+    var.meta_model == "" ? {} : { META_MODEL = var.meta_model },
+    var.muse_spark_provider == "" ? {} : { MUSE_SPARK_PROVIDER = var.muse_spark_provider },
+    var.muse_spark_timeout_seconds == "" ? {} : { MUSE_SPARK_TIMEOUT_SECONDS = var.muse_spark_timeout_seconds },
     local.openfga_ids_env,
   )
 

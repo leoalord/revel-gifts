@@ -274,6 +274,27 @@ app_secret_env = ["WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD"]
 
 List only secrets that have a version (for example `["WORKOS_API_KEY"]` alone for MCP auth before the browser session is ready). `openssl rand -base64 48` produces 64 characters. After rotating a secret, deploy a new revision so every instance reads the new `latest` version.
 
+## Muse Spark configuration
+
+Non-secret Muse Spark settings are Terraform variables; each sets its env var on `revel-app` only (not the jobs) and only when non-empty, so empty values fall back to the defaults in `backend/src/revel/settings.py`.
+
+| Env var on `revel-app` | Source | App default when unset |
+| --- | --- | --- |
+| `FIREWORKS_MODEL` | variable `fireworks_model` | none |
+| `META_MODEL` | variable `meta_model` | none |
+| `MUSE_SPARK_PROVIDER` | variable `muse_spark_provider` (`fireworks` or `meta`) | `fireworks` |
+| `MUSE_SPARK_TIMEOUT_SECONDS` | variable `muse_spark_timeout_seconds` (string, e.g. `"8"`) | `8.0` |
+| `FIREWORKS_API_KEY` | secret, via `app_secret_env` | not wired |
+| `META_API_KEY` | secret, via `app_secret_env` | not wired |
+
+```hcl
+fireworks_model     = "accounts/fireworks/models/<model>"
+muse_spark_provider = "fireworks"
+app_secret_env      = ["WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD", "FIREWORKS_API_KEY"]
+```
+
+Add the `FIREWORKS_API_KEY` version first (`add_secret FIREWORKS_API_KEY`). Provider `meta` needs a `META_API_KEY` secret version and `META_API_KEY` in `app_secret_env` (plus `meta_model`) before it works in production. Plan fails validation if a model variable still contains the example `replace-with-...` placeholder.
+
 ## Custom domain (api.revel.gifts)
 
 Needs user steps; DNS is not pre-approved.
