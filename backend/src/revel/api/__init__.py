@@ -5,5 +5,6 @@ from fastapi import APIRouter
 
 def routers() -> list[APIRouter]:
     from revel.auth.router import router as auth_router
+    from revel.guidance import router as guidance_router
 
-    return [auth_router]
+    return [auth_router, guidance_router()]
