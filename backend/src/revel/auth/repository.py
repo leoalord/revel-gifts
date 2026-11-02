@@ -21,7 +21,7 @@ from uuid import UUID
 import anyio
 import anyio.from_thread
 import anyio.to_thread
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -56,6 +56,7 @@ class DelegationRecord:
 
 R = TypeVar("R")
 OnCreated = Callable[[R], Awaitable[None]]
+OnDisconnected = Callable[[DelegationRecord], Awaitable[None]]
 
 
 class IdentityRepository(Protocol):
@@ -79,6 +80,14 @@ class IdentityRepository(Protocol):
         *,
         on_created: OnCreated[DelegationRecord] | None = None,
     ) -> tuple[DelegationRecord, bool]: ...
+
+    async def disconnect_delegation(
+        self,
+        *,
+        user_id: UUID,
+        delegation_id: UUID,
+        on_disconnected: OnDisconnected | None = None,
+    ) -> bool: ...
 
     async def get_user(self, user_id: UUID) -> UserRecord | None: ...
 
@@ -261,6 +270,59 @@ class SqlAlchemyIdentityRepository:
             if created and on_created is not None:
                 anyio.from_thread.run(on_created, record)
         return record, created
+
+    def _disconnect_delegation(
+        self,
+        user_id: UUID,
+        delegation_id: UUID,
+        on_disconnected: OnDisconnected | None,
+    ) -> bool:
+        with self._session() as session, session.begin():
+            # Only an active row owned by ``user_id`` changes. The row lock is held until
+            # commit (including while the hook runs), so a concurrent disconnect waits and
+            # then matches nothing. Sets disconnected_at with the status (F3's CHECK).
+            stmt = (
+                update(AgentDelegation)
+                .where(
+                    AgentDelegation.id == delegation_id,
+                    AgentDelegation.user_id == user_id,
+                    AgentDelegation.status == DelegationStatus.ACTIVE.value,
+                )
+                .values(
+                    status=DelegationStatus.DISCONNECTED.value,
+                    disconnected_at=func.now(),
+                    updated_at=func.now(),
+                )
+                .returning(AgentDelegation.agent_id)
+                .execution_options(synchronize_session=False)
+            )
+            agent_id = session.execute(stmt).scalar_one_or_none()
+            if agent_id is None:
+                return False
+            if on_disconnected is not None:
+                record = DelegationRecord(
+                    id=delegation_id, user_id=user_id, agent_id=agent_id, status="disconnected"
+                )
+                # A raise here rolls the update back and propagates.
+                anyio.from_thread.run(on_disconnected, record)
+        return True
+
+    async def disconnect_delegation(
+        self,
+        *,
+        user_id: UUID,
+        delegation_id: UUID,
+        on_disconnected: OnDisconnected | None = None,
+    ) -> bool:
+        """Disconnect an active delegation owned by ``user_id``.
+
+        Returns ``True`` if this call disconnected it; ``False`` if it is already
+        disconnected, owned by someone else, or unknown (no hook runs then).
+        ``on_disconnected`` runs inside the transaction; if it raises, the row stays active.
+        """
+        return await anyio.to_thread.run_sync(
+            self._disconnect_delegation, user_id, delegation_id, on_disconnected
+        )
 
     async def ensure_user(
         self,

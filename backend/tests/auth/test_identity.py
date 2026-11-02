@@ -321,3 +321,92 @@ async def test_resolve_user_uses_authz_bridge_on_insert_only(monkeypatch):
     principal = await resolver.resolve_user("user_alice")
     await resolver.resolve_user("user_alice")
     assert calls == [("user", {"user_id": principal.user_id})]
+
+
+# --- disconnect_delegation (#14) ---------------------------------------------------------
+
+
+async def _connected(resolver: IdentityResolver, sub: str = "user_alice"):
+    return await resolver.resolve(_token(sub=sub), via="mcp")
+
+
+async def test_disconnect_delegation_once_with_hook(
+    repo: InMemoryIdentityRepository, hooks: RecordingHooks
+):
+    resolver = IdentityResolver(repo, hooks=hooks)
+    p = await _connected(resolver)
+    hooks.calls.clear()
+    assert await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    assert repo.delegations[p.delegation_id].status == "disconnected"
+    assert hooks.calls == [
+        (
+            "on_agent_disconnected",
+            {"user_id": p.user_id, "delegation_id": p.delegation_id, "agent_id": p.agent_id},
+        )
+    ]
+    # Second call: no-op, no hook.
+    assert not await resolver.disconnect_delegation(
+        user_id=p.user_id, delegation_id=p.delegation_id
+    )
+    assert len(hooks.calls) == 1
+    # Never re-granted by the first-call upsert.
+    with pytest.raises(DelegationDisconnected):
+        await resolver.resolve(_token(), via="mcp")
+    assert repo.delegations[p.delegation_id].status == "disconnected"
+    assert len(hooks.calls) == 1
+
+
+async def test_disconnect_delegation_wrong_user_or_unknown(
+    repo: InMemoryIdentityRepository, hooks: RecordingHooks
+):
+    resolver = IdentityResolver(repo, hooks=hooks)
+    alice = await _connected(resolver)
+    bob = await _connected(resolver, "user_bob")
+    hooks.calls.clear()
+    assert not await resolver.disconnect_delegation(
+        user_id=bob.user_id, delegation_id=alice.delegation_id
+    )
+    assert not await resolver.disconnect_delegation(user_id=alice.user_id, delegation_id=uuid4())
+    assert repo.delegations[alice.delegation_id].status == "active"
+    assert hooks.calls == []
+
+
+async def test_disconnect_delegation_hook_failure_rolls_back(
+    repo: InMemoryIdentityRepository, hooks: RecordingHooks
+):
+    resolver = IdentityResolver(repo, hooks=hooks)
+    p = await _connected(resolver)
+    hooks.fail_next_disconnect_hook = True
+    with pytest.raises(RuntimeError):
+        await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    assert repo.delegations[p.delegation_id].status == "active"
+    assert await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+
+
+async def test_disconnect_delegation_real_authz_unconfigured_fails_closed(
+    repo: InMemoryIdentityRepository, monkeypatch
+):
+    from revel.auth import authz
+    from revel.auth.fga import FgaConfigurationError
+
+    monkeypatch.setattr(authz, "_state", None)
+    resolver = IdentityResolver(repo)  # default ModuleAuthzHooks -> revel.auth.authz
+    p = await _connected(resolver)  # grant hooks skip (warn) while unconfigured
+    with pytest.raises(FgaConfigurationError):
+        await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    assert repo.delegations[p.delegation_id].status == "active"
+
+
+async def test_module_hooks_bridge_on_agent_disconnected(monkeypatch):
+    calls: list[dict] = []
+
+    async def on_agent_disconnected(*, user_id, delegation_id, agent_id):
+        calls.append({"user_id": user_id, "delegation_id": delegation_id, "agent_id": agent_id})
+
+    module = types.ModuleType("fake_authz")
+    module.on_agent_disconnected = on_agent_disconnected
+    monkeypatch.setitem(sys.modules, "revel.auth._fake_authz_for_tests", module)
+    monkeypatch.setattr("revel.auth.hooks.AUTHZ_MODULE", "revel.auth._fake_authz_for_tests")
+    ids = {"user_id": uuid4(), "delegation_id": uuid4(), "agent_id": uuid4()}
+    await ModuleAuthzHooks().on_agent_disconnected(**ids)
+    assert calls == [ids]

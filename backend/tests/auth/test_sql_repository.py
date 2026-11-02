@@ -11,6 +11,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from mcp.server.auth.provider import AccessToken
@@ -158,3 +159,83 @@ async def test_browser_and_mcp_resolve_to_same_user_row(sql_repo):
     )
     assert bob_ui.user_id == bob_mcp.user_id
     assert [name for name, _ in hooks.calls].count("on_user_created") == 2
+
+
+# --- disconnect_delegation (#14) ---------------------------------------------------------
+
+
+def _delegation_row(sql_repo, delegation_id):
+    with sql_repo._session() as session:
+        row = session.get(AgentDelegation, delegation_id)
+        return row.status, row.disconnected_at, row.updated_at
+
+
+async def test_disconnect_delegation_sql(sql_repo):
+    hooks = RecordingHooks()
+    resolver = IdentityResolver(sql_repo, hooks=hooks)
+    p = await resolver.resolve(_token(), via="mcp")
+    bob = await resolver.resolve(_token(sub="user_bob"), via="mcp")
+    hooks.calls.clear()
+    _, _, updated_before = _delegation_row(sql_repo, p.delegation_id)
+
+    # Wrong owner and unknown id: no change, no hook.
+    assert not await resolver.disconnect_delegation(
+        user_id=bob.user_id, delegation_id=p.delegation_id
+    )
+    assert not await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=uuid4())
+    assert _delegation_row(sql_repo, p.delegation_id)[:2] == ("active", None)
+    assert hooks.calls == []
+
+    assert await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    status, disconnected_at, updated_after = _delegation_row(sql_repo, p.delegation_id)
+    assert status == "disconnected" and disconnected_at is not None
+    assert updated_after >= updated_before
+    assert hooks.calls == [
+        (
+            "on_agent_disconnected",
+            {"user_id": p.user_id, "delegation_id": p.delegation_id, "agent_id": p.agent_id},
+        )
+    ]
+    assert not await resolver.disconnect_delegation(
+        user_id=p.user_id, delegation_id=p.delegation_id
+    )
+    assert len(hooks.calls) == 1
+
+    # The first-call upsert never re-grants or reactivates it.
+    with pytest.raises(DelegationDisconnected):
+        await resolver.resolve(_token(), via="mcp")
+    assert _delegation_row(sql_repo, p.delegation_id)[0] == "disconnected"
+    assert len(hooks.calls) == 1
+    # Bob's delegation is untouched.
+    assert _delegation_row(sql_repo, bob.delegation_id)[0] == "active"
+
+
+async def test_disconnect_delegation_sql_hook_failure_rolls_back(sql_repo, monkeypatch):
+    from revel.auth import authz
+    from revel.auth.fga import FgaConfigurationError
+
+    monkeypatch.setattr(authz, "_state", None)  # real authz, OpenFGA unconfigured
+    resolver = IdentityResolver(sql_repo)
+    p = await resolver.resolve(_token(), via="mcp")
+    with pytest.raises(FgaConfigurationError):
+        await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    assert _delegation_row(sql_repo, p.delegation_id)[:2] == ("active", None)
+    # Still usable: the delegation was not disconnected.
+    again = await resolver.resolve(_token(), via="mcp")
+    assert again.delegation_id == p.delegation_id
+
+
+async def test_concurrent_double_disconnect_sql(sql_repo):
+    hooks = RecordingHooks()
+    resolver = IdentityResolver(sql_repo, hooks=hooks)
+    p = await resolver.resolve(_token(), via="mcp")
+    hooks.calls.clear()
+    results = await asyncio.gather(
+        *(
+            resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+            for _ in range(6)
+        )
+    )
+    assert sorted(results) == [False] * 5 + [True]
+    assert [name for name, _ in hooks.calls] == ["on_agent_disconnected"]
+    assert _delegation_row(sql_repo, p.delegation_id)[0] == "disconnected"
