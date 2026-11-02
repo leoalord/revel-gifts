@@ -21,3 +21,13 @@ fi
 # file's directory with --allow-external-files (all files here are repo-owned).
 echo "Running tests/*.fga.yaml"
 fga model test --allow-external-files --tests 'tests/*.fga.yaml'
+
+# model.json (written by fga_bootstrap) must be the CLI transform of model.fga.
+echo "Checking model.json matches model.fga"
+# shellcheck source=generate-model-json.sh
+source "${AUTHZ_DIR}/scripts/generate-model-json.sh"
+if ! diff -u "${AUTHZ_DIR}/model.json" <(transform_model); then
+  echo "model.json is stale: run bash authorization/scripts/generate-model-json.sh" >&2
+  exit 1
+fi
+echo "model.json is up to date"

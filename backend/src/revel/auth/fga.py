@@ -115,7 +115,7 @@ class GoogleIdTokenProvider:
         self,
         audience: str,
         *,
-        fetch: Callable[[str], str] = _fetch_google_id_token,
+        fetch: Callable[[str], str] | None = None,
         clock: Callable[[], float] = time.time,
         refresh_margin: float = TOKEN_REFRESH_MARGIN_SECONDS,
     ) -> None:
@@ -139,7 +139,8 @@ class GoogleIdTokenProvider:
         async with self._lock:
             if not self._fresh():
                 # google-auth is synchronous; keep the event loop free while it fetches.
-                token = await asyncio.to_thread(self._fetch, self._audience)
+                fetch = self._fetch or _fetch_google_id_token
+                token = await asyncio.to_thread(fetch, self._audience)
                 self._token = token
                 self._expires_at = _token_expiry(token, self._clock())
                 logger.debug("Refreshed OpenFGA ID token")
