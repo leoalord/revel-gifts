@@ -99,7 +99,10 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
     }
     assert {
         u["name"]: u["column_names"] for u in inspector.get_unique_constraints("agent_delegations")
-    } == {"uq_agent_delegations_user_id_agent_id": ["user_id", "agent_id"]}
+    } == {
+        "uq_agent_delegations_user_id_agent_id": ["user_id", "agent_id"],
+        "uq_agent_delegations_id_user_id": ["id", "user_id"],
+    }
     assert {c["name"] for c in inspector.get_check_constraints("agent_delegations")} == {
         "ck_agent_delegations_status",
         "ck_agent_delegations_disconnected_at_matches_status",
@@ -247,4 +250,7 @@ def test_downgrade_and_reupgrade(migrated_engine: Engine, run_alembic: RunAlembi
     run_alembic(command.upgrade, "head")
     assert set(inspect(migrated_engine).get_table_names()) >= TABLES
     with migrated_engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == "0002_profile"
+        assert (
+            MigrationContext.configure(connection).get_current_revision()
+            == "0003_connections_questions"
+        )

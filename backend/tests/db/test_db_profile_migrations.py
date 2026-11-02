@@ -634,4 +634,7 @@ def test_downgrade_to_identity_and_reupgrade(
     run_alembic(command.upgrade, "head")
     assert set(inspect(migrated_engine).get_table_names()) >= PROFILE_TABLES | IDENTITY_TABLES
     with migrated_engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == "0002_profile"
+        assert (
+            MigrationContext.configure(connection).get_current_revision()
+            == "0003_connections_questions"
+        )

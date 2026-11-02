@@ -156,6 +156,13 @@ class Claim(TimestampMixin, Base):
             ["contribution_policies.profile_id", "contribution_policies.version"],
             ondelete="RESTRICT",
         ),
+        # The delegation must belong to the contributor (MATCH SIMPLE: NULL delegation allowed).
+        ForeignKeyConstraint(
+            ["contributor_delegation_id", "contributor_user_id"],
+            ["agent_delegations.id", "agent_delegations.user_id"],
+            name="fk_claims_contributor_delegation_id_agent_delegations",
+            ondelete="RESTRICT",
+        ),
         # F4 read path: WHERE profile_id = ? AND status IN (...) AND audience IN (...).
         Index("ix_claims_profile_id_status_audience", "profile_id", "status", "audience"),
         Index("ix_claims_profile_id_category", "profile_id", "category"),
@@ -190,9 +197,7 @@ class Claim(TimestampMixin, Base):
     contributor_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
-    contributor_delegation_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("agent_delegations.id", ondelete="RESTRICT"), index=True
-    )
+    contributor_delegation_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     contributed_via: Mapped[str] = mapped_column(Text, nullable=False)
     policy_version: Mapped[int | None] = mapped_column(Integer)
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
@@ -225,6 +230,13 @@ class ClaimEvent(Base):
             name="fk_claim_events_policy_version_contribution_policies",
             ondelete="RESTRICT",
         ),
+        # The delegation must belong to the actor (MATCH SIMPLE: NULL delegation allowed).
+        ForeignKeyConstraint(
+            ["actor_delegation_id", "actor_user_id"],
+            ["agent_delegations.id", "agent_delegations.user_id"],
+            name="fk_claim_events_actor_delegation_id_agent_delegations",
+            ondelete="RESTRICT",
+        ),
         Index("ix_claim_events_profile_id_occurred_at", "profile_id", "occurred_at"),
     )
 
@@ -239,9 +251,7 @@ class ClaimEvent(Base):
     actor_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
-    actor_delegation_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("agent_delegations.id", ondelete="RESTRICT")
-    )
+    actor_delegation_id: Mapped[uuid.UUID | None] = mapped_column()
     acceptance: Mapped[str | None] = mapped_column(Text)
     policy_version: Mapped[int | None] = mapped_column(Integer)
     changes: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

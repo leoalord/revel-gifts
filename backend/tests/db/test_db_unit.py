@@ -70,7 +70,7 @@ def test_deterministic_constraint_names() -> None:
         "ix_agent_delegations_agent_id",
     ):
         assert name in ddl, name
-    assert ddl.count("ON DELETE RESTRICT") == 15  # every FK (identity 2, profile 13)
+    assert ddl.count("ON DELETE RESTRICT") == 34  # every FK (identity 2, profile 13, 0003 19)
     assert "gen_random_uuid()" in ddl
 
 
@@ -91,8 +91,12 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0002_profile"]
-    assert [rev.revision for rev in script.walk_revisions()] == ["0002_profile", "0001_identity"]
+    assert script.get_heads() == ["0003_connections_questions"]
+    assert [rev.revision for rev in script.walk_revisions()] == [
+        "0003_connections_questions",
+        "0002_profile",
+        "0001_identity",
+    ]
 
 
 def test_cloud_sql_unix_socket_url_engine() -> None:

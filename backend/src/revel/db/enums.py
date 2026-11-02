@@ -103,3 +103,81 @@ class AcceptanceMode(StrEnum):
 
     AUTOMATIC = "automatic"
     EXPLICIT = "explicit"
+
+
+class ConnectionRequestStatus(StrEnum):
+    """A directional request for access to the target's profile.
+
+    ``pending``, ``approved`` and ``blocked`` are live (at most one per directed pair); a
+    ``declined``, ``cancelled`` or ``revoked`` request leaves room for a new one.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    DECLINED = "declined"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+    REVOKED = "revoked"
+
+
+LIVE_CONNECTION_REQUEST_STATUSES: tuple[ConnectionRequestStatus, ...] = (
+    ConnectionRequestStatus.PENDING,
+    ConnectionRequestStatus.APPROVED,
+    ConnectionRequestStatus.BLOCKED,
+)
+
+
+class ConnectionTier(StrEnum):
+    """Tier the target grants an approved requester (OpenFGA is authoritative for membership)."""
+
+    CONNECTIONS = "connections"
+    TRUSTED_CIRCLE = "trusted_circle"
+
+
+class QuestionStatus(StrEnum):
+    """Requester's question: open -> answered -> closed; terminal declined/expired/cancelled."""
+
+    OPEN = "open"
+    ANSWERED = "answered"
+    CLOSED = "closed"
+    DECLINED = "declined"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class AssignmentStatus(StrEnum):
+    """Per-respondent lease: available -> claimed -> (waiting_for_user) -> completed.
+
+    Other exits: released, declined, lease_expired.
+    """
+
+    AVAILABLE = "available"
+    CLAIMED = "claimed"
+    WAITING_FOR_USER = "waiting_for_user"
+    COMPLETED = "completed"
+    RELEASED = "released"
+    DECLINED = "declined"
+    LEASE_EXPIRED = "lease_expired"
+
+
+class QuestionEventType(StrEnum):
+    """Append-only evidence of what happened to a question (not its state)."""
+
+    MADE_AVAILABLE = "made_available"
+    RETRIEVED = "retrieved"
+    CLAIMED = "claimed"
+    RENEWED = "renewed"
+    RELEASED = "released"
+    LEASE_EXPIRED = "lease_expired"
+    USER_CONTACT_REPORTED = "user_contact_reported"
+    ANSWERED = "answered"
+    DECLINED = "declined"
+    ANSWER_RETRIEVED = "answer_retrieved"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    CLOSED = "closed"
+
+
+class AnswerStatus(StrEnum):
+    ACCEPTED = "accepted"
+    WITHDRAWN = "withdrawn"
