@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock, MockInstance } from "vitest";
 
 import { App } from "./App";
-import { browserNavigation } from "./api";
+import { LOGIN_MARKER_KEY, browserNavigation } from "./api";
 
 const SESSION = {
   user: {
@@ -34,6 +34,7 @@ beforeEach(() => {
   assignSpy = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
   reloadSpy = vi.spyOn(browserNavigation, "reload").mockImplementation(() => {});
   window.history.replaceState(null, "", "/app/");
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -84,13 +85,80 @@ describe("session bootstrap", () => {
     expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
   });
 
-  it("shows a not-configured message on 503", async () => {
-    fetchMock.mockResolvedValue(jsonResponse(503, { detail: "Browser sign-in not configured" }));
+  it("shows the not-configured detail on a 503 from F2's configuration check", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503, { detail: "Browser sign-in is not configured" }));
     render(<App />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in is not configured");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Sign-in is temporarily unavailable.");
+    expect(alert).toHaveTextContent("Browser sign-in is not configured.");
     expect(assignSpy).not.toHaveBeenCalled();
     expect(screen.getByText("Synthetic demo data")).toBeInTheDocument();
+  });
+
+  it("shows a generic unavailable message on other 503s, without server text", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503, { detail: "Identity store unavailable" }));
+    render(<App />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Sign-in is temporarily unavailable.");
+    expect(alert).not.toHaveTextContent("Identity store");
+  });
+
+  it("records a sign-in marker before redirecting and clears it once signed in", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, { detail: "Not signed in" }));
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(assignSpy).toHaveBeenCalledTimes(1));
+    expect(window.sessionStorage.getItem(LOGIN_MARKER_KEY)).not.toBeNull();
+    unmount();
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, SESSION));
+    render(<App />);
+    await screen.findByText("Signed in as Alex Example");
+    expect(window.sessionStorage.getItem(LOGIN_MARKER_KEY)).toBeNull();
+  });
+
+  it("stops a sign-in redirect loop and offers a manual retry", async () => {
+    window.sessionStorage.setItem(LOGIN_MARKER_KEY, String(Date.now() - 5_000));
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: "Not signed in" }));
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in didn't stick");
+    expect(assignSpy).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Retry sign-in" }));
+    expect(assignSpy).toHaveBeenCalledWith("/auth/login?return_to=" + encodeURIComponent("/app/"));
+  });
+
+  it("redirects again when the last sign-in attempt is older than the loop window", async () => {
+    window.sessionStorage.setItem(LOGIN_MARKER_KEY, String(Date.now() - 60_000));
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: "Not signed in" }));
+    render(<App />);
+    await waitFor(() => expect(assignSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/didn't stick/)).toBeNull();
+  });
+
+  it("still redirects when sessionStorage throws", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: "Not signed in" }));
+    render(<App />);
+    await waitFor(() => expect(assignSpy).toHaveBeenCalledTimes(1));
+    getItem.mockRestore();
+    setItem.mockRestore();
+  });
+
+  it("renders the user's name as text, never HTML", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { ...SESSION, user: { ...SESSION.user, display_name: "<b>Alex</b>" } }),
+    );
+    const { container } = render(<App />);
+    expect(await screen.findByText("Signed in as <b>Alex</b>")).toBeInTheDocument();
+    expect(container.querySelector("b")).toBeNull();
   });
 });
 
