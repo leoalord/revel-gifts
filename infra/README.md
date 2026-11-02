@@ -28,7 +28,7 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
   - Alternative considered: internal-only ingress, which would also need Direct VPC egress from `revel-app` (a VPC, subnet and egress settings). That would add network isolation but more resources and setup. It was rejected for MVP scope; IAM authentication already keeps OpenFGA from being publicly usable.
 - **revel-app** is public (`allUsers` invoker). User and agent authentication is the application's job (WorkOS), not Cloud Run IAM.
 - **Database separation limit:** users created through the Cloud SQL API join `cloudsqlsuperuser`, so `revel_app` could technically connect to the `openfga` database (and vice versa). Each runtime only receives its own credentials. Tightening this needs SQL `REVOKE`/`GRANT` statements and is not part of the MVP.
-- **Connection budget:** db-f1-micro allows about 25 connections. OpenFGA is capped at 1 instance x 5 connections; with `app_max_instances = 3`, keep the app's SQLAlchemy pool at 5 or fewer per instance (including overflow). Raise `db_tier` to `db-g1-small` if this is too tight.
+- **Connection budget:** db-f1-micro allows about 25 connections, minus the slots Cloud SQL reserves for superuser/maintenance connections. The app's SQLAlchemy pool is 3 plus 2 overflow, so up to 5 per instance (`backend/src/revel/db/session.py`, owned by F3); with `app_max_instances = 2` that is 10. OpenFGA is capped at 1 instance x 5. The jobs `revel-migrate`, `revel-fga-admin` and `revel-fga-reconcile` each open up to 5 more through the same pool while they run. Rollouts briefly run old and new revisions side by side, which can double a service's share. Keep `app_max_instances` at 2, or move `db_tier` to `db-g1-small` before raising it.
 
 ## State
 
@@ -78,7 +78,7 @@ A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to abou
 3. Build and push the app image, then run the app migration and deploy it (below).
 4. Bootstrap the OpenFGA store and model with `revel-fga-admin`, set `openfga_store_id` and `openfga_authorization_model_id`, and `terraform apply` ([OpenFGA bootstrap](#openfga-bootstrap)). This apply also creates the [scheduled reconcile](#scheduled-reconcile) unless `enable_fga_reconcile_schedule = false`.
 5. Add secret versions, then list those secret IDs in `app_secret_env` and `terraform apply`.
-6. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401.
+6. Set the WorkOS variables (`workos_authkit_domain`, later `workos_client_id`) and `terraform apply` ([WorkOS configuration](#workos-configuration)). Until `workos_authkit_domain` is set, `/mcp` and `/me` return 401, and the protected-resource (`/.well-known/oauth-protected-resource[/mcp]`) and authorization-server (`/.well-known/oauth-authorization-server`) metadata return 503 (fail closed).
 7. Custom domain (below).
 
 ## Images
@@ -170,10 +170,10 @@ Every run writes only IDs, counts or a health word to the logs, never tokens, tu
 
 Post-commit OpenFGA grants can race a later revoke. As a backstop, Cloud Scheduler runs reconcile every 15 minutes (`fga_reconcile_schedule`, default `*/15 * * * *`, time zone `Etc/UTC`) through a dedicated job, `revel-fga-reconcile`:
 
-- The job has the same service account, OpenFGA env, `DATABASE_URL` secret, Cloud SQL volume and resources as `revel-fga-admin`. Its args are fixed at `-m revel.auth.fga_reconcile` with reconcile's defaults: no `--prune` (orphan deletion stays an explicit operator run) and the 2-minute in-flight `--window`. Timeout 300s, no task retries.
+- The job has the same service account, OpenFGA env, `DATABASE_URL` secret, Cloud SQL volume and resources as `revel-fga-admin`. Its args are fixed at `-m revel.auth.fga_reconcile` with reconcile's defaults: no `--prune` (orphan deletion stays an explicit operator run) and the 2-minute in-flight `--window`. Timeout 300s, with one task retry (`max_retries = 1`): reconcile is idempotent, and a failure such as exit 3 ("barrier not applied; re-run reconcile") means run again. If the retry also fails, the next scheduled run repairs it.
 - The Cloud Scheduler job `revel-fga-reconcile` POSTs to the Cloud Run Admin API `jobs/revel-fga-reconcile:run` with an OAuth token for the `revel-scheduler` service account. That account's only grant is `roles/run.invoker` on this job. It can start the job with its own args, but it cannot override them. A dedicated job avoids giving the scheduler `run.jobs.runWithOverrides` on `revel-fga-admin`.
 - It is created when `enable_fga_reconcile_schedule` is true (the default) **and** both `openfga_store_id` and `openfga_authorization_model_id` are set. Reconcile exits 2 without them, so it stays off until the bootstrap IDs are applied.
-- A failed run (for example exit 3) is not retried. The next run 15 minutes later repairs the same state. Scheduler retries only a failed `jobs:run` call (2 retries, 30-120s backoff, 60s deadline).
+- A failed task (for example exit 3) is retried once by Cloud Run within the same execution. If the retry fails too, the next run 15 minutes later repairs the same state. Scheduler separately retries only a failed `jobs:run` call (2 retries, 30-120s backoff, 60s deadline).
 - Overlapping runs are unlikely: a run takes seconds and the job times out at 300s. Overlap with a manual `revel-fga-admin` reconcile is safe. Each run's barrier re-applies everything that changed since its own snapshot, and SHARE locks don't conflict with each other. Writers may wait a few more seconds behind the barriers.
 
 Pause, resume or trigger it (pausing does not need an apply):
@@ -244,7 +244,7 @@ Names match `backend/src/revel/settings.py`. Non-secret values are Terraform var
 | `WORKOS_REDIRECT_URI` | variable `workos_redirect_uri`; empty means `public_base_url` + `/auth/callback` | `https://api.revel.gifts/auth/callback` | Browser session (F2, in progress); register it in WorkOS |
 | `WORKOS_COOKIE_PASSWORD` | secret, via `app_secret_env` | not wired | Browser session (F2, in progress) |
 
-**`/mcp` fails closed until the AuthKit domain is set.** While `WORKOS_AUTHKIT_DOMAIN` is unset (or a placeholder), every `/mcp` and `/me` request gets 401. `WORKOS_TOKEN_AUDIENCE` is set explicitly so the audience stays `https://api.revel.gifts/mcp` even when the app is reached on its `run.app` host; it must equal the resource indicator configured in WorkOS. Changing `public_base_url` or `mcp_path` changes it too.
+**`/mcp` fails closed until the AuthKit domain is set.** While `WORKOS_AUTHKIT_DOMAIN` is unset (or a placeholder), every `/mcp` and `/me` request gets 401, and the protected-resource and authorization-server metadata endpoints (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`) return 503 "Authorization not configured". `WORKOS_TOKEN_AUDIENCE` is set explicitly so the audience stays `https://api.revel.gifts/mcp` even when the app is reached on its `run.app` host; it must equal the resource indicator configured in WorkOS. Changing `public_base_url` or `mcp_path` changes it too.
 
 Set the AuthKit domain (public, from the WorkOS dashboard, e.g. `https://<tenant>.authkit.app`, no path) in `terraform.tfvars` and re-apply. Plan fails validation if `workos_authkit_domain` or `workos_client_id` still contains the example `replace-with-...` placeholder:
 

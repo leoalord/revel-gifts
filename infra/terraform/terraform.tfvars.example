@@ -42,7 +42,7 @@ migrate_command   = ["alembic", "upgrade", "head"]
 app_secret_env = []
 
 db_tier               = "db-f1-micro"
-app_max_instances     = 3
+app_max_instances     = 2
 deletion_protection   = true
 enable_domain_mapping = false
 domain_name           = "api.revel.gifts"

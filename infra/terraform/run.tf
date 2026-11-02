@@ -481,8 +481,9 @@ resource "google_cloud_run_v2_job" "fga_admin" {
 # args with reconcile's defaults: no --prune (orphan deletion stays an explicit operator run) and
 # the default 2-minute in-flight --window. A dedicated job, rather than revel-fga-admin with arg
 # overrides, so the scheduler only needs roles/run.invoker on this job (no runWithOverrides).
-# max_retries = 0: a failed run (for example exit 3, "barrier not applied; re-run reconcile") is
-# repaired by the next scheduled run.
+# max_retries = 1: reconcile is idempotent, and a failed run (for example exit 3, "barrier not
+# applied; re-run reconcile") means "run again", so Cloud Run retries the task once. A run that
+# still fails is repaired by the next scheduled run. (fga_admin and migrate stay at 0.)
 resource "google_cloud_run_v2_job" "fga_reconcile" {
   count = local.fga_reconcile_enabled ? 1 : 0
 
@@ -494,7 +495,7 @@ resource "google_cloud_run_v2_job" "fga_reconcile" {
     task_count = 1
     template {
       service_account = google_service_account.app.email
-      max_retries     = 0
+      max_retries     = 1
       timeout         = "300s"
 
       containers {
