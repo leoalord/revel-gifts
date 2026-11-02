@@ -142,7 +142,7 @@ async def test_row_write_precedes_revoke_hook(
     expected = {"revoke": "revoked", "tier": "approved"}.get(action, "blocked")
     real_hook = getattr(authz, HOOKS[action])
     real_update = svc._update_row
-    real_ensure, real_profile_id = svc._ensure_profile, svc._profile_id
+    real_profile_id = svc._profile_id
     events: list[str] = []
     tx: list[Session] = []  # the changing transaction's session
     seen_in_tx: list[set[tuple[str, str | None]]] = []
@@ -150,10 +150,6 @@ async def test_row_write_precedes_revoke_hook(
     def update_row(session_, request_id, **values):
         events.append("update")
         return real_update(session_, request_id, **values)
-
-    def ensure_profile(session_, user_id):
-        tx.append(session_)
-        return real_ensure(session_, user_id)
 
     def profile_id(session_, user_id):
         tx.append(session_)
@@ -183,7 +179,6 @@ async def test_row_write_precedes_revoke_hook(
         return await real_hook(**kwargs)
 
     monkeypatch.setattr(svc, "_update_row", update_row)
-    monkeypatch.setattr(svc, "_ensure_profile", ensure_profile)
     monkeypatch.setattr(svc, "_profile_id", profile_id)
     monkeypatch.setattr(authz, HOOKS[action], hook)
     if action == "revoke":
@@ -253,3 +248,37 @@ async def test_resolve_handle_limit_holds_under_a_concurrent_burst(
     # Exhausted: hits are refused too (whatever the handle).
     with pytest.raises(svc.RateLimited):
         await svc.resolve_handle(session, sam.ui, handle="sam_demo")
+
+
+async def test_profile_setup_never_waits_for_a_thread_while_holding_locks(
+    session: Session, sessions, fake_fga: FakeFga
+) -> None:
+    """B2: with the worker-thread limiter shrunk to N, N concurrent approvals and blocks by
+    people with no profile yet (each needing ensure_profile) all complete."""
+    n = 3
+    approvers = [add_person(session, f"ap{i}", profile=False) for i in range(n)]
+    blockers = [add_person(session, f"bl{i}", profile=False) for i in range(n)]
+    sam = add_person(session, "sam")
+    reqs = {}
+    for p in approvers + blockers:
+        reqs[p.handle] = await svc.lookup_and_request(sam.ui, handle=p.handle, sessions=sessions)
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    old = limiter.total_tokens
+    limiter.total_tokens = n
+    try:
+        with anyio.fail_after(20):
+            async with anyio.create_task_group() as tg:
+                for p in approvers:
+                    rid = reqs[p.handle].request.id
+                    tg.start_soon(
+                        lambda p=p, rid=rid: svc.approve(
+                            p.ui, rid, tier="connections", sessions=sessions
+                        )
+                    )
+                for p in blockers:
+                    rid = reqs[p.handle].request.id
+                    tg.start_soon(lambda p=p, rid=rid: svc.block(p.ui, rid, sessions=sessions))
+    finally:
+        limiter.total_tokens = old
+    statuses = sorted(r.status for r in rows(session))
+    assert statuses == ["approved"] * n + ["blocked"] * n

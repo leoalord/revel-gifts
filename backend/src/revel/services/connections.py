@@ -71,10 +71,13 @@ missing grant only denies. A revoke-hook failure rolls the change back; a commit
 successful revoke hook only over-denies until reconcile re-grants.
 
 Profiles. Tier and block tuples live on ``profile:<target profile id>``. Approve, tier change and
-block call F5's ``revel.services.profiles.ensure_profile`` for the target/blocker inside their
-transaction (after the pair and row locks, before the row write), so approval works for someone
-who has no profile yet and a block always writes its ``blocked`` tuple in the same transaction
-(no block-before-profile gap). ``ProfileNotSetUp`` stays in the contract but is unreachable.
+block first call F5's ``revel.services.profiles.ensure_profile`` for the caller (the target or
+blocker) in a separate short transaction committed before the connection transaction (never
+inside it: it needs worker threads of its own and must not wait for one while holding the pair
+and row locks). The connection transaction then only reads the profile id, so approval works for
+someone who had no profile and a block always writes its ``blocked`` tuple in its own
+transaction (no block-before-profile gap); ``profiles`` is never written while
+``connection_requests`` is locked. ``ProfileNotSetUp`` stays in the contract but is unreachable.
 
 Rate limits (module constants). ``REQUEST_LIMIT`` new requests per requester per
 ``REQUEST_WINDOW`` are counted in Postgres via ``(requester_user_id, created_at)`` under a
@@ -379,14 +382,32 @@ def _profile_id(session: Session, user_id: UUID) -> UUID | None:
     ).scalar_one_or_none()
 
 
-def _ensure_profile(session: Session, user_id: UUID) -> UUID:
-    """F5's ``ensure_profile`` in THIS transaction (get or create; on creation it calls
-    ``on_profile_created`` pre-commit, a grant on a brand-new row). Called after the pair lock
-    and the ``connection_requests`` row lock and before the row write, so the transaction holds
-    ROW SHARE on ``connection_requests`` before it can wait on a concurrent profile insert: the
-    reconcile barrier (which never locks ``profiles``) cannot hold ``connection_requests``
-    while we wait, so no cycle. Failures become ``ConnectionsUnavailable`` (rollback)."""
-    return _hook(profiles.ensure_profile, session=session, user_id=user_id)
+async def _ensure_own_profile(principal: PrincipalLike, factory: sessionmaker[Session]) -> None:
+    """Get or create the caller's profile (F5's ``ensure_profile``, which calls
+    ``on_profile_created`` pre-commit) in its OWN short transaction, committed BEFORE the
+    connection transaction starts. It runs on the async layer: ``ensure_profile`` needs worker
+    threads of its own, so calling it from inside a worker-thread transaction could wait forever
+    for a free thread while holding the pair and row locks. The caller is the target or blocker
+    whenever the action is allowed; otherwise this only creates the caller's own profile.
+    Failures become ``ConnectionsUnavailable`` (nothing else changed)."""
+    session = factory()
+    try:
+        await profiles.ensure_profile(session, user_id=principal.user_id)
+        await anyio.to_thread.run_sync(session.commit)
+    except Exception as exc:
+        logger.warning("connections: profile set-up failed (%s)", type(exc).__name__)
+        await anyio.to_thread.run_sync(session.rollback)
+        raise ConnectionsUnavailable() from exc
+    finally:
+        await anyio.to_thread.run_sync(session.close)
+
+
+def _require_profile(session: Session, user_id: UUID) -> UUID:
+    """The profile created by ``_ensure_own_profile``; missing only on an unexpected race."""
+    profile_id = _profile_id(session, user_id)
+    if profile_id is None:
+        raise ConnectionsUnavailable()
+    return profile_id
 
 
 def _hook(fn: Callable[..., Any], **kwargs: Any) -> Any:
@@ -1020,6 +1041,7 @@ async def _set_tier(
     sessions: SessionFactory | None,
 ) -> ResponseResult:
     factory = _factory(sessions)
+    await _ensure_own_profile(principal, factory)
 
     def tx1() -> tuple[ResponseResult, UUID, UUID]:
         with factory() as session, session.begin():
@@ -1028,7 +1050,7 @@ async def _set_tier(
             row = _locked_row(session, principal, request_id, "target")
             if row.status != from_status:
                 raise InvalidState()
-            profile_id = _ensure_profile(session, row.target_user_id)
+            profile_id = _require_profile(session, row.target_user_id)
             values: dict[str, Any] = {
                 "status": _APPROVED,
                 "granted_tier": tier.value,
@@ -1183,6 +1205,7 @@ async def block(
     request to the blocked user.
     """
     factory = _factory(sessions)
+    await _ensure_own_profile(principal, factory)
 
     def work() -> tuple[ResponseResult, UUID]:
         with factory() as session, session.begin():
@@ -1193,7 +1216,7 @@ async def block(
             row = _live_row(session, requester, target, for_update=True)
             if row is not None and row.status == _BLOCKED:
                 return _result(row), requester
-            profile_id = _ensure_profile(session, target)
+            profile_id = _require_profile(session, target)
             if row is not None:
                 values: dict[str, Any] = {
                     "status": _BLOCKED,
