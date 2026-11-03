@@ -20,16 +20,16 @@ Two of them take an `action`, and each action takes only its own parameters:
 | Tool | `action` | `tier` | `owner_confirmed` |
 | --- | --- | --- | --- |
 | `respond_to_connection_request` | `approve` | required | true only after the owner's yes |
-| `respond_to_connection_request` | `decline` | not accepted | not accepted |
-| `respond_to_connection_request` | `block` | not accepted | not accepted |
+| `respond_to_connection_request` | `decline` | not accepted | refused when true |
+| `respond_to_connection_request` | `block` | not accepted | refused when true |
 | `respond_to_connection_request` | `change_tier` | required | true only after the owner's yes to an upgrade to `trusted_circle` |
 | `end_connection` | `revoke` | not accepted | not accepted |
 | `end_connection` | `cancel` | not accepted | not accepted |
 
-Never pass `owner_confirmed` or `tier` with `decline` or `block`: Revel refuses the call, for
-example "invalid_request: Action 'decline' does not accept owner_confirmed." A missing `tier`
-reads "invalid_request: Action 'approve' requires tier.", a `tier` where it does not belong
-"invalid_request: Action 'block' does not accept tier.", and an unknown action
+With `decline` or `block`, Revel refuses `owner_confirmed` true and any `tier`, so never pass
+them, for example "invalid_request: Action 'decline' does not accept owner_confirmed." A
+missing `tier` reads "invalid_request: Action 'approve' requires tier.", a `tier` where it
+does not belong "invalid_request: Action 'block' does not accept tier.", and an unknown action
 "invalid_request: Unknown action '<action>' for respond_to_connection_request; expected one
 of: approve, decline, block, change_tier." Fix the call and try once more.
 
@@ -80,7 +80,9 @@ Example (synthetic), the `request_connection` input:
 ## Answering requests (someone wants to read your user's profile)
 
 - Call `list_connections` with `include` `requests` (or `all`, the default) and read
-  `incoming` to see who asked and through which assistant.
+  `incoming` to see who asked and through which assistant. The `id` of each `incoming` (or
+  `outgoing`) item is the `request_id` the other tools take; entries in `connections` carry it
+  as `request_id`.
 - Ask your user before you respond. Then call `respond_to_connection_request` with the
   `request_id` and `action` `approve` (with `tier` `connections` or `trusted_circle`),
   `decline` or `block`. It is not safe to repeat a response that succeeded: a second
@@ -91,6 +93,9 @@ Example (synthetic), the `request_connection` input:
   confirmation, change a tier with `respond_to_connection_request` and `action`
   `change_tier`, or remove access with `end_connection` and `action` `revoke`. Both take
   effect on that person's next request.
+- If a retried `end_connection` returns "This connection request is not in a state that allows
+  that action", the connection or request is already ended. Check `list_connections` instead of
+  retrying.
 - `change_tier` works only on an approved connection. On a pending request Revel refuses it
   ("This connection request is not in a state that allows that action"); use `approve` with
   the tier instead.
@@ -125,8 +130,8 @@ Never add `owner_confirmed` true on your own to get past a refusal, and never se
 first call.
 
 Declining, blocking, downgrading, revoking and cancelling need no flag, but still confirm the
-decision with your user first and tell them what you did. Do not pass `owner_confirmed` (or
-`tier`) with `decline` or `block` at all: Revel refuses it.
+decision with your user first and tell them what you did. Revel refuses `owner_confirmed`
+true and any `tier` with `decline` or `block`, so never pass them.
 
 Examples (synthetic). Approving at the Connections tier: step 1, without the flag (refused with
 the change list, which you quote to the owner):

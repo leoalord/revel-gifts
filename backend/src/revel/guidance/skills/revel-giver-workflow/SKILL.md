@@ -9,8 +9,9 @@ status: active
 
 Use this when your user wants a gift idea for someone they are connected to on Revel.
 
-The MCP tools used here are live: `get_profile`, `submit_question` and `get_question`. If one is missing from your tool list, stop and tell your user; never say a
-question was sent when you could not send it.
+The MCP tools used here are live: `get_profile`, `submit_question` and `get_question`. If one
+is missing from your tool list, stop and tell your user; never say a question was sent when
+you could not send it.
 
 ## 1. Read the profile first
 

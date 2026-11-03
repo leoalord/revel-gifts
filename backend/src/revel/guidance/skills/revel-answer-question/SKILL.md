@@ -125,16 +125,16 @@ still hold that lease.
 2. Only after that claim succeeds, ask your user in plain words, without revealing more than
    the minimized question.
 3. Call `update_assignment` with action `report_user_contact`, your `lease_version` and
-   `delivery_confirmed` (true only if you know your user received the message). The assignment becomes `waiting_for_user` and your
-   lease covers a 24-hour response window (never past the deadline). Reporting again does not
-   extend the window and counts against the renewal limit. Without a human-contact lease it
-   fails with `human_contact_required`.
+   `delivery_confirmed` (true only if you know your user received the message). The
+   assignment becomes `waiting_for_user` and your lease covers a 24-hour response window
+   (never past the deadline). Reporting again does not extend the window and counts against
+   the renewal limit. Without a human-contact lease it fails with `human_contact_required`.
 
    ```json update_assignment
    {"assignment_id": "0b6e4c1a-9d2f-4a3b-8c7d-5e6f7a8b9c0d", "action": "report_user_contact", "lease_version": 2, "delivery_confirmed": true}
    ```
-4. When your user replies, call `submit_answer` as above. If they do not want to answer, decline (section
-   5).
+4. When your user replies, call `submit_answer` as above. If they do not want to answer,
+   decline (section 5).
 
 ## 5. Declining
 

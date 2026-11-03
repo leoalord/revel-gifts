@@ -20,7 +20,7 @@ from revel.api import profiles as profiles_api
 from revel.guidance import documents
 from revel.mcp import profile_tools
 from revel.mcp.server import create_mcp_server
-from revel.services import profiles
+from revel.services import claim_writes, profiles
 from revel.settings import Settings
 
 from .test_skills_f6_f7 import TOOLS
@@ -320,8 +320,15 @@ def test_remove_fact_rules_match_code() -> None:
     assert "the fact it would have replaced stays live" in flat
     assert "a replacement's target stays live" in (profiles.reject_fact.__doc__ or "")
     assert f'("{profile_tools._CONFLICT};' in flat or f'"{profile_tools._CONFLICT}"' in flat
-    for reason in ("fact_not_removable", "fact_not_pending"):
-        assert f"`{reason}`" in flat, reason
+    # MCP gives the generic conflict text; HTTP reasons are tied to their own routes.
+    assert (
+        f'Over MCP the error is "{profile_tools._CONFLICT}". Over HTTP, '
+        "`DELETE /api/v1/profile/facts/{fact_id}` returns `409` `fact_not_removable` and "
+        "`POST /api/v1/profile/facts/{fact_id}/reject` returns `409` `fact_not_pending`" in flat
+    )
+    remove_src = inspect.getsource(claim_writes.remove)
+    reject_src = inspect.getsource(claim_writes.reject)
+    assert '"fact_not_removable"' in remove_src and '"fact_not_pending"' in reject_src
     assert "Do not retry it blindly; call `get_profile`" in flat
     # Section 6 (corrections) says it too, not only the rejection example in section 9.
     assert "If the owner rejects it instead, the fact it would have replaced stays live" in flat

@@ -549,9 +549,13 @@ def test_connect_action_table_matches_code() -> None:
         takes_tier = tool == RESPOND and action in connection_tools._TIER_ACTIONS
         assert (tier == "required") is takes_tier, (tool, action)
         assert (tier == "not accepted") is (not takes_tier), (tool, action)
-        assert (confirmed == "not accepted") is (not takes_tier), (tool, action)
+        has_flag = "owner_confirmed" in TOOLS[tool].parameters["properties"]
         if takes_tier:
             assert confirmed.startswith("true only after the owner's yes"), (tool, action)
+        elif has_flag:  # decline, block: false is the default, true is refused
+            assert confirmed == "refused when true", (tool, action)
+        else:  # end_connection has no owner_confirmed parameter at all
+            assert confirmed == "not accepted", (tool, action)
     assert TOOLS["list_connections"].parameters["properties"]["include"]["enum"] == list(
         connection_tools._INCLUDE
     )
@@ -619,8 +623,14 @@ async def test_quoted_connect_errors_match_the_tools() -> None:
 
 def test_connect_decline_block_and_pending_change_tier_rules() -> None:
     flat = _flat(CONNECT)
-    assert "Never pass `owner_confirmed` or `tier` with `decline` or `block`" in flat
-    assert "Do not pass `owner_confirmed` (or `tier`) with `decline` or `block` at all" in flat
+    assert (
+        "With `decline` or `block`, Revel refuses `owner_confirmed` true and any `tier`, so never"
+        " pass them" in flat
+    )
+    assert (
+        "Revel refuses `owner_confirmed` true and any `tier` with `decline` or `block`, so never"
+        " pass them" in flat
+    )
     # change_tier on a pending request is refused with F6's fixed InvalidState text.
     assert f'("{connections.InvalidState.message}")' in flat
     assert "`change_tier` works only on an approved connection" in flat
@@ -629,6 +639,37 @@ def test_connect_decline_block_and_pending_change_tier_rules() -> None:
     assert "from_status=_APPROVED" in source
     # The step about a changed change list is gone (it cannot happen for connections).
     assert "returns a different change list" not in flat
+
+
+def test_end_connection_retry_is_not_called_idempotent() -> None:
+    flat = _flat(CONNECT)
+    message = connections.InvalidState.message
+    assert (
+        f'If a retried `end_connection` returns "{message}", the connection or request is already'
+        " ended. Check `list_connections` instead of retrying" in flat
+    )
+    # revoke and cancel refuse a row that is no longer approved / pending.
+    assert "raise InvalidState()" in inspect.getsource(connections.revoke)
+    assert "raise InvalidState()" in inspect.getsource(connections.cancel_request)
+    for sentence in _sentences(CONNECT):
+        if "end_connection" in sentence:
+            assert "idempotent" not in sentence.lower(), sentence
+
+
+def test_request_ids_from_list_connections_are_documented() -> None:
+    flat = _flat(CONNECT)
+    # incoming/outgoing items carry the request id as `id`; connections entries as request_id.
+    for model in (connections.IncomingRequest, connections.OutgoingRequest):
+        assert "id" in model.model_fields and "request_id" not in model.model_fields
+    assert "request_id" in connections.ConnectionEntry.model_fields
+    for tool in (RESPOND, END):
+        assert "request_id" in TOOLS[tool].parameters["required"]
+    assert (
+        "The `id` of each `incoming` (or `outgoing`) item is the `request_id` the other tools"
+        " take; entries in `connections` carry it as `request_id`" in flat
+    )
+    source = inspect.getsource(connection_tools)
+    assert "svc.list_incoming" in source and "svc.list_outgoing" in source
 
 
 def test_list_connections_keys_are_documented() -> None:
@@ -793,3 +834,11 @@ def test_giver_get_question_matches_code() -> None:
             if "get_question" in sentence:
                 assert not re.search(r"(?i)read[- ]only", sentence), (name, sentence)
     assert "Revel records when an answer is retrieved" in flat
+    # Nor anywhere in the giver's get_question section (sentences need not name the tool).
+    body = documents()[GIVER].body
+    section = body.split("## 3. Get the answer", 1)[1].split("\n## ", 1)[0]
+    assert "`get_question`" in section and "answer is retrieved" in section
+    read_only = re.compile(r"(?i)\bread[- ]only\b|\bchanges nothing\b|\bno side effects?\b")
+    for sentence in re.split(r"(?<=[.:;])\s+", " ".join(section.split())):
+        assert not read_only.search(sentence), sentence
+    assert "calling again is safe" in flat

@@ -33,8 +33,19 @@ ACTION_VALUES = frozenset(
     for tool in TOOLS.values()
     for value in tool.parameters["properties"].get("action", {}).get("enum", [])
 )
-# How far before an action-valued name the word "action" may appear (same sentence or clause).
-ACTION_WINDOW = 100
+# Where an action-valued retired name counts as the action, matched against the text directly
+# before it (whitespace collapsed); the name must follow immediately:
+_LIST_ITEM = r"`[a-z_]+`(?:, | and | or |, and |, or )"
+ACTION_CONTEXTS = (
+    # "action `x`", "`action` `x`"
+    re.compile(r"\b`?action`? `$"),
+    # an action list: "actions `a`, `b` and `x`", "(actions `a` ... `x`", "`action` (`a`, ... `x`"
+    re.compile(rf"\b`?actions?`? \(?(?:{_LIST_ITEM})+`$"),
+    # the JSON value of "action"
+    re.compile(r'"action": "$'),
+    # a quoted error message's action list: "expected one of: a, b, x"
+    re.compile(r"expected one of: (?:[a-z_]+, )*$"),
+)
 
 
 def _version(text: str) -> tuple[int, ...]:
@@ -69,17 +80,17 @@ def retired_mentions(text: str, retired: frozenset[str] = RETIRED_MCP_TOOLS) -> 
     """Mentions of retired tool names; action values count only outside an action context."""
     found = []
     lines = text.split("\n")
-    flat_offsets, position = [], 0
-    for line in lines:
-        flat_offsets.append(position)
-        position += len(line) + 1
     for name in sorted(retired):
         pattern = re.compile(rf"(?<![\w/]){re.escape(name)}(?![\w/])")
         for match in pattern.finditer(text):
             number = text.count("\n", 0, match.start())
             if name in ACTION_VALUES:
-                before = " ".join(text[: match.start()].split())[-ACTION_WINDOW:]
-                if re.search(r"\bactions?\b", before) or _in_action_table(lines, number):
+                before = text[: match.start()]
+                trailing = " " if before[-1:].isspace() else ""
+                before = " ".join(before.split()) + trailing
+                if any(c.search(before) for c in ACTION_CONTEXTS) or _in_action_table(
+                    lines, number
+                ):
                     continue
             found.append(f"{number + 1}: {name}")
     return found
@@ -172,6 +183,18 @@ def test_retired_mentions_detects_tool_usage() -> None:
     ]
     assert retired_mentions("```json report_user_contact\n{}\n```") == ["1: report_user_contact"]
     assert retired_mentions("Use action `report_user_contact`.") == []
+    # The word "action" nearby is not enough (review finding on the earlier window rule).
+    loose = "Use action `renew` if needed. When your user replies, call `report_user_contact` now."
+    assert retired_mentions(loose) == ["1: report_user_contact"]
+    assert retired_mentions("an action, then `report_user_contact`") == ["1: report_user_contact"]
+    # Each allowed action context, as the guidance uses it.
+    for allowed in (
+        "(actions `claim`,\n  `renew`, `decline` and `report_user_contact`)",
+        "an `action` (`claim`, `decline` or `report_user_contact`)",
+        "for action `report_user_contact`,",
+        "expected one of: claim,\nrenew, decline, report_user_contact.",
+    ):
+        assert retired_mentions(allowed) == [], allowed
     assert retired_mentions('{"action": "report_user_contact"}') == []
     table = "| `action` | Required |\n| --- | --- |\n| `report_user_contact` | x |"
     assert retired_mentions(table) == []

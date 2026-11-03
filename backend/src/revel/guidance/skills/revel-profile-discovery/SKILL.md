@@ -113,7 +113,8 @@ Rules:
 
 - Confidence is not permission. A certain fact can still be private.
 - Narrow an audience with `update_fact` (`fact_id`, `action` `set_audience`, `audience`)
-  whenever the owner wants; tell them what you changed. Widen one only with the owner's confirmation (section 9).
+  whenever the owner wants; tell them what you changed. Widen one only with the owner's
+  confirmation (section 9).
 - Inferred or low-confidence facts are stored with status `provisional` and shared with a
   caveat.
 - A fact with `involves_others` set always waits for the owner's approval. Tell the owner it is
@@ -202,10 +203,11 @@ actually returned:
   with `supersedes_id` instead, or leave it as the owner set it.
 - If the user asks you to undo something you added, call `remove_fact` with its `fact_id`. A
   live fact is removed; a fact still pending review is rejected instead (see section 9). It is
-  not idempotent: removing an already removed or replaced fact is an error ("The fact changed;
-  read the profile again and retry"; HTTP `409` `fact_not_removable`, or `fact_not_pending`
-  if the fact changed meanwhile). Do not retry it blindly; call `get_profile` and check the
-  fact's current status.
+  not idempotent: repeating it, or a fact that changed meanwhile, is an error. Over MCP the
+  error is "The fact changed; read the profile again and retry". Over HTTP,
+  `DELETE /api/v1/profile/facts/{fact_id}` returns `409` `fact_not_removable` and
+  `POST /api/v1/profile/facts/{fact_id}/reject` returns `409` `fact_not_pending`. Do not retry
+  it blindly; call `get_profile` and check the fact's current status.
 
 ## 7. Ask only what matters
 
