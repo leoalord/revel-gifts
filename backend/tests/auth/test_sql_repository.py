@@ -50,6 +50,10 @@ def migrated_engine() -> Iterator[Engine]:
     try:
         yield engine
     finally:
+        # Leave no reconnect history behind: 0004's downgrade refuses several rows per
+        # (user, agent), and other modules reset the shared test database to base.
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE agent_delegations, agents, users CASCADE"))
         engine.dispose()
 
 
