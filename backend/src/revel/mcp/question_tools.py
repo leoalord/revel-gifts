@@ -68,14 +68,16 @@ GET_UPDATES_DESCRIPTION = (
 
 CLAIM_DESCRIPTION = (
     "Claim a question assignment from get_updates before working on it. Returns your lease "
-    "(lease_version, lease_expires_at, about 15 minutes; renew it while you work). Set "
-    "human_contact=true only if you will ask your user directly: one assistant per question may "
-    "do that, and Revel refuses if another assistant contacted the user recently. "
+    "(lease_version, lease_expires_at, about 15 minutes; renew it while you work). If you "
+    "can't answer from what you already know, claim with human_contact=true and ask your user "
+    "instead of declining. Only one assistant per question may contact the user, and Revel "
+    "refuses if the user was contacted about it recently (by any assistant, you included). "
     "prior_user_contacts says how often the user was already asked about this question."
 )
 RENEW_DESCRIPTION = (
     "Extend your lease on a claimed assignment. Quote the current lease_version; a stale or "
-    "expired lease is refused (claim again if the assignment is available)."
+    "expired lease is refused (claim again if the assignment is available). Renewals per "
+    "claim are limited."
 )
 RELEASE_DESCRIPTION = (
     "Give up your lease so the assignment can be claimed again (by you later, or another "
@@ -85,20 +87,26 @@ REPORT_CONTACT_DESCRIPTION = (
     "Report that you asked your user this question (after claiming it). Revel marks the "
     "assignment waiting_for_user and holds your human-contact lease for the response window "
     "(up to 24 hours, never past the question deadline). delivery_confirmed=true only if you "
-    "know the user received it. Then submit_answer once the user replies."
+    "know the user received it. Then submit_answer once the user replies. Reporting again "
+    "while waiting only updates delivery_confirmed: it does not extend the window and counts "
+    "against the renewal limit. Do not message the user again within the cooldown."
 )
 DECLINE_DESCRIPTION = (
     "Decline an assignment you will not answer (reason: cannot_answer, insufficient_context, "
-    "not_appropriate or other). Quote lease_version if you hold a lease."
+    "not_appropriate or other). Declining is final for you on this question, and the question "
+    "closes once every assistant declines. If you can't answer from what you know, prefer "
+    "claim_assignment with human_contact=true and ask your user. Quote lease_version if you "
+    "hold a lease."
 )
 SUBMIT_ANSWER_DESCRIPTION = (
     "Answer a claimed assignment. Quote your lease_version. body: the answer only, in a short "
-    "sentence or two. evidence (at least one item): either {claim_id} of a profile fact you "
-    "cite, or {category, proposed_audience, evidence_type (explicit/observed/inferred), "
-    "observed_month (YYYY-MM, optional)} for something not on the profile. No quotes, sources "
-    "or extra personal details. proposed_audience may not be more open than the owner's policy "
-    "for the category. To keep a new durable fact on the profile, add it with add_facts first "
-    "and cite its claim_id. Late answers (past the question deadline) are refused."
+    "sentence or two. evidence (at least one item; cite minimally, only what the answer relies "
+    "on): either {claim_id} of a profile fact you cite, or {category, proposed_audience, "
+    "evidence_type (explicit/observed/inferred), observed_month (YYYY-MM, optional)} for "
+    "something not on the profile. No quotes, sources or extra personal details. "
+    "proposed_audience may not be more open than the owner's policy for the category. To keep "
+    "a new durable fact on the profile, add it with add_facts first and cite its claim_id. "
+    "Late answers (past the question deadline) are refused."
 )
 GET_QUESTION_STATUS_DESCRIPTION = (
     "Check the status of a question you asked (open, answered, expired, declined, ...)."

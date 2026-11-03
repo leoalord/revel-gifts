@@ -21,9 +21,11 @@ Rules every operation follows:
 - Human contact: one ``human_contact`` lease (``claimed``/``waiting_for_user``) per question,
   enforced by F3's partial unique index (a violation maps to ``human_contact_taken``) after a
   pre-check. Before any new outreach (a ``human_contact`` claim or ``report_user_contact``),
-  prior ``user_contact_reported`` events on the question are checked: if ANOTHER delegation
-  contacted the user within ``OUTREACH_COOLDOWN`` the operation is ``outreach_cooldown``. The
-  cooldown is derived from events (no extra column). Human-contact paths take a per-question
+  prior ``user_contact_reported`` events on the question are checked: if ANY assistant (this one
+  included) contacted the user within ``OUTREACH_COOLDOWN`` the operation is
+  ``outreach_cooldown``. Re-confirming an existing contact is not new outreach (it never resets
+  the window) but counts against ``MAX_RENEWALS``. The cooldown is derived from events (no
+  extra column). Human-contact paths take a per-question
   transaction advisory lock so the cooldown check and the write are serialized.
 
 Statuses: ``available``/``released`` can be claimed; ``claimed``/``waiting_for_user`` hold a
@@ -46,7 +48,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, and_, false, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -320,22 +322,29 @@ def _lock_outreach(session: Session, question_id: UUID) -> None:
     )
 
 
+def _new_contact() -> ColumnElement[bool]:
+    """A ``user_contact_reported`` event that recorded NEW outreach (re-confirmations of an
+    existing contact carry ``re_report: true`` and neither count nor reset the cooldown)."""
+    return and_(
+        QuestionEvent.event_type == QuestionEventType.USER_CONTACT_REPORTED.value,
+        func.coalesce(QuestionEvent.details["re_report"].as_boolean(), false()).is_(False),
+    )
+
+
 def _prior_contacts(session: Session, question_id: UUID) -> int:
     return session.execute(
         select(func.count())
         .select_from(QuestionEvent)
-        .where(
-            QuestionEvent.question_id == question_id,
-            QuestionEvent.event_type == QuestionEventType.USER_CONTACT_REPORTED.value,
-        )
+        .where(QuestionEvent.question_id == question_id, _new_contact())
     ).scalar_one()
 
 
 def check_outreach_allowed(
-    session: Session, question_id: UUID, delegation_id: UUID, assignment_id: UUID, now: datetime
+    session: Session, question_id: UUID, assignment_id: UUID, now: datetime
 ) -> None:
-    """Refuse new outreach while another delegation contacted the user within the cooldown,
-    or another assignment holds the human-contact lease (index backstop is the write)."""
+    """Refuse new outreach while another assignment holds the human-contact lease (the unique
+    index is the write-time backstop) or while ANY assistant, this one included, contacted the
+    user about this question within ``OUTREACH_COOLDOWN``. Re-confirmations do not count."""
     holder = session.execute(
         select(Assignment.id).where(
             Assignment.question_id == question_id,
@@ -348,9 +357,7 @@ def check_outreach_allowed(
         raise HumanContactTaken()
     last = session.execute(
         select(func.max(QuestionEvent.occurred_at)).where(
-            QuestionEvent.question_id == question_id,
-            QuestionEvent.event_type == QuestionEventType.USER_CONTACT_REPORTED.value,
-            QuestionEvent.actor_delegation_id != delegation_id,
+            QuestionEvent.question_id == question_id, _new_contact()
         )
     ).scalar_one()
     if last is not None and last > now - OUTREACH_COOLDOWN:
@@ -371,7 +378,13 @@ def _renewals_since_claim(session: Session, row: _Row) -> int:
         .select_from(QuestionEvent)
         .where(
             QuestionEvent.assignment_id == row.id,
-            QuestionEvent.event_type == QuestionEventType.RENEWED.value,
+            or_(
+                QuestionEvent.event_type == QuestionEventType.RENEWED.value,
+                and_(
+                    QuestionEvent.event_type == QuestionEventType.USER_CONTACT_REPORTED.value,
+                    QuestionEvent.details["re_report"].as_boolean().is_(True),
+                ),
+            ),
             QuestionEvent.occurred_at >= row.claimed_at,
         )
     ).scalar_one()
@@ -468,8 +481,6 @@ async def claim_assignment(
     (capped at the question deadline). ``human_contact`` also takes the exclusive
     human-contact lease, after the outreach checks."""
     await load_own_assignment(principal, assignment_id, deps)
-    delegation_id = principal.delegation_id
-    assert delegation_id is not None
     now = deps.now()
 
     def work(session: Session) -> LeaseResponse:
@@ -491,7 +502,7 @@ async def claim_assignment(
                 raise AlreadyClaimed()
             raise QuestionClosed()
         if request.human_contact:
-            check_outreach_allowed(session, row.question_id, delegation_id, row.id, now)
+            check_outreach_allowed(session, row.question_id, row.id, now)
         expires = min(now + LEASE_DURATION, deadline)
         version = _versioned_update(
             session,
@@ -629,10 +640,15 @@ async def report_user_contact(
     """Record that this assistant asked its user: takes (or keeps) the exclusive human-contact
     lease, moves to ``waiting_for_user`` for ``HUMAN_RESPONSE_WINDOW`` (capped at the question
     deadline), records ``user_contacted_at``/``contact_delivery_confirmed`` and a
-    ``user_contact_reported`` event. Refused within another assistant's outreach cooldown."""
+    ``user_contact_reported`` event. New outreach is refused within the outreach cooldown of ANY
+    earlier contact on the question (this assistant's included).
+
+    A repeat report while already ``waiting_for_user`` is a re-confirmation, not new outreach:
+    it may update ``contact_delivery_confirmed`` but keeps ``user_contacted_at`` and
+    ``lease_expires_at`` (the response window is not reset), counts against ``MAX_RENEWALS``
+    and is recorded with ``re_report: true`` (which never counts toward or resets the
+    cooldown)."""
     await load_own_assignment(principal, assignment_id, deps)
-    delegation_id = principal.delegation_id
-    assert delegation_id is not None
     now = deps.now()
 
     def work(session: Session) -> LeaseResponse:
@@ -644,20 +660,25 @@ async def report_user_contact(
             session.commit()  # frees lapsed human-contact leases (possibly this one)
             _lock_outreach(session, row.question_id)
         row = held_lease(session, assignment_id, request.lease_version, now)
-        check_outreach_allowed(session, row.question_id, delegation_id, row.id, now)
         prior = _prior_contacts(session, row.question_id)
-        expires = min(now + HUMAN_RESPONSE_WINDOW, deadline)
-        version = _versioned_update(
-            session,
-            row,
-            HELD_LEASE_STATUSES,
-            now,
-            status=AssignmentStatus.WAITING_FOR_USER.value,
-            human_contact=True,
-            user_contacted_at=now,
-            contact_delivery_confirmed=request.delivery_confirmed,
-            lease_expires_at=expires,
-        )
+        re_report = row.status == AssignmentStatus.WAITING_FOR_USER.value
+        values: dict[str, object]
+        if re_report:
+            if _renewals_since_claim(session, row) >= MAX_RENEWALS:
+                raise RenewalLimitReached()
+            expires = row.lease_expires_at
+            values = {"contact_delivery_confirmed": request.delivery_confirmed}
+        else:
+            check_outreach_allowed(session, row.question_id, row.id, now)
+            expires = min(now + HUMAN_RESPONSE_WINDOW, deadline)
+            values = {
+                "status": AssignmentStatus.WAITING_FOR_USER.value,
+                "human_contact": True,
+                "user_contacted_at": now,
+                "contact_delivery_confirmed": request.delivery_confirmed,
+                "lease_expires_at": expires,
+            }
+        version = _versioned_update(session, row, HELD_LEASE_STATUSES, now, **values)
         session.flush()
         session.add(
             _event(
@@ -668,6 +689,7 @@ async def report_user_contact(
                 now,
                 delivery_confirmed=request.delivery_confirmed,
                 prior_user_contacts=prior,
+                re_report=re_report,
             )
         )
         session.commit()
@@ -677,7 +699,7 @@ async def report_user_contact(
             lease_version=version,
             lease_expires_at=expires,
             human_contact=True,
-            prior_user_contacts=prior + 1,
+            prior_user_contacts=prior if re_report else prior + 1,
         )
 
     return await _write(deps, work)
@@ -693,6 +715,11 @@ async def decline_assignment(
     now = deps.now()
 
     def work(session: Session) -> LeaseResponse:
+        row = _load(session, assignment_id)
+        assert row is not None
+        # Serializes declines (and outreach) per question so concurrent last declines see each
+        # other's writes and the question closes.
+        _lock_outreach(session, row.question_id)
         row = _load(session, assignment_id)
         assert row is not None
         open_question_expiry(session, row.question_id, now)

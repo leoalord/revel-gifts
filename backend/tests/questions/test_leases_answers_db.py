@@ -365,7 +365,12 @@ async def test_human_contact_path_waiting_for_user_then_answer_completes(
             )
         ).one()
     assert contact.actor_delegation_id == world.owner_d1.id
-    assert contact.details == {"via": "mcp", "delivery_confirmed": True, "prior_user_contacts": 0}
+    assert contact.details == {
+        "via": "mcp",
+        "delivery_confirmed": True,
+        "prior_user_contacts": 0,
+        "re_report": False,
+    }
 
     # The inbox shows the waiting lease.
     items = (await get_updates(d1, deps=deps(factory, clock))).items
