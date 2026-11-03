@@ -124,19 +124,23 @@ def lock_claim(session: Session, profile_id: UUID, claim_id: UUID) -> Claim:
     return claim
 
 
-def lock_claims(session: Session, profile_id: UUID, claim_ids: Iterable[UUID]) -> None:
+def lock_claims(
+    session: Session, profile_id: UUID, claim_ids: Iterable[UUID]
+) -> dict[UUID, Audience]:
     """Lock the given facts of ``profile_id`` ``FOR UPDATE`` in id order (missing or foreign
     ids are skipped; later per-row checks report them). Callers that will lock several facts
-    call this first so concurrent transactions acquire them in one global order."""
+    call this first so concurrent transactions acquire them in one global order. Returns the
+    locked facts' current audiences (e.g. so a replacement can be compared with its target)."""
     ids = sorted(set(claim_ids))
     if not ids:
-        return
-    session.execute(
-        select(Claim.id)
+        return {}
+    rows = session.execute(
+        select(Claim.id, Claim.audience)
         .where(Claim.profile_id == profile_id, Claim.id.in_(ids))
         .order_by(Claim.id)
         .with_for_update()
     ).all()
+    return {row.id: Audience(row.audience) for row in rows}
 
 
 def _supersede(
@@ -260,9 +264,11 @@ def narrow_category(
     audience: Audience,
     actor: Actor,
     policy_version: int,
+    acceptance: AcceptanceMode = AcceptanceMode.EXPLICIT,
 ) -> int:
-    """Owner tightened a category: narrow its live and pending facts that are wider than
-    ``audience`` (explicit, under the new policy version). Returns how many changed."""
+    """Owner tightened a category (in the browser or through their agent): narrow its live and
+    pending facts that are wider than ``audience`` (``acceptance`` as the caller decided, under
+    the new policy version). Returns how many changed."""
     wider = [a.value for a in Audience if a.rank < audience.rank]
     claims = (
         session.execute(
@@ -288,7 +294,7 @@ def narrow_category(
             claim,
             action=ClaimEventAction.AUDIENCE_CHANGED,
             actor=actor,
-            acceptance=AcceptanceMode.EXPLICIT,
+            acceptance=acceptance,
             policy_version=policy_version,
             changes={"audience": {"old": old, "new": audience.value}},
         )
@@ -392,6 +398,7 @@ def reject(
     claim_id: UUID,
     actor: Actor,
     policy_version: int | None,
+    acceptance: AcceptanceMode = AcceptanceMode.EXPLICIT,
 ) -> Claim:
     """Owner rejects a pending fact (status ``removed``); a replacement's target stays live."""
     claim = lock_claim(session, profile_id, claim_id)
@@ -404,7 +411,7 @@ def reject(
         claim,
         action=ClaimEventAction.REJECTED,
         actor=actor,
-        acceptance=AcceptanceMode.EXPLICIT,
+        acceptance=acceptance,
         policy_version=policy_version,
         changes=_status_change(old, ClaimStatus.REMOVED),
     )

@@ -1,0 +1,433 @@
+"""Agent-first owner controls (F5 #29) end to end through ``create_app``: the bearer agent API
+(``PUT /api/v1/profile/policy``, ``POST /api/v1/profile/facts/{id}/approve|reject``,
+``PATCH .../audience`` with ``owner_confirmed``) and the MCP tools ``set_contribution_policy``,
+``review_pending_fact`` and ``set_fact_audience``. The browser routes stay unchanged."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+from auth.authkit import TestAuthKit
+from authz_fakes import FakeFga
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+from test_profiles_http_mcp_db import BASE, FACT, MCP_HEADERS, ORIGIN, mcp_call, ui_client
+
+from revel.app import create_app
+from revel.auth.authz import configure_authz, reset_authz
+from revel.auth.hooks import ModuleAuthzHooks
+from revel.auth.repository import SqlAlchemyIdentityRepository
+from revel.auth.runtime import AuthRuntime, reset_auth_runtimes
+from revel.db.models import ClaimEvent
+
+CONFIRM = "owner_confirmation_required"
+
+
+@pytest.fixture
+def stack(factory: sessionmaker[Session]) -> Iterator[tuple[TestClient, AuthRuntime, Any]]:
+    authkit = TestAuthKit()
+    settings = TestAuthKit.settings(public_base_url=BASE)
+    runtime = authkit.install(
+        settings,
+        repository=SqlAlchemyIdentityRepository(lambda: factory),
+        hooks=ModuleAuthzHooks(),
+    )
+    fga = FakeFga()
+    try:
+        with TestClient(create_app(settings), base_url=BASE) as client:
+            configure_authz(fga)
+            client.headers["Authorization"] = f"Bearer {TestAuthKit.token(settings)}"
+            yield client, runtime, settings
+    finally:
+        reset_authz()
+        reset_auth_runtimes()
+
+
+def tool_error(result: dict[str, Any]) -> str:
+    assert result.get("isError") is True, result
+    return result["content"][0]["text"]
+
+
+def ok(result: dict[str, Any]) -> dict[str, Any]:
+    assert result.get("isError") is not True, result
+    return result["structuredContent"]
+
+
+def test_tools_are_listed_with_the_confirmation_rule(
+    stack: tuple[TestClient, AuthRuntime, Any],
+) -> None:
+    client, _, _ = stack
+    listed = client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=MCP_HEADERS
+    )
+    tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
+    for name in ("set_contribution_policy", "review_pending_fact", "set_fact_audience"):
+        tool = tools[name]
+        props = tool["inputSchema"]["properties"]
+        assert "owner_confirmed" in props and "owner_confirmed" not in tool["inputSchema"].get(
+            "required", []
+        )
+        assert "Never infer consent" in tool["description"]
+        assert "quote exactly what will change" in tool["description"]
+        assert tool["annotations"]["readOnlyHint"] is False
+    assert "expected_version" in tools["set_contribution_policy"]["inputSchema"]["required"]
+    decision = tools["review_pending_fact"]["inputSchema"]["properties"]["decision"]
+    assert set(decision["enum"]) == {"approve", "reject"}
+
+
+def test_bearer_owner_controls(
+    stack: tuple[TestClient, AuthRuntime, Any], factory: sessionmaker[Session]
+) -> None:
+    client, runtime, _ = stack
+    # First approval: refused with the changes list, then allowed with the flag.
+    first = client.put("/api/v1/profile/policy", json={"expected_version": None})
+    assert first.status_code == 403
+    body = first.json()
+    assert body["detail"] == CONFIRM and len(body["changes"]) == 1
+    assert "first time" in body["changes"][0]
+    assert client.get("/api/v1/profile/policy").json()["policy"] is None
+    v1 = client.put(
+        "/api/v1/profile/policy",
+        json={"expected_version": None, "require_review_all": True, "owner_confirmed": True},
+    )
+    assert v1.status_code == 200, v1.text
+    assert v1.json()["policy"]["version"] == 1
+
+    # Widening refused, narrowing fine; stale version is 409; invalid is 400; unknown 422.
+    widen = client.put(
+        "/api/v1/profile/policy", json={"expected_version": 1, "require_review_all": False}
+    )
+    assert widen.status_code == 403
+    assert widen.json() == {
+        "detail": CONFIRM,
+        "changes": ["Stop requiring your review of every assistant contribution"],
+    }
+    narrow = client.put(
+        "/api/v1/profile/policy", json={"expected_version": 1, "share_provisional": False}
+    )
+    assert narrow.status_code == 200 and narrow.json()["policy"]["version"] == 2
+    stale = client.put("/api/v1/profile/policy", json={"expected_version": 1})
+    assert stale.status_code == 409 and stale.json()["detail"] == "policy_version_conflict"
+    bad = client.put(
+        "/api/v1/profile/policy",
+        json={
+            "expected_version": 2,
+            "category_settings": {"size": {"audience": "public"}},
+            "owner_confirmed": True,
+        },
+    )
+    assert bad.status_code == 400
+    assert client.put("/api/v1/profile/policy", json={"nope": 1}).status_code == 422
+
+    # Pending facts (review required): approve needs the flag, reject does not.
+    added = client.post(
+        "/api/v1/profile/facts",
+        json={"facts": [FACT, {**FACT, "statement": "Owns a kettle"}]},
+    ).json()["results"]
+    a, b = (r["claim_id"] for r in added)
+    assert {r["outcome"] for r in added} == {"pending_review"}
+    refused = client.post(f"/api/v1/profile/facts/{a}/approve")
+    assert refused.status_code == 403 and refused.json()["detail"] == CONFIRM
+    assert "Approve the pending" in refused.json()["changes"][0]
+    refused = client.post(f"/api/v1/profile/facts/{a}/approve", json={"owner_confirmed": False})
+    assert refused.status_code == 403
+    approved = client.post(f"/api/v1/profile/facts/{a}/approve", json={"owner_confirmed": True})
+    assert approved.status_code == 200 and approved.json()["status"] == "active"
+    rejected = client.post(f"/api/v1/profile/facts/{b}/reject")
+    assert rejected.status_code == 200 and rejected.json()["status"] == "removed"
+    assert client.post(f"/api/v1/profile/facts/{b}/reject").status_code == 409
+
+    # Audience: narrow freely, widen only with the flag.
+    assert (
+        client.patch(f"/api/v1/profile/facts/{a}/audience", json={"audience": "only_me"}).json()[
+            "audience"
+        ]
+        == "only_me"
+    )
+    widen = client.patch(f"/api/v1/profile/facts/{a}/audience", json={"audience": "connections"})
+    assert widen.status_code == 403 and widen.json()["detail"] == CONFIRM
+    assert widen.json()["changes"][0].endswith("from Only me to Connections")
+    widened = client.patch(
+        f"/api/v1/profile/facts/{a}/audience",
+        json={"audience": "connections", "owner_confirmed": True},
+    )
+    assert widened.status_code == 200 and widened.json()["audience"] == "connections"
+
+    with factory() as s:
+        rows = s.execute(select(ClaimEvent).where(ClaimEvent.claim_id == a)).scalars().all()
+    by_action = {(r.action, r.acceptance) for r in rows if r.actor_delegation_id is not None}
+    assert ("approved", "explicit") in by_action
+    assert ("audience_changed", "explicit") in by_action
+
+    # The browser routes are unchanged: no flag (and no such field) there.
+    with ui_client(client, runtime) as ui:
+        assert (
+            ui.put(
+                "/api/ui/profile/policy",
+                json={"expected_version": 2, "owner_confirmed": True},
+                headers=ORIGIN,
+            ).status_code
+            == 422
+        )
+        v3 = ui.put(
+            "/api/ui/profile/policy",
+            json={"expected_version": 2, "require_review_all": False},
+            headers=ORIGIN,
+        )
+        assert v3.status_code == 200 and v3.json()["policy"]["version"] == 3
+        assert (
+            ui.patch(
+                f"/api/ui/profile/facts/{a}", json={"audience": "only_me"}, headers=ORIGIN
+            ).json()["audience"]
+            == "only_me"
+        )
+        assert (
+            ui.patch(
+                f"/api/ui/profile/facts/{a}", json={"audience": "connections"}, headers=ORIGIN
+            ).status_code
+            == 200
+        )
+
+
+def test_mcp_owner_controls(stack: tuple[TestClient, AuthRuntime, Any]) -> None:
+    client, _, _ = stack
+    text = tool_error(mcp_call(client, "set_contribution_policy", {"expected_version": None}))
+    assert f"{CONFIRM}:" in text
+    assert "- Approve the contribution policy for the first time" in text
+    v1 = ok(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {"expected_version": None, "require_review_all": True, "owner_confirmed": True},
+        )
+    )
+    assert v1["policy"]["version"] == 1 and v1["policy"]["require_review_all"] is True
+    assert {"categories", "audiences", "provisional_caveat"} <= set(v1)  # policy read shape
+
+    # Mixed write: the widening is listed; nothing is written until confirmed.
+    mixed = {
+        "expected_version": 1,
+        "enrichment_enabled": False,
+        "public_opt_in": True,
+    }
+    text = tool_error(mcp_call(client, "set_contribution_policy", mixed))
+    assert "- Opt in to Public" in text and "contributions" not in text.split("\n", 1)[1]
+    v2 = ok(mcp_call(client, "set_contribution_policy", {**mixed, "owner_confirmed": True}))
+    assert v2["policy"]["public_opt_in"] is True and v2["policy"]["enrichment_enabled"] is False
+    text = tool_error(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {"expected_version": 2, "public_opt_in": False, "enrichment_enabled": True},
+        )
+    )
+    assert text.endswith("- Turn assistant contributions back on")
+    narrowed = ok(
+        mcp_call(client, "set_contribution_policy", {"expected_version": 2, "public_opt_in": False})
+    )
+    assert narrowed["policy"]["version"] == 3 and narrowed["policy"]["public_opt_in"] is False
+    conflict = tool_error(
+        mcp_call(client, "set_contribution_policy", {"expected_version": 1, "public_opt_in": False})
+    )
+    assert "get_contribution_policy" in conflict
+    invalid = tool_error(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {"expected_version": 3, "category_settings": {"health": {"audience": "only_me"}}},
+        )
+    )
+    assert invalid.endswith("category_settings.*: unknown category")  # key not echoed
+    assert "health" not in invalid
+
+
+def test_mcp_review_and_audience(stack: tuple[TestClient, AuthRuntime, Any]) -> None:
+    client, runtime, settings = stack
+    ok(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {"expected_version": None, "require_review_all": True, "owner_confirmed": True},
+        )
+    )
+    with ui_client(client, runtime) as ui:
+        old = ui.post("/api/ui/profile/facts", json={"facts": [FACT]}, headers=ORIGIN)
+        old_id = old.json()["results"][0]["claim_id"]
+    (pending,) = ok(mcp_call(client, "add_facts", {"facts": [{**FACT, "supersedes_id": old_id}]}))[
+        "results"
+    ]
+    pid = pending["claim_id"]
+
+    text = tool_error(
+        mcp_call(client, "review_pending_fact", {"fact_id": pid, "decision": "approve"})
+    )
+    assert CONFIRM in text and old_id in text
+    fact = ok(
+        mcp_call(
+            client,
+            "review_pending_fact",
+            {"fact_id": pid, "decision": "approve", "owner_confirmed": True},
+        )
+    )
+    assert fact["status"] == "active" and fact["supersedes_id"] == old_id
+    statuses = {
+        f["id"]: f["status"]
+        for f in client.get("/api/v1/profile", params={"status": ["active", "superseded"]}).json()[
+            "facts"
+        ]
+    }
+    assert statuses == {pid: "active", old_id: "superseded"}
+
+    (other,) = ok(mcp_call(client, "add_facts", {"facts": [{**FACT, "statement": "x y"}]}))[
+        "results"
+    ]
+    removed = ok(
+        mcp_call(
+            client, "review_pending_fact", {"fact_id": other["claim_id"], "decision": "reject"}
+        )
+    )
+    assert removed["status"] == "removed"
+    assert "changed" in tool_error(
+        mcp_call(
+            client, "review_pending_fact", {"fact_id": other["claim_id"], "decision": "reject"}
+        )
+    )
+
+    ok(mcp_call(client, "set_fact_audience", {"fact_id": pid, "audience": "only_me"}))
+    text = tool_error(
+        mcp_call(client, "set_fact_audience", {"fact_id": pid, "audience": "trusted_circle"})
+    )
+    assert CONFIRM in text and "from Only me to Trusted Circle" in text
+    widened = ok(
+        mcp_call(
+            client,
+            "set_fact_audience",
+            {"fact_id": pid, "audience": "trusted_circle", "owner_confirmed": True},
+        )
+    )
+    assert widened["audience"] == "trusted_circle"
+
+    # Another user's assistant: the fact does not exist for them.
+    client.headers["Authorization"] = f"Bearer {TestAuthKit.token(settings, sub='user_bob')}"
+    for name, args in (
+        ("review_pending_fact", {"fact_id": pid, "decision": "reject", "owner_confirmed": True}),
+        ("set_fact_audience", {"fact_id": pid, "audience": "only_me", "owner_confirmed": True}),
+    ):
+        assert tool_error(mcp_call(client, name, args)).endswith("Fact not found")
+    for path in (f"/api/v1/profile/facts/{pid}/approve", f"/api/v1/profile/facts/{pid}/reject"):
+        assert client.post(path, json={"owner_confirmed": True}).status_code == 404
+    assert (
+        client.patch(
+            f"/api/v1/profile/facts/{pid}/audience",
+            json={"audience": "only_me", "owner_confirmed": True},
+        ).status_code
+        == 404
+    )
+    # Bob's own policy write touches only Bob's profile.
+    bob = ok(
+        mcp_call(
+            client, "set_contribution_policy", {"expected_version": None, "owner_confirmed": True}
+        )
+    )
+    assert bob["policy"]["version"] == 1 and bob["policy"]["require_review_all"] is False
+
+
+def _add_mcp(client: TestClient, item: dict[str, Any]) -> dict[str, Any]:
+    (result,) = ok(mcp_call(client, "add_facts", {"facts": [item]}))["results"]
+    return result
+
+
+def _add_bearer(client: TestClient, item: dict[str, Any]) -> dict[str, Any]:
+    response = client.post("/api/v1/profile/facts", json={"facts": [item]})
+    assert response.status_code == 200, response.text
+    (result,) = response.json()["results"]
+    return result
+
+
+@pytest.mark.parametrize("add", [_add_mcp, _add_bearer], ids=["mcp", "bearer"])
+def test_agent_corrections_never_widen_silently(
+    stack: tuple[TestClient, AuthRuntime, Any], add: Any
+) -> None:
+    """Review B1 through each transport: inherit when omitted (also cross-category), cap at
+    the category default, hold an explicit wider audience, accept equal or narrower."""
+    client, _, _ = stack
+    ok(
+        mcp_call(
+            client, "set_contribution_policy", {"expected_version": None, "owner_confirmed": True}
+        )
+    )
+    interest = {"category": "interest", "evidence_type": "explicit"}
+    private = add(client, {**interest, "statement": "Loves tea", "audience": "only_me"})
+    assert private["audience"] == "only_me"
+
+    def status_of(fact_id: str) -> str:
+        facts = client.get(
+            "/api/v1/profile", params={"status": ["active", "superseded", "pending_review"]}
+        ).json()["facts"]
+        return next(f["status"] for f in facts if f["id"] == fact_id)
+
+    same_cat = add(
+        client, {**interest, "statement": "Loves sencha", "supersedes_id": private["claim_id"]}
+    )
+    assert (same_cat["outcome"], same_cat["audience"]) == ("accepted", "only_me")
+    assert status_of(private["claim_id"]) == "superseded"
+
+    cross = add(
+        client,
+        {
+            "category": "style",
+            "statement": "Minimalist",
+            "evidence_type": "explicit",
+            "supersedes_id": same_cat["claim_id"],
+        },
+    )
+    assert (cross["outcome"], cross["audience"]) == ("accepted", "only_me")
+
+    wider = add(
+        client,
+        {
+            "category": "style",
+            "statement": "Scandinavian",
+            "evidence_type": "explicit",
+            "audience": "trusted_circle",
+            "supersedes_id": cross["claim_id"],
+        },
+    )
+    assert (wider["outcome"], wider["audience"]) == ("pending_review", "trusted_circle")
+    assert status_of(cross["claim_id"]) == "active"
+    refused = client.post(f"/api/v1/profile/facts/{wider['claim_id']}/approve")
+    assert refused.status_code == 403 and refused.json()["detail"] == CONFIRM
+    client.post(f"/api/v1/profile/facts/{wider['claim_id']}/reject")
+    assert status_of(cross["claim_id"]) == "active"
+
+    wide = add(client, {**interest, "statement": "Loves coffee"})
+    assert wide["audience"] == "connections"
+    capped = add(
+        client,
+        {
+            "category": "size",
+            "statement": "Wears M",
+            "evidence_type": "explicit",
+            "details": {"item": "shirt", "size": "M"},
+            "supersedes_id": wide["claim_id"],
+        },
+    )
+    assert (capped["outcome"], capped["audience"]) == ("accepted", "trusted_circle")
+    assert status_of(wide["claim_id"]) == "superseded"
+
+    narrower = add(
+        client,
+        {
+            "category": "size",
+            "statement": "Wears L",
+            "evidence_type": "explicit",
+            "details": {"item": "shirt", "size": "L"},
+            "audience": "only_me",
+            "supersedes_id": capped["claim_id"],
+        },
+    )
+    assert (narrower["outcome"], narrower["audience"]) == ("accepted", "only_me")
+    assert status_of(capped["claim_id"]) == "superseded"

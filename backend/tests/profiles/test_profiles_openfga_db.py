@@ -143,3 +143,40 @@ async def test_real_openfga_contribution_and_public_opt_in(
     with pytest.raises(AuthorizationDenied):
         await visible_claims(session, sam, pid)
     session.rollback()
+
+
+async def test_real_openfga_agent_public_opt_in_and_withdrawal(
+    session: Session, real_fga: OpenFgaServiceClient, world_unconfigured
+) -> None:
+    """#29: the owner's agent opts in to Public only with the owner's confirmation (tuples
+    granted after commit) and withdraws without it (tuples removed before commit)."""
+    world = world_unconfigured
+    for person in (world.alex, world.sam):
+        await real_fga.write_tuples(delegation_tuples(person.user.id, person.delegation.id))
+    alex, sam = world.alex, world.sam.mcp
+    with pytest.raises(profiles.OwnerConfirmationRequired):
+        await profiles.set_policy(session, alex.mcp, PolicyUpdate(public_opt_in=True))
+    await profiles.set_policy(
+        session, alex.mcp, PolicyUpdate(public_opt_in=True), owner_confirmed=True
+    )
+    (pub,) = (
+        await profiles.add_facts(
+            session,
+            alex.api,
+            [{"category": "interest", "statement": "Collects stamps", "evidence_type": "explicit"}],
+        )
+    ).results
+    assert (pub.outcome, pub.audience.value) == ("accepted", "public")
+    pid = (await profiles.get_my_profile(session, alex.mcp)).profile_id
+    seen = await visible_claims(session, sam, pid)
+    session.rollback()
+    assert seen.tier is ViewerTier.public
+    assert [c.statement for c in seen.claims] == ["Collects stamps"]
+
+    withdrawn = await profiles.set_policy(
+        session, alex.api, PolicyUpdate(expected_version=1, public_opt_in=False)
+    )
+    assert withdrawn.policy.version == 2 and withdrawn.policy.public_opt_in is False
+    with pytest.raises(AuthorizationDenied):
+        await visible_claims(session, sam, pid)
+    session.rollback()

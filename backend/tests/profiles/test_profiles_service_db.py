@@ -180,10 +180,11 @@ async def test_invalid_policy_rejected(session: Session, world: World, settings)
         await approve_policy(session, world, category_settings=settings)
 
 
-async def test_agents_cannot_write_policy(session: Session, world: World) -> None:
+async def test_agents_need_confirmation_for_first_policy(session: Session, world: World) -> None:
     for principal in (world.alex.mcp, world.alex.api):
-        with pytest.raises(NotAllowed):
+        with pytest.raises(profiles.OwnerConfirmationRequired) as info:
             await profiles.set_policy(session, principal, PolicyUpdate())
+        assert info.value.changes and "first time" in info.value.changes[0]
     # Agents can read it.
     assert (await profiles.get_policy(session, world.alex.mcp)).policy is None
 
@@ -401,10 +402,10 @@ async def test_approve_conflicts_when_target_gone_and_reject(
     assert [e.action for e in events(factory, b.claim_id)] == ["created", "rejected"]
     with pytest.raises(FactConflict):
         await profiles.reject_fact(session, world.alex.ui, b.claim_id)
-    # Agents never approve or reject.
+    # An agent reviewing a fact that is no longer pending also gets the conflict (#29).
     for op in (profiles.approve_fact, profiles.reject_fact):
-        with pytest.raises(NotAllowed):
-            await op(session, world.alex.mcp, a.claim_id)
+        with pytest.raises(FactConflict):
+            await op(session, world.alex.mcp, a.claim_id, owner_confirmed=True)
 
 
 async def test_audience_changes(
@@ -416,7 +417,7 @@ async def test_audience_changes(
         session, world.alex.mcp, r.claim_id, Audience.TRUSTED_CIRCLE
     )
     assert narrowed.audience is Audience.TRUSTED_CIRCLE
-    with pytest.raises(NotAllowed):
+    with pytest.raises(profiles.OwnerConfirmationRequired):
         await profiles.set_fact_audience(session, world.alex.api, r.claim_id, Audience.CONNECTIONS)
     widened = await profiles.patch_fact(
         session, world.alex.ui, r.claim_id, FactPatch(audience=Audience.CONNECTIONS)
