@@ -24,6 +24,11 @@ from revel.auth.hooks import AuthzHooks
 from revel.auth.identity import IdentityResolver
 from revel.auth.repository import IdentityRepository, SqlAlchemyIdentityRepository
 from revel.auth.tokens import JWKSCache, WorkOSTokenVerifier
+from revel.auth.workos_authorized_apps import (
+    AuthorizedApps,
+    NullAuthorizedApps,
+    WorkOSAuthorizedApps,
+)
 from revel.auth.workos_clients import ClientDirectory, NullClientDirectory, WorkOSClientDirectory
 from revel.auth.workos_users import NullUserDirectory, UserDirectory, WorkOSUserDirectory
 
@@ -111,6 +116,7 @@ def configure_auth(
     repository: IdentityRepository | None = None,
     user_directory: UserDirectory | None = None,
     client_directory: ClientDirectory | None = None,
+    authorized_apps: AuthorizedApps | None = None,
     hooks: AuthzHooks | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> AuthRuntime:
@@ -140,11 +146,22 @@ def configure_auth(
             if config.workos_api_key
             else NullClientDirectory()
         )
+    if authorized_apps is None:
+        authorized_apps = (
+            WorkOSAuthorizedApps(
+                config.workos_api_key,
+                base_url=config.workos_api_base_url,
+                http_client=http_client,
+            )
+            if config.workos_api_key
+            else NullAuthorizedApps()
+        )
     resolver = (
         IdentityResolver(
             repository,
             user_directory=user_directory,
             client_directory=client_directory,
+            authorized_apps=authorized_apps,
             hooks=hooks,
         )
         if repository is not None

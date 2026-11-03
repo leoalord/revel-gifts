@@ -203,12 +203,27 @@ def test_disconnected_delegation_rejected(
     (delegation,) = repo.delegations.values()
     repo.disconnect(delegation.id)
 
-    result = _call_tool(auth_client, token, "whoami")
-    assert result["isError"] is True
-    assert "disconnected" in result["content"][0]["text"]
+    # RG-10: a disconnected authorization's token is an invalid token: HTTP 401 with the
+    # standard challenge on both transports (MCP clients then restart OAuth), and nothing in
+    # the response distinguishes it from any other invalid token.
+    mcp = _rpc(
+        auth_client,
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "whoami"}},
+        token,
+    )
+    garbage = _rpc(auth_client, INITIALIZE, "garbage")
+    assert mcp.status_code == garbage.status_code == 401
+    assert mcp.headers["www-authenticate"] == garbage.headers["www-authenticate"]
+    assert 'error="invalid_token"' in mcp.headers["www-authenticate"]
+    assert f'resource_metadata="{RESOURCE_METADATA_URL}"' in mcp.headers["www-authenticate"]
+    assert mcp.json() == garbage.json()
+    assert _rpc(auth_client, INITIALIZE, token).status_code == 401
 
     response = auth_client.get("/me", headers=_bearer(token))
-    assert response.status_code == 403
+    garbage_me = auth_client.get("/me", headers=_bearer("garbage"))
+    assert response.status_code == garbage_me.status_code == 401
+    assert response.headers["www-authenticate"] == garbage_me.headers["www-authenticate"]
+    assert response.json() == garbage_me.json()
 
     (after,) = repo.delegations.values()
     assert after.id == delegation.id
