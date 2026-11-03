@@ -42,7 +42,10 @@ async def test_valid_token(verifier, make_token):
     assert access.subject == "user_alice"
     assert access.client_id == "client_muse"
     assert access.resource == RESOURCE
-    assert access.claims == {"iss": ISSUER, "sid": "session_1"}
+    # ``iat`` is kept (RG-10 reconnect): the resolver compares it with the last disconnect.
+    assert access.claims is not None and isinstance(access.claims["iat"], int)
+    assert abs(access.claims["iat"] - time.time()) < 60
+    assert access.claims == {"iss": ISSUER, "sid": "session_1", "iat": access.claims["iat"]}
     assert access.expires_at and access.expires_at > time.time()
 
 
