@@ -1,9 +1,19 @@
-"""Identity schema: people (users), OAuth clients (agents) and per-user delegations."""
+"""Identity schema: people (users), OAuth clients (agents), per-user delegations and the WorkOS
+sessions that acted through each delegation."""
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from revel.db.base import Base, TimestampMixin
@@ -34,13 +44,26 @@ class Agent(TimestampMixin, Base):
 class AgentDelegation(TimestampMixin, Base):
     """A user's link to an agent. Disconnecting changes ``status``; rows are never deleted.
 
-    First-call registration should use ``INSERT ... ON CONFLICT (user_id, agent_id) DO NOTHING``
-    and then read the row, so it can never reactivate a disconnected delegation.
+    At most one ``active`` row per (user, agent) (partial unique index); reconnecting after a
+    disconnect inserts a new row, so disconnected rows remain as history and are never
+    reactivated. Registration should use ``INSERT ... ON CONFLICT (user_id, agent_id) WHERE
+    status = 'active' DO NOTHING`` and then read the active row. ``authorized_sid`` is the WorkOS
+    session id whose token created the delegation.
     """
 
     __tablename__ = "agent_delegations"
     __table_args__ = (
-        UniqueConstraint("user_id", "agent_id"),
+        Index(
+            "uq_agent_delegations_user_id_agent_id_active",
+            "user_id",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_agent_delegations_user_id_agent_id", "user_id", "agent_id"),
+        CheckConstraint(
+            "authorized_sid IS NULL OR authorized_sid <> ''", name="authorized_sid_not_empty"
+        ),
         # Target of composite (delegation_id, user_id) FKs: a row that stores both a user and a
         # delegation can only cite a delegation that belongs to that user.
         UniqueConstraint("id", "user_id"),
@@ -66,3 +89,19 @@ class AgentDelegation(TimestampMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorized_sid: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentDelegationSession(Base):
+    """A WorkOS ``sid`` that acted through a delegation (insert-only)."""
+
+    __tablename__ = "agent_delegation_sessions"
+    __table_args__ = (CheckConstraint("sid <> ''", name="sid_not_empty"),)
+
+    delegation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_delegations.id", ondelete="RESTRICT"), primary_key=True
+    )
+    sid: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

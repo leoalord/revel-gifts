@@ -62,7 +62,12 @@ def test_deterministic_constraint_names() -> None:
         "pk_agents",
         "uq_agents_oauth_client_id",
         "pk_agent_delegations",
-        "uq_agent_delegations_user_id_agent_id",
+        "uq_agent_delegations_user_id_agent_id_active",
+        "ix_agent_delegations_user_id_agent_id",
+        "ck_agent_delegations_authorized_sid_not_empty",
+        "pk_agent_delegation_sessions",
+        "fk_agent_delegation_sessions_delegation_id_agent_delegations",
+        "ck_agent_delegation_sessions_sid_not_empty",
         "fk_agent_delegations_user_id_users",
         "fk_agent_delegations_agent_id_agents",
         "ck_agent_delegations_status",
@@ -70,7 +75,14 @@ def test_deterministic_constraint_names() -> None:
         "ix_agent_delegations_agent_id",
     ):
         assert name in ddl, name
-    assert ddl.count("ON DELETE RESTRICT") == 35  # every FK (identity 2, profile 13, 0003 20)
+    # every FK (identity 2, profile 13, 0003 20, 0004 1)
+    assert ddl.count("ON DELETE RESTRICT") == 36
+    # 0004: (user_id, agent_id) is unique only among active rows (no table-level UNIQUE).
+    assert "UNIQUE (user_id, agent_id)" not in ddl
+    assert (
+        "CREATE UNIQUE INDEX uq_agent_delegations_user_id_agent_id_active ON agent_delegations "
+        "(user_id, agent_id) WHERE status = 'active'"
+    ) in ddl
     assert "gen_random_uuid()" in ddl
 
 
@@ -83,6 +95,7 @@ def test_model_columns() -> None:
     delegations = AgentDelegation.__table__.c
     assert delegations.status.server_default.arg == "active"
     assert delegations.disconnected_at.nullable
+    assert delegations.authorized_sid.nullable
     assert not delegations.connected_at.nullable
     for table in (User.__table__, Agent.__table__, AgentDelegation.__table__):
         assert table.c.created_at.type.timezone and not table.c.created_at.nullable
@@ -91,8 +104,9 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0003_connections_questions"]
+    assert script.get_heads() == ["0004_delegation_reconnect"]
     assert [rev.revision for rev in script.walk_revisions()] == [
+        "0004_delegation_reconnect",
         "0003_connections_questions",
         "0002_profile",
         "0001_identity",

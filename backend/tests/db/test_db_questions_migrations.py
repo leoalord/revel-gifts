@@ -400,7 +400,7 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
         "answers": {"uq_answers_profile_id_id": ["profile_id", "id"]},
         "answer_evidence": {},
         "agent_delegations": {
-            "uq_agent_delegations_user_id_agent_id": ["user_id", "agent_id"],
+            # 0004 replaced UNIQUE (user_id, agent_id) with a partial unique index (active rows).
             "uq_agent_delegations_id_user_id": ["id", "user_id"],
         },
     }
@@ -1314,5 +1314,5 @@ def test_downgrade_to_profile_and_reupgrade(
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0003_connections_questions"
+            == "0004_delegation_reconnect"
         )

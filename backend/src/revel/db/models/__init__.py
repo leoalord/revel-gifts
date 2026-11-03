@@ -1,7 +1,7 @@
 """All ORM models. Import from here so ``Base.metadata`` is complete (Alembic relies on it)."""
 
 from revel.db.models.connections import ConnectionRequest, Handle
-from revel.db.models.identity import Agent, AgentDelegation, User
+from revel.db.models.identity import Agent, AgentDelegation, AgentDelegationSession, User
 from revel.db.models.profile import Claim, ClaimEvent, ContributionPolicy, Profile
 from revel.db.models.questions import (
     Answer,
@@ -14,6 +14,7 @@ from revel.db.models.questions import (
 __all__ = [
     "Agent",
     "AgentDelegation",
+    "AgentDelegationSession",
     "Answer",
     "AnswerEvidence",
     "Assignment",
