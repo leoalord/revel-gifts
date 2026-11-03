@@ -339,11 +339,13 @@ async def test_human_contact_path_waiting_for_user_then_answer_completes(
     d1 = agent_principal(world.owner_d1)
     a1 = by_delegation[world.owner_d1.id]
 
+    # Claim after ask()'s made_available events: event ids are random, so order by occurred_at.
+    clock.advance(timedelta(seconds=1))
     lease = await claim_assignment(
         d1, a1, ClaimRequest(human_contact=True), deps=deps(factory, clock)
     )
     assert lease.prior_user_contacts == 0
-    assert lease.lease_expires_at == T0 + LEASE_DURATION
+    assert lease.lease_expires_at == clock.now + LEASE_DURATION
     clock.advance(timedelta(minutes=5))
     waiting = await report_user_contact(
         d1,
