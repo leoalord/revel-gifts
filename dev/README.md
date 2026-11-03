@@ -29,8 +29,12 @@ The [MVP page](https://app.notion.com/p/40b2bade7f3181ad84f0d14cf641fec7) owns t
 gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
   --args="-m,revel.demo.reset,--target,dev"                                   # dry run
 gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
-  --args="-m,revel.demo.reset,--target,dev,--apply,--no-active-hold"          # apply
+  --args="-m,revel.demo.reset,--target,dev,--apply,--no-active-hold"          # apply (seeds)
+gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+  --args="-m,revel.demo.reset,--target,dev,--apply,--no-active-hold,--no-seed" # live-first
 ```
+
+**Live facts, prepared backup.** For the recording, reset with `--no-seed` (the dry run takes it too). Phases A and B run as usual and no prepared facts are added. Leo's profile starts with 0 facts, Leo's Muse adds them live during the demo, and the manifest is empty. Verify then checks that Sam is denied, that Jordan is permitted at trusted_circle, that no demo questions are open and that Leo has 0 active claims. If the live take fails, the fallback is a normal run without `--no-seed`. It clears whatever Muse added and seeds the six prepared facts, with their manifest. No other mode is needed.
 
 - `--target dev` must match `PUBLIC_BASE_URL` (`https://api.revel.gifts`). `--apply` also needs `--no-active-hold`: run it only when no verification hold is announced, because it changes shared test state.
 - It refuses (exit 2, nothing written; the dry run exits 2 too) in these cases: a handle is missing, a handle resolves to a user other than the pinned id in `revel/demo/seed.py`, the Jordan→Leo Trusted Circle baseline is missing or at the wrong tier, or any row in scope names a user outside the three. Connection requests that involve anyone else are left alone and counted.

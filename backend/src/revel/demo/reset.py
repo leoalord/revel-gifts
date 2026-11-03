@@ -38,6 +38,10 @@ B. Connections, through F6's service functions only (each its own transaction; F
    (window 0, no prune).
 C. Re-seed the recipient's prepared facts through F5's ``add_facts`` as the owner (browser UI
    principal) and print the disclosure manifest (seed key, claim id, audience, "prepared").
+   ``--no-seed`` skips Phase C for the live-first demo: the manifest is empty and verify checks
+   Jordan's trusted_circle permission and 0 active claims on the recipient profile instead of
+   the seeds. The prepared seeds are the fallback: a later run without ``--no-seed`` clears
+   whatever was added live and seeds them.
 
 Verify: before/after counts and read-only authorization checks through F4 (Sam denied on
 Leo's profile; Jordan at trusted_circle sees the Trusted Circle seed); no demo questions remain;
@@ -69,7 +73,7 @@ from revel.auth.authz import AuthorizationDenied, ViewerTier
 from revel.auth.fga import FgaClient, FgaConfigurationError, create_fga_client
 from revel.auth.identity import Principal
 from revel.auth.visibility import SharedClaim, visible_claims
-from revel.db.enums import LIVE_CONNECTION_REQUEST_STATUSES, QuestionStatus
+from revel.db.enums import LIVE_CONNECTION_REQUEST_STATUSES, ClaimStatus, QuestionStatus
 from revel.db.models import (
     Agent,
     AgentDelegation,
@@ -624,8 +628,14 @@ async def verify(
     manifest: Sequence[ManifestEntry],
     kept: Sequence[UUID],
     out: TextIO,
+    *,
+    seeded: bool = True,
 ) -> list[str]:
-    """Read-only checks through F4's authorization service. Returns failures."""
+    """Read-only checks through F4's authorization service. Returns failures.
+
+    ``seeded=False`` (``--no-seed``): there are no facts to look for, so Jordan's read must be
+    permitted at trusted_circle (same ``visible_claims`` path) and the recipient profile must
+    have 0 active claims."""
     failures: list[str] = []
     profile_id = scope.recipient_profile
     trusted_claim = next((m.claim_id for m in manifest if m.seed_key == TRUSTED_ONLY_SEED), None)
@@ -645,6 +655,12 @@ async def verify(
             ids = {c.id for c in seen.claims if isinstance(c, SharedClaim)}
             if seen.tier is not ViewerTier.trusted_circle:
                 failures.append(f"{JORDAN_HANDLE} tier is {seen.tier}, not trusted_circle")
+            elif not seeded:
+                print(
+                    f"  {JORDAN_HANDLE} read of recipient profile: permitted at trusted_circle, "
+                    f"{len(ids)} facts visible (ok; no prepared facts)",
+                    file=out,
+                )
             elif trusted_claim is None or trusted_claim not in ids:
                 failures.append(f"{JORDAN_HANDLE} cannot see the {TRUSTED_ONLY_SEED} seed")
             else:
@@ -654,13 +670,26 @@ async def verify(
                     file=out,
                 )
 
-        def sql_checks() -> tuple[dict[str, int], int]:
+        def sql_checks() -> tuple[dict[str, int], int, int]:
             try:
-                return demo_counts(session, scope), _live_sam_leo(session, scope)
+                active = session.execute(
+                    select(func.count())
+                    .select_from(Claim)
+                    .where(
+                        Claim.profile_id == profile_id,
+                        Claim.status == ClaimStatus.ACTIVE.value,
+                    )
+                ).scalar_one()
+                return demo_counts(session, scope), _live_sam_leo(session, scope), int(active)
             finally:
                 session.rollback()
 
-        counts, sam_leo = await anyio.to_thread.run_sync(sql_checks)
+        counts, sam_leo, active_claims = await anyio.to_thread.run_sync(sql_checks)
+    if not seeded:
+        if active_claims:
+            failures.append(f"recipient profile has {active_claims} active claim(s), expected 0")
+        else:
+            print("  recipient profile active claims: 0 (ok)", file=out)
     if counts["open_questions"] or counts["questions"]:
         failures.append(f"demo questions remain: {counts['questions']}")
     if sam_leo:
@@ -741,6 +770,7 @@ async def run(
     fga: FgaClient | None = None,
     out: TextIO = sys.stdout,
     expected_user_ids: Mapping[str, UUID] = DEMO_USER_IDS,
+    seed: bool = True,
 ) -> int:
     settings = settings or get_settings()
     try:
@@ -768,16 +798,20 @@ async def run(
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
 
-    print(f"Demo reset ({'APPLY' if apply else 'DRY RUN'}), target {target}", file=out)
+    mode = "APPLY" if apply else "DRY RUN"
+    print(f"Demo reset ({mode}{'' if seed else ', NO SEED'}), target {target}", file=out)
     _print_counts("Clear plan (rows to delete):", clear_plan.counts(), out)
     print(f"  open questions among them: {clear_plan.open_questions}", file=out)
     print(f"  demo profiles without a policy: {clear_plan.profiles_without_policy}", file=out)
     if clear_plan.profiles_without_policy:
         print("  NOTE: a demo profile has no contribution policy (kept going)", file=out)
     _print_conn_plan(conn_plan, out)
-    print("Seeds to add (prepared):", file=out)
-    for s in SEED_FACTS:
-        print(f"  {s.key}: category {s.category}, audience {s.audience.value}", file=out)
+    if seed:
+        print("Seeds to add (prepared):", file=out)
+        for s in SEED_FACTS:
+            print(f"  {s.key}: category {s.category}, audience {s.audience.value}", file=out)
+    else:
+        print("Seeds to add: none (--no-seed; facts arrive live)", file=out)
     if clear_plan.violation_total:
         print("Scope check: FAIL (rows name a user outside the demo allowlist)", file=out)
         for k, n in sorted(clear_plan.violations.items()):
@@ -827,19 +861,29 @@ async def run(
         if reconcile_error:
             errors.append(reconcile_error)
 
-        # Phase C: re-seed through F5.
-        phase = "C (re-seed)"
-        print("Phase C: re-seed", file=out)
-        manifest, seed_errors = await reseed(scope, sessions)
-        errors += seed_errors
-        print("Disclosure manifest (prepared facts; later assistant facts are live):", file=out)
-        for m in manifest:
-            print(f"  {m.seed_key}: claim {m.claim_id}, audience {m.audience}, {m.label}", file=out)
+        # Phase C: re-seed through F5 (skipped with --no-seed: facts arrive live).
+        manifest: list[ManifestEntry] = []
+        if seed:
+            phase = "C (re-seed)"
+            print("Phase C: re-seed", file=out)
+            manifest, seed_errors = await reseed(scope, sessions)
+            errors += seed_errors
+            print("Disclosure manifest (prepared facts; later assistant facts are live):", file=out)
+            for m in manifest:
+                print(
+                    f"  {m.seed_key}: claim {m.claim_id}, audience {m.audience}, {m.label}",
+                    file=out,
+                )
+        else:
+            print("Phase C: skipped (--no-seed)", file=out)
+            print(
+                "Disclosure manifest: no prepared facts were added (all facts are live)", file=out
+            )
 
         # Verify.
         phase = "verify"
         print("Verify:", file=out)
-        failures = await verify(scope, sessions, client, manifest, conn_plan.kept, out)
+        failures = await verify(scope, sessions, client, manifest, conn_plan.kept, out, seeded=seed)
 
         def after_counts() -> dict[str, int]:
             with factory() as session:
@@ -879,9 +923,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="confirm no verification hold is announced (required with --apply)",
     )
+    parser.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="skip Phase C: add no prepared facts (live-first demo; a later normal run seeds)",
+    )
     args = parser.parse_args(argv)
     return asyncio.run(
-        run(target=args.target, apply=args.apply, no_active_hold=args.no_active_hold)
+        run(
+            target=args.target,
+            apply=args.apply,
+            no_active_hold=args.no_active_hold,
+            seed=not args.no_seed,
+        )
     )
 
 

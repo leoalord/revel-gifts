@@ -189,9 +189,12 @@ async def run(
     hold: bool = True,
     target: str = "dev",
     ids: dict[str, UUID] | None = None,
+    seed: bool | None = None,
 ) -> tuple[int, str]:
     out = io.StringIO()
     extra: dict[str, Any] = {} if ids is None else {"expected_user_ids": ids}
+    if seed is not None:  # omitted: the default (seeding) path, unchanged
+        extra["seed"] = seed
     code = await reset.run(
         target=target,
         apply=apply,
@@ -766,3 +769,153 @@ async def test_unconfigured_openfga_refuses_apply(
     code, _ = await run(sessions, FakeFga(configured=False), dev_settings, apply=True)
     assert code == reset.EXIT_REFUSED
     assert table_counts(session) == before
+
+
+# --- --no-seed (live-first demo) --------------------------------------------------------------
+
+
+async def test_no_seed_dry_run_and_apply(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)
+    sam_to_leo = await connect(sessions, world.sam, world.leo, None)
+    baseline = session.scalar(
+        select(ConnectionRequest.id).where(
+            ConnectionRequest.requester_user_id == world.jordan.user.id,
+            ConnectionRequest.target_user_id == world.leo.user.id,
+        )
+    )
+    before, states, tuples = table_counts(session), request_states(session), set(fga.tuples)
+
+    code, out = await run(sessions, fga, dev_settings, seed=False)
+    assert code == reset.EXIT_OK
+    assert "DRY RUN, NO SEED" in out and "Seeds to add: none" in out
+    assert table_counts(session) == before
+    assert request_states(session) == states
+    assert fga.tuples == tuples
+
+    code, out = await run(sessions, fga, dev_settings, apply=True, seed=False)
+    assert code == reset.EXIT_OK, out
+    assert "Phase C: skipped (--no-seed)" in out
+    assert "no prepared facts were added" in out
+    assert manifest_of(out)["facts"] == []
+    assert "recipient profile active claims: 0 (ok)" in out
+    assert "sam_demo read of recipient profile: denied (ok)" in out
+    assert "jordan_demo read of recipient profile: permitted at trusted_circle" in out
+    assert "VERIFY FAILED" not in out and "ERROR" not in out
+
+    session.expire_all()
+    leo_profile = world.leo.profile.id
+    n_claims = session.scalar(
+        select(func.count()).select_from(Claim).where(Claim.profile_id == leo_profile)
+    )
+    assert n_claims == 0
+    versions = list(
+        session.scalars(
+            select(ContributionPolicy.version).where(ContributionPolicy.profile_id == leo_profile)
+        )
+    )
+    assert versions == [1]
+    n_questions = session.scalar(
+        select(func.count()).select_from(Question).where(Question.profile_id == leo_profile)
+    )
+    assert n_questions == 0
+    states = request_states(session)
+    assert states[baseline] == ("approved", "trusted_circle")
+    assert states[sam_to_leo][0] == ConnectionRequestStatus.DECLINED.value
+    # Same authz path: Sam denied, Jordan at trusted_circle with nothing to see yet.
+    with pytest.raises(AuthorizationDenied):
+        await visible_claims(session, world.sam.ui, leo_profile, fga=fga)
+    seen = await visible_claims(session, world.jordan.ui, leo_profile, fga=fga)
+    assert seen.tier is ViewerTier.trusted_circle and seen.claims == ()
+
+
+async def test_no_seed_then_normal_run_restores_the_six_seeds(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)
+    code, out = await run(sessions, fga, dev_settings, apply=True, seed=False)
+    assert code == reset.EXIT_OK, out
+    # Leo's Muse adds a fact live during the take.
+    live = add_claim(
+        session,
+        world.leo,
+        statement="Live synthetic fact",
+        contributed_via="mcp",
+        contributor_delegation_id=world.leo.delegation.id,
+    )
+    session.commit()
+
+    code, out = await run(sessions, fga, dev_settings, apply=True)
+    assert code == reset.EXIT_OK, out
+    facts = manifest_of(out)["facts"]
+    assert len(facts) == 6
+    session.expire_all()
+    leo_claims = set(
+        session.scalars(select(Claim.id).where(Claim.profile_id == world.leo.profile.id))
+    )
+    assert live not in leo_claims
+    assert leo_claims == {UUID(f["claim_id"]) for f in facts}
+
+
+@pytest.mark.parametrize("case", ["target", "hold", "handle", "scope", "baseline"])
+async def test_no_seed_keeps_refusals(
+    case: str,
+    session: Session,
+    sessions: Any,
+    fga: FakeFga,
+    world: World,
+    dev_settings: Settings,
+) -> None:
+    messy(session, world)
+    settings, hold = dev_settings, True
+    if case == "target":
+        settings = Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    elif case == "hold":
+        hold = False
+    elif case == "handle":
+        session.execute(
+            update(Handle).where(Handle.user_id == world.sam.user.id).values(handle="sam_x")
+        )
+    elif case == "scope":
+        add_question(session, world.leo, world.cal, world.leo)
+    elif case == "baseline":
+        baseline = session.scalar(select(ConnectionRequest.id))
+        session.commit()
+        await connections.revoke(world.leo.ui, baseline, sessions=sessions)
+    session.commit()
+    before, states, tuples = table_counts(session), request_states(session), set(fga.tuples)
+    code, out = await run(sessions, fga, settings, apply=True, hold=hold, seed=False)
+    assert code == reset.EXIT_REFUSED
+    assert "Phase A" not in out
+    assert table_counts(session) == before
+    assert request_states(session) == states
+    assert fga.tuples == tuples
+
+
+async def test_no_seed_verify_fails_on_active_claims(
+    session: Session, sessions: Any, fga: FakeFga, world: World
+) -> None:
+    add_claim(session, world.leo)
+    session.commit()
+    ids = {p.handle: p.user.id for p in (world.leo, world.sam, world.jordan)}
+    with session.begin():
+        scope = reset.resolve_scope(session, ids)
+    kept = [session.scalar(select(ConnectionRequest.id))]
+    session.rollback()
+    failures = await reset.verify(scope, sessions, fga, [], kept, io.StringIO(), seeded=False)
+    assert failures == ["recipient profile has 1 active claim(s), expected 0"]
+
+
+def test_main_parses_no_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(reset, "run", fake_run)
+    assert reset.main(["--target", "dev"]) == 0
+    assert reset.main(["--target", "dev", "--apply", "--no-active-hold", "--no-seed"]) == 0
+    assert calls[0]["seed"] is True and calls[0]["apply"] is False
+    assert calls[1] == {"target": "dev", "apply": True, "no_active_hold": True, "seed": False}
