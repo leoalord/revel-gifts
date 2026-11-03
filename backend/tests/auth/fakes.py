@@ -52,6 +52,9 @@ class InMemoryIdentityRepository:
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
         return self.agents.get(agent_id)
 
+    async def get_agent_by_client_id(self, oauth_client_id: str) -> AgentRecord | None:
+        return next((a for a in self.agents.values() if a.oauth_client_id == oauth_client_id), None)
+
     def _view(self, record: DelegationRecord) -> DelegationView:
         return DelegationView(
             id=record.id,

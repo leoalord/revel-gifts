@@ -140,6 +140,8 @@ class IdentityRepository(Protocol):
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None: ...
 
+    async def get_agent_by_client_id(self, oauth_client_id: str) -> AgentRecord | None: ...
+
     async def list_delegations_for_user(self, user_id: UUID) -> list[DelegationView]: ...
 
     async def get_delegation_view(
@@ -333,6 +335,9 @@ class SqlAlchemyIdentityRepository:
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
         return await anyio.to_thread.run_sync(self._get_agent, agent_id)
+
+    async def get_agent_by_client_id(self, oauth_client_id: str) -> AgentRecord | None:
+        return await anyio.to_thread.run_sync(self._get_agent_by_client_id, oauth_client_id)
 
     # --- insert-if-absent ------------------------------------------------------------
 
