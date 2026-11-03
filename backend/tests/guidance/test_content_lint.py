@@ -185,11 +185,124 @@ def test_index_lists_every_registered_tool_and_bearer_route(client: TestClient) 
     index = documents()["index"].body
     for tool in registered:
         assert f"`{tool}`" in index, tool
-    paths = client.get("/openapi.json").json()["paths"]
-    for path, ops in paths.items():
-        if path.startswith(("/api/v1/", "/api/questions", "/api/updates", "/api/assignments")):
-            for method in ops:
-                assert f"`{method.upper()} {path}`" in index, f"{method.upper()} {path}"
+    # Every agent bearer route (marked with F2's bearerAuth scheme) is in the route catalog.
+    bearer = bearer_routes(client)
+    assert bearer
+    for route in bearer:
+        assert f"`{route}`" in index, route
+
+
+def bearer_routes(client: TestClient) -> set[str]:
+    """OpenAPI operations marked with the bearerAuth scheme, minus the identity route /me."""
+    spec = client.get("/openapi.json").json()
+    assert "bearerAuth" in spec["components"]["securitySchemes"]
+    return {
+        f"{method.upper()} {path}"
+        for path, ops in spec["paths"].items()
+        for method, op in ops.items()
+        if {"bearerAuth": []} in op.get("security", []) and path != "/me"
+    }
+
+
+def test_bearer_routes_are_the_implemented_api_routes(client: TestClient) -> None:
+    # The security marks, not a path-prefix list, say which routes take the bearer token.
+    implemented_api = {r for r in IMPLEMENTED_HTTP if r.split(" ", 1)[1].startswith("/api/")}
+    assert bearer_routes(client) == implemented_api
+
+
+# --- HTTP API audience (B7): for assistants without MCP access, never for people ----------------
+
+HTTP_AUDIENCE = (
+    "The HTTP API is for assistants without MCP access. Access for them is not available yet "
+    "(issuing them tokens is deferred), so use MCP, the supported path today."
+)
+API_TERM = re.compile(
+    r"\bAPI\b|\bHTTP\b|/api/|openapi|\b(these|the|bearer|HTTP) routes?\b|\bendpoints?\b|\bcurl\b",
+    re.I,
+)
+# Backticked spans hold routes and parameter names (`owner_confirmed`), not who calls them.
+CODE_SPAN = re.compile(r"`[^`]*`")
+# People, as opposed to assistants. "your user"/"the owner" are people too.
+PERSON = re.compile(
+    r"\b(people|persons?|humans?|developers?|members?|owners?|your user|the user|users|"
+    r"you yourself|by hand|manually|directly)\b",
+    re.I,
+)
+# Stale or human-facing framings the B7 decision retired.
+RETIRED_HTTP_PHRASES = ("not decided yet", "decision is pending", "API-only clients")
+NOT_FOR_PEOPLE = (
+    "People never use the HTTP API themselves: they use their assistant or the Revel website."
+)
+
+
+def human_api_sentences(text: str) -> list[str]:
+    """Prose sentences that mention the API and a person without a negation (tables and code
+    excluded: rows name operations, not who calls them)."""
+    prose = "\n".join(
+        line
+        for line in text.split("\n")
+        if not line.startswith("|") and not line.lstrip().startswith(("```", "{"))
+    )
+    flat = " ".join(prose.split())
+    found = []
+    for sentence in re.split(r"(?<=[.:;])\s+", flat):
+        words = CODE_SPAN.sub(" ", sentence)
+        api = API_TERM.search(words) or "/api/" in sentence
+        if api and PERSON.search(words) and not NEGATION.search(words):
+            found.append(sentence)
+    return found
+
+
+def _served_without_history(name: str) -> str:
+    body = documents()[name].body
+    return body.split("\n## 0.6.0", 1)[0] if name == "CHANGELOG" else body
+
+
+@pytest.mark.parametrize("name", DOC_NAMES)
+def test_http_api_is_presented_for_assistants_only(name: str) -> None:
+    text = _served_without_history(name)
+    flat = " ".join(text.split())
+    for phrase in RETIRED_HTTP_PHRASES:
+        assert phrase not in flat, f"{name}: {phrase!r}"
+    assert human_api_sentences(text) == [], name
+    if name != "CHANGELOG" and HTTP_ROUTE_IN_TEXT.search(text):
+        assert HTTP_AUDIENCE in flat, f"{name}: names HTTP routes without the audience sentence"
+
+
+HTTP_ROUTE_IN_TEXT = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) /api/")
+
+
+def test_index_says_people_never_use_the_api() -> None:
+    flat = " ".join(documents()["index"].body.split())
+    assert NOT_FOR_PEOPLE in flat
+    assert "HTTP API reference, for assistants without MCP access" in flat
+    assert "The HTTP column is the reference for assistants without MCP access" in flat
+    assert "declares the bearer scheme (`bearerAuth`) on these routes" in flat
+    for skill in (
+        "revel-manage-profile",
+        "revel-connect-and-read",
+        "revel-find-a-gift",
+        "revel-answer-question",
+    ):
+        assert "## HTTP equivalent (assistants without MCP access)" in documents()[skill].body
+
+
+def test_human_api_lint_catches_violations() -> None:
+    for bad in (
+        "You or your user can call the HTTP API with a token.",
+        "People can use the API directly.",
+        "Developers call `GET /api/updates` with curl.",
+        "The owner may use these routes in a browser.",
+        "Use the API reference to explore it manually.",
+    ):
+        assert human_api_sentences(bad) == [bad], bad
+    for ok in (
+        NOT_FOR_PEOPLE,
+        HTTP_AUDIENCE,
+        "| Read your user's own profile | `get_profile` | `GET /api/v1/profile` |",
+        "Owners can also do this in the Revel website.",
+    ):
+        assert human_api_sentences(ok) == [], ok
 
 
 @pytest.mark.anyio

@@ -1,11 +1,11 @@
 ---
-name: revel-giver-workflow
+name: revel-find-a-gift
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.6.0
+version: 0.7.0
 status: active
 ---
 
-# Revel giver workflow
+# Revel: find a gift
 
 Use this when your user wants a gift idea for someone they are connected to on Revel.
 
@@ -33,6 +33,14 @@ Call `submit_question` with the recipient's `handle` and:
 - `private_purpose`: the planning context, which only Revel sees and the recipient and their
   assistants never see: `occasion`, `occasion_date`, `budget`, `candidate_ideas` (up to 10) and
   `notes`. The occasion, date and budget go here, never in `requested_information`.
+- By default, include the `occasion`, `occasion_date`, `budget` and the `candidate_ideas` you
+  are weighing. Revel checks your question, and the shorter question it routes, against
+  `occasion`, `occasion_date`, `budget`, `candidate_ideas` and `notes`, and keeps their words
+  out of what the recipient's assistants see: that is how it keeps the question surprise-safe.
+  What you leave out, Revel cannot check for.
+- If your own client refuses to send these details, send the `occasion` alone. The question
+  itself must then stay neutral: never put a gift idea, brand or product name in
+  `requested_information` (for example, ask "What outdoor gear does Alex already have?").
 - a deadline: either `expires_at` (a timezone-aware time) or `expires_in_hours`, not both. With
   neither, the question expires after 72 hours. Revel keeps the deadline between 1 hour and 14
   days; if the result has `deadline_clamped` true, tell your user the deadline that applies.
@@ -106,9 +114,11 @@ drop the binoculars, suggest the birding field guide and a lens cleaning kit, ex
 both build on "enjoys birdwatching" from Alex's profile, and note you checked current prices
 on the retailer's site.
 
-## HTTP equivalent
+## HTTP equivalent (assistants without MCP access)
+
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today.
 
 With a bearer token: `POST /api/questions` (same body as `submit_question`), and for
 `get_question` both `GET /api/questions/{question_id}` (the status) and
-`GET /api/questions/{question_id}/answer` (the `result` and `answer`). How
-assistants obtain a token for the HTTP API is not decided yet; use MCP.
+`GET /api/questions/{question_id}/answer` (the `result` and `answer`).

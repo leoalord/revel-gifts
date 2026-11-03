@@ -19,7 +19,7 @@ from revel.guidance import documents
 from revel.mcp import profile_tools
 from revel.services import categories, claim_writes, profiles
 
-DISCOVERY = "revel-profile-discovery"
+DISCOVERY = "revel-manage-profile"
 EXAMPLE_FENCE = re.compile(r"^```json add_facts([^\n]*)\n(.*?)\n```$", re.M | re.S)
 BACKTICK = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[a-z][a-z0-9_]*$")

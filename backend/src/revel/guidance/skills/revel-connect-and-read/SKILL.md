@@ -1,7 +1,7 @@
 ---
 name: revel-connect-and-read
 description: Connect your user to another Revel member by exact handle, handle requests addressed to your user, and read only the profile facts that person has chosen to share.
-version: 0.6.0
+version: 0.7.0
 status: active
 ---
 
@@ -35,8 +35,8 @@ of: approve, decline, block, change_tier." Fix the call and try once more.
 
 ## How connections work
 
-- Approval is directional: when Sam approves Alex, Alex can read what Sam shares. Sam sees
-  Alex's profile only if Sam sends a separate request and Alex approves it.
+- Approval is directional: when Alex approves Sam's request, Sam can read what Alex shares.
+  Alex sees Sam's profile only if Alex sends a separate request and Sam approves it.
 - The person approving picks the tier: `connections` or `trusted_circle` (which sees more).
   The requester is never told the tier.
 - Errors are fixed, generic messages. Never read meaning into their wording beyond this:
@@ -71,10 +71,10 @@ of: approve, decline, block, change_tier." Fix the call and try once more.
 - To withdraw a pending request, call `end_connection` with its `request_id` and `action`
   `cancel`.
 
-Example (synthetic), the `request_connection` input:
+Example (synthetic): Sam asks to connect to Alex. The `request_connection` input:
 
 ```json request_connection
-{"handle": "sam_rivers"}
+{"handle": "alex_demo"}
 ```
 
 ## Answering requests (someone wants to read your user's profile)
@@ -94,8 +94,8 @@ Example (synthetic), the `request_connection` input:
   `change_tier`, or remove access with `end_connection` and `action` `revoke`. Both take
   effect on that person's next request.
 - If a retried `end_connection` returns "This connection request is not in a state that allows
-  that action", the connection or request is already ended. Check `list_connections` instead of
-  retrying.
+  that action", the connection or request is already ended or cannot be ended that way; check
+  `list_connections` rather than retrying.
 - `change_tier` works only on an approved connection. On a pending request Revel refuses it
   ("This connection request is not in a state that allows that action"); use `approve` with
   the tier instead.
@@ -120,7 +120,9 @@ Use two calls:
 2. Revel refuses with `owner_confirmation_required` and the exact list of changes, one
    `- <change>` line each, such as "Let Sam Rivers (@sam_rivers) see facts you share with
    Connections". Nothing is written, so this refusal does not count as a response.
-3. Quote that list to the owner word for word, and ask.
+3. Quote that list to the owner word for word: include each returned `- <change>` line in your
+   message to the owner, exactly as Revel wrote it, and ask. Never write that Revel returned a
+   list without the lines themselves.
 4. Wait for a clear yes from the owner in this conversation. Only then repeat the identical
    call with `owner_confirmed` true. A yes covers only the changes you quoted.
 
@@ -195,15 +197,18 @@ Revoking needs no flag either:
   gifting purpose. Do not store it as general memory, share it, or reuse it for anything else.
 
 ```json get_profile
-{"handle": "sam_rivers"}
+{"handle": "alex_demo"}
 ```
 
-Example (synthetic): Alex asks for gift ideas for Sam. You call `request_connection` with
-handle "sam_rivers". Two days later the outgoing request shows as `approved`. You read Sam's
-profile with `get_profile` and see "likes trail running" and a provisional "may be learning
-pottery". You tell Alex both, with the caveat on the second.
+Example (synthetic): Sam asks for gift ideas for Alex. You are Sam's assistant: you call
+`request_connection` with handle "alex_demo". Two days later the outgoing request shows as
+`approved`. You read Alex's profile with `get_profile` and see "likes trail running" and a
+provisional "may be learning pottery". You tell Sam both, with the caveat on the second.
 
-## HTTP equivalent
+## HTTP equivalent (assistants without MCP access)
+
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today.
 
 `GET /api/v1/profiles/{handle}` returns the same shared profile with a bearer token; a `404`
 means not available, exactly like the MCP error. Connections have no bearer HTTP API: the
