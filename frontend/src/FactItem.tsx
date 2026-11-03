@@ -2,7 +2,8 @@ import { useId, useState } from "react";
 import type { FormEvent } from "react";
 
 import { UnauthorizedError } from "./api";
-import { formatObserved, formatTime, humanize } from "./format";
+import { ActorName } from "./ActorName";
+import { formatObserved, formatShortTime, formatTime, humanize } from "./format";
 import type { AudienceLabel } from "./format";
 import {
   OBSERVED_PRECISIONS,
@@ -355,42 +356,70 @@ export function FactItem({
     }
   };
 
+  const observedKnown = Boolean(fact.observed_at) && fact.observed_precision !== "unknown";
+  const ownerActions =
+    !editable || mode === "correct" ? null : mode === "confirm-remove" ? (
+      <div className="actions" role="group" aria-label="Confirm removal">
+        <span>Remove this fact?</span>
+        <button
+          type="button"
+          className="danger"
+          disabled={busy}
+          onClick={() => void run(() => actions.remove(fact.id), () => "Fact removed.")}
+        >
+          Confirm remove
+        </button>
+        <button type="button" disabled={busy} onClick={() => setMode("view")}>
+          Cancel
+        </button>
+      </div>
+    ) : (
+      <div className="actions">
+        <button type="button" disabled={busy} onClick={() => setMode("correct")}>
+          Correct
+        </button>
+        <button type="button" disabled={busy} onClick={() => setMode("confirm-remove")}>
+          Remove
+        </button>
+      </div>
+    );
+
   return (
     <li className="fact" aria-busy={busy || undefined}>
-      <p className="statement">{fact.statement}</p>
-      <dl className="meta">
+      <div className="fact-head">
+        <p className="statement">{fact.statement}</p>
+        <span className={`badge badge-${fact.status}`}>{badge.text}</span>
+      </div>
+      {/* Secondary metadata: one muted line, labels kept for assistive technology. */}
+      <dl className="fact-meta">
         <div>
-          <dt>Category</dt>
+          <dt className="visually-hidden">Category</dt>
           <dd>{label}</dd>
         </div>
         <div>
-          <dt>Audience</dt>
+          <dt className="visually-hidden">Audience</dt>
           <dd>{audienceLabel(fact.audience)}</dd>
         </div>
         <div>
-          <dt>Status</dt>
-          <dd>
-            <span className={`badge badge-${fact.status}`}>{badge.text}</span>
-            {badge.note && <span className="hint"> {badge.note}</span>}
-          </dd>
-        </div>
-        <div>
-          <dt>Evidence</dt>
+          <dt className="visually-hidden">Evidence</dt>
           <dd>
             {humanize(fact.evidence_type)}, {fact.confidence} confidence
           </dd>
         </div>
-        <div>
-          <dt>Observed</dt>
-          <dd>{formatObserved(fact.observed_at, fact.observed_precision)}</dd>
-        </div>
+        {observedKnown && (
+          <div>
+            <dt>Observed</dt>
+            <dd>{formatObserved(fact.observed_at, fact.observed_precision)}</dd>
+          </div>
+        )}
         <div>
           <dt>Added by</dt>
-          <dd>
-            {fact.contributor} ({fact.contributed_via}), {formatTime(fact.created_at)}
+          <dd title={`Contributed via ${fact.contributed_via}, ${formatTime(fact.created_at)}`}>
+            <ActorName name={fact.contributor} />, {formatShortTime(fact.created_at)}
           </dd>
         </div>
       </dl>
+      {badge.note && <p className="caveat">{badge.note}</p>}
 
       {message && (
         <p role="alert" className="alert">
@@ -398,52 +427,59 @@ export function FactItem({
         </p>
       )}
 
-      {fact.status === "pending_review" && (
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void run(() => actions.approve(fact.id), () => "Fact approved.")}
-          >
-            Approve
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void run(() => actions.reject(fact.id), () => "Fact rejected.")}
-          >
-            Reject
-          </button>
+      {(editable || fact.status === "pending_review") && (
+        <div className="fact-footer">
+          {editable && (
+            <form className="audience-form" onSubmit={(e) => void changeAudience(e)} noValidate>
+              <label htmlFor={audienceId}>Who can see it</label>
+              <select
+                id={audienceId}
+                value={audience}
+                onChange={(e) => {
+                  setAudience(e.target.value);
+                  setAudienceError(null);
+                }}
+                aria-invalid={audienceError ? true : undefined}
+                aria-describedby={audienceError ? `${audienceId}-error` : undefined}
+              >
+                {options.map((a) => (
+                  <option key={a} value={a}>
+                    {audienceLabel(a)}
+                  </option>
+                ))}
+              </select>
+              <button type="submit" disabled={busy || audience === fact.audience}>
+                Change audience
+              </button>
+              <FieldError id={`${audienceId}-error`} message={audienceError ?? undefined} />
+            </form>
+          )}
+          <div className="footer-actions">
+            {fact.status === "pending_review" && (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void run(() => actions.approve(fact.id), () => "Fact approved.")}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void run(() => actions.reject(fact.id), () => "Fact rejected.")}
+                >
+                  Reject
+                </button>
+              </div>
+            )}
+            {ownerActions}
+          </div>
         </div>
       )}
 
-      {editable && (
-        <form className="audience-form" onSubmit={(e) => void changeAudience(e)} noValidate>
-          <label htmlFor={audienceId}>Who can see it</label>
-          <select
-            id={audienceId}
-            value={audience}
-            onChange={(e) => {
-              setAudience(e.target.value);
-              setAudienceError(null);
-            }}
-            aria-invalid={audienceError ? true : undefined}
-            aria-describedby={audienceError ? `${audienceId}-error` : undefined}
-          >
-            {options.map((a) => (
-              <option key={a} value={a}>
-                {audienceLabel(a)}
-              </option>
-            ))}
-          </select>
-          <button type="submit" disabled={busy || audience === fact.audience}>
-            Change audience
-          </button>
-          <FieldError id={`${audienceId}-error`} message={audienceError ?? undefined} />
-        </form>
-      )}
-
-      {!editable ? null : mode === "correct" ? (
+      {editable && mode === "correct" && (
         <CorrectionForm
           fact={fact}
           category={category}
@@ -457,29 +493,6 @@ export function FactItem({
             void run(() => actions.patch(fact.id, patch), () => "Correction saved.", true)
           }
         />
-      ) : mode === "confirm-remove" ? (
-        <div className="actions" role="group" aria-label="Confirm removal">
-          <span>Remove this fact?</span>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void run(() => actions.remove(fact.id), () => "Fact removed.")}
-          >
-            Confirm remove
-          </button>
-          <button type="button" disabled={busy} onClick={() => setMode("view")}>
-            Cancel
-          </button>
-        </div>
-      ) : (
-        <div className="actions">
-          <button type="button" disabled={busy} onClick={() => setMode("correct")}>
-            Correct
-          </button>
-          <button type="button" disabled={busy} onClick={() => setMode("confirm-remove")}>
-            Remove
-          </button>
-        </div>
       )}
       {mode !== "correct" && errors._ && <FieldError id={`${audienceId}-form-error`} message={errors._} />}
     </li>

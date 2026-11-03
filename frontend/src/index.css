@@ -22,6 +22,13 @@
   --info-bg: #e3eeff;
   --neutral-bg: #eef1f4;
 
+  /* Type scale: body, secondary (metadata, table cells) and small (labels, timestamps).
+     Secondary text uses --muted, which keeps >= 4.5:1 on --bg and --surface in both schemes. */
+  --fs-body: 1rem;
+  --fs-secondary: 0.875rem;
+  --fs-small: 0.8rem;
+  --text-secondary: var(--muted);
+
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 18px;
   line-height: 1.5;
@@ -361,7 +368,8 @@ thead th {
 
 .glance {
   display: grid;
-  grid-template-columns: minmax(14rem, 1.2fr) 1fr 1fr;
+  grid-template-columns: minmax(12rem, 1fr) 1.2fr 1.2fr;
+  align-items: start;
   gap: 1rem;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -373,28 +381,54 @@ thead th {
   margin-top: 0;
 }
 
+.glance-pending {
+  color: var(--text-secondary);
+}
+
 .glance-pending p {
   margin: 0 0 0.5rem;
-  font-size: 1.1rem;
+}
+
+.glance-pending.has-pending {
+  color: var(--warn);
+  font-weight: 600;
+  border-left: 4px solid var(--warn);
+  background: var(--warn-bg);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
 }
 
 .big-number {
-  font-size: 2.4rem;
+  font-size: 2rem;
   font-weight: 700;
   line-height: 1;
   margin-right: 0.25rem;
 }
 
+.glance h4 {
+  font-size: var(--fs-small);
+  margin-bottom: 0.35rem;
+}
+
 .counts {
-  display: grid;
-  grid-template-columns: auto auto;
-  justify-content: start;
-  gap: 0.15rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
   margin: 0;
+  font-size: var(--fs-secondary);
+}
+
+.counts > div {
+  display: inline-flex;
+  gap: 0.35rem;
+  padding: 0.05rem 0.6rem;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
 }
 
 .counts dt {
-  color: var(--muted);
+  color: var(--text-secondary);
 }
 
 .counts dd {
@@ -421,26 +455,233 @@ thead th {
   margin: 0 0 0.25rem;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.section-head h3 {
+  margin: 0;
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: var(--fs-secondary);
+}
+
+.inline-field > label {
+  color: var(--text-secondary);
+}
+
+.fact-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+}
+
 .statement {
   font-size: 1.15rem;
   font-weight: 600;
-  margin: 0 0 0.5rem;
-}
-
-.meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
-  gap: 0.25rem 1rem;
-  margin: 0 0 0.5rem;
-}
-
-.meta dt {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.meta dd {
+  line-height: 1.35;
   margin: 0;
+}
+
+.fact-head .statement {
+  flex: 1 1 16rem;
+}
+
+.fact-meta {
+  margin: 0.35rem 0 0;
+  font-size: var(--fs-secondary);
+  color: var(--text-secondary);
+}
+
+/* Inline text flow so the line wraps like a sentence on narrow screens. */
+.fact-meta > div,
+.fact-meta dt,
+.fact-meta dd {
+  display: inline;
+  margin: 0;
+}
+
+/* nbsp, dot, space: a wrapped line ends with the separator rather than starting with it. */
+.fact-meta > div + div::before {
+  content: "\00a0\00a0·  ";
+  white-space: pre-wrap;
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+
+.fact-meta dt:not(.visually-hidden) {
+  margin-right: 0.3rem;
+  white-space: nowrap;
+}
+
+.qualifier {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  font-weight: 400;
+  cursor: help;
+}
+
+.caveat {
+  margin: 0.4rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 3px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  font-style: italic;
+}
+
+.fact-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-secondary);
+}
+
+.fact-footer .audience-form,
+.fact-footer .actions {
+  margin-top: 0;
+}
+
+.fact-footer .audience-form > label {
+  color: var(--text-secondary);
+}
+
+.fact-footer button,
+.fact-footer select {
+  font-size: var(--fs-secondary);
+  padding: 0.2rem 0.65rem;
+}
+
+.fact-footer .audience-form .field-error {
+  flex-basis: 100%;
+}
+
+.footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-left: auto;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.fact .correction {
+  margin-top: 0.75rem;
+}
+
+/* --- recent activity ------------------------------------------------------------------- */
+
+.activity {
+  border-top: 1px solid var(--border);
+  margin-top: 1.5rem;
+  padding-top: 0.25rem;
+}
+
+.activity .hint {
+  margin-bottom: 0.5rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.recent {
+  font-size: var(--fs-secondary);
+}
+
+.recent th,
+.recent td {
+  padding: 0.3rem 0.5rem;
+  vertical-align: middle;
+}
+
+.recent th {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.recent .when,
+.recent .secondary,
+.recent .empty {
+  color: var(--text-secondary);
+}
+
+.recent .when {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge-sm {
+  font-size: var(--fs-small);
+  padding: 0 0.5rem;
+  white-space: nowrap;
+}
+
+.tone-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.tone-info {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.tone-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tone-neutral {
+  background: var(--neutral-bg);
+  color: var(--text-secondary);
+}
+
+.link-button {
+  margin-top: 0.5rem;
+  padding: 0.2rem 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+}
+
+.link-button:hover:not(:disabled) {
+  text-decoration: underline;
 }
 
 /* --- connections ----------------------------------------------------------------------- */
@@ -496,6 +737,49 @@ thead th {
 @media (max-width: 720px) {
   .glance {
     grid-template-columns: 1fr;
+  }
+
+  /* Recent activity: each event becomes a compact two-line entry instead of a squeezed table. */
+  .recent thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .recent tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.15rem 0.6rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .recent td {
+    display: block;
+    padding: 0;
+    border: 0;
+  }
+
+  /* Line 1: when, action, category. Line 2: who, then audience/acceptance. */
+  .recent tr::after {
+    content: "";
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .recent td.who {
+    order: 2;
+  }
+
+  .recent td.who ~ td {
+    order: 3;
+  }
+
+  .recent td:has(> .empty:only-child) {
+    display: none;
   }
 
   .account {
