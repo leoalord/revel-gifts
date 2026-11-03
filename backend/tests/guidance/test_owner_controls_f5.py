@@ -173,3 +173,22 @@ def test_skill_requires_explicit_yes_before_owner_confirmed() -> None:
     assert "You may only narrow" not in flat and "Never try to change it" not in flat
     index = " ".join(documents()["index"].body.split())
     assert "explicit agreement in the conversation to the exact changes Revel lists" in index
+
+
+def test_corrections_keep_audience_and_never_readd() -> None:
+    flat = _flat()
+    hold = profiles._HOLD_WIDENS_REPLACED
+    assert hold.startswith("Held for the owner's review because it would widen who can see")
+    assert f'"{hold}"' in flat
+    assert (
+        "Leave `audience` unset on a correction: the replacement keeps the old fact's audience"
+        in flat
+    )
+    assert "Approving it is a widening change: use the two-step flow in section 9" in flat
+    # F5 reviewer rule R1.
+    assert (
+        "Never remove a fact the owner narrowed or removed and then add the same content again as "
+        "a new fact" in flat
+    )
+    assert "lands at the category default, which undoes the owner's choice" in flat
+    assert "supersedes_id" in profiles.FactInput.model_fields

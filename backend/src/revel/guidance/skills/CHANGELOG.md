@@ -1,11 +1,19 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.5.1
+version: 0.5.2
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.5.2 (2026-11-03)
+
+- Discovery corrections: a correction with `supersedes_id` and no `audience` keeps the old
+  fact's audience; an explicitly wider one is held for review (Revel's message is quoted) and
+  approving it uses the two-step owner confirmation.
+- Never remove a fact the owner narrowed or removed and re-add the same content as a new fact:
+  it would land at the category default and undo the owner's choice.
 
 ## 0.5.1 (2026-11-03)
 

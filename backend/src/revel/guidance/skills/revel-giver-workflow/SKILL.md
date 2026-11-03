@@ -1,7 +1,7 @@
 ---
 name: revel-giver-workflow
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.5.1
+version: 0.5.2
 status: active
 ---
 

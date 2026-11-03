@@ -1,7 +1,7 @@
 ---
 name: revel-profile-discovery
 description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.5.1
+version: 0.5.2
 status: active
 ---
 
@@ -172,6 +172,14 @@ actually returned:
   Both stay visible to the owner, who can correct or remove either.
 - To correct a fact, call `add_facts` with `supersedes_id` set to the old fact's id. The old fact
   is retired only when the replacement is accepted.
+- Leave `audience` unset on a correction: the replacement keeps the old fact's audience. If you
+  set a wider audience, the replacement comes back `pending_review` with the message "Held for
+  the owner's review because it would widen who can see the fact it replaces; the old fact stays
+  live until approved." Approving it is a widening change: use the two-step flow in section 9
+  (`review_pending_fact`, then `owner_confirmed` true only after the owner's yes).
+- Never remove a fact the owner narrowed or removed and then add the same content again as a new
+  fact. A new fact lands at the category default, which undoes the owner's choice. Correct it
+  with `supersedes_id` instead, or leave it as the owner set it.
 - If the user asks you to undo something you added, call `remove_fact` with its `fact_id`. It is
   not idempotent: removing an already removed or replaced fact is an error. Do not retry it;
   call `get_my_profile` and check the fact's current status.
