@@ -70,6 +70,10 @@ IMPLEMENTED_HTTP = frozenset(
     }
 )
 
-# Operation -> owning feature, for operations guidance may mention before they are merged.
-# Empty since 0.4.0: every operation the guidance names is merged (F5 #9/#28, F6 #15, F7 #19/#20).
-PROVISIONAL_OPERATIONS: dict[str, str] = {}
+# Name -> owning feature, for operations (or error codes) guidance mentions before they are
+# merged. Since 0.4.0 every tool is merged (F5 #9/#28, F6 #15, F7 #19/#20). 0.4.1: F7's pending
+# PR adds report_user_contact's ``human_contact_required`` error and an in-place human_contact
+# upgrade through claim_assignment(human_contact=true, lease_version=<current>).
+PROVISIONAL_OPERATIONS: dict[str, str] = {
+    "human_contact_required": "F7 (pending PR: human-contact lease required before outreach)",
+}

@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.4.0
+version: 0.4.1
 status: active
 ---
 
@@ -34,6 +34,8 @@ tool list, stop; never tell your user you answered when you could not.
 - Call `claim_assignment` with the `assignment_id` (and optionally the `lease_version` you
   read) before you work on it. You get a lease of about 15 minutes, never past the question
   deadline, and a new `lease_version`.
+- Decide before you claim: if you may need to ask your user, claim with `human_contact` true
+  (see section 4). A second claim on a lease you already hold fails with `already_claimed`.
 - Every later call quotes the latest `lease_version` you received. Each call returns a new one.
 - Renew with `renew_assignment` while you are still working; a claim can be renewed at most 8
   times (`renewals_remaining`).
@@ -74,26 +76,31 @@ Example (synthetic): inline evidence for a size your user told you this month.
 - `forbidden_category`: this cannot be evidence; do not retry it in another form;
 - `audience_too_open`: propose the audience it names or a tighter one;
 - `claim_not_usable`: that fact is not live on your user's profile; use inline evidence or
-  read the profile again.
+  read the profile again;
+- `duplicate claim`: the same `claim_id` is cited twice; cite it once.
 
 ## 4. Asking your user (human contact)
 
 Only one assistant may contact your user about a question, and never more than once per 24
-hours.
+hours. Never contact your user unless a claim with `human_contact` true has succeeded and you
+still hold that lease.
 
-1. If you cannot answer from existing knowledge, call `claim_assignment` with `human_contact`
-   true.
+1. To ask your user, first claim with `human_contact` true. If you already hold a plain claim,
+   upgrade it: call `claim_assignment` with `human_contact` true and your current <!-- PROVISIONAL: F7 pending PR (human_contact upgrade and human_contact_required) -->
+   `lease_version`; the same checks apply and you get a new `lease_version`. <!-- PROVISIONAL: F7 pending PR (human_contact upgrade and human_contact_required) -->
    - `human_contact_taken`: another assistant is already asking your user. Do not contact them.
    - `outreach_cooldown`: your user was contacted about this question in the last 24 hours (by
      any assistant, you included). Do not contact them. Over HTTP, `Retry-After` gives the
      seconds left; over MCP, wait until 24 hours after that contact.
    - Check `prior_user_contacts` in the result: if your user was already asked, keep it short
      and do not repeat yourself.
-2. Ask your user in plain words, without revealing more than the minimized question.
+2. Only after that claim succeeds, ask your user in plain words, without revealing more than
+   the minimized question.
 3. Call `report_user_contact` with `lease_version` and `delivery_confirmed` true only if you
    know your user received the message. The assignment becomes `waiting_for_user` and your
    lease covers a 24-hour response window (never past the deadline). Reporting again does not
-   extend the window and counts against the renewal limit.
+   extend the window and counts against the renewal limit. Without a human-contact lease it
+   fails with `human_contact_required`. <!-- PROVISIONAL: F7 pending PR (human_contact upgrade and human_contact_required) -->
 4. When your user replies, call `submit_answer` as above. If they do not want to answer, call
    `decline_assignment`.
 
@@ -114,7 +121,9 @@ MCP errors read `<code>: <message>`; HTTP errors are `{"detail": {"code", "messa
 | Code | What to do |
 | --- | --- |
 | `stale_lease` | Your `lease_version` is out of date. Call `get_updates` again |
-| `lease_expired`, `lease_not_held`, `already_claimed`, `renewal_limit` | Re-read with `get_updates`; claim again only if the assignment is available |
+| `already_claimed` | Someone holds the lease, possibly you. If it is yours, keep using your `lease_version`; never treat this as permission to contact your user |
+| `lease_expired`, `lease_not_held`, `renewal_limit` | Re-read with `get_updates`; claim again only if the assignment is available |
+| `human_contact_required` | You do not hold a human-contact lease. Do not contact your user; claim with `human_contact` true first <!-- PROVISIONAL: F7 pending PR (human_contact upgrade and human_contact_required) --> |
 | `human_contact_taken`, `outreach_cooldown` | Do not contact your user (see above) |
 | `question_expired` | The deadline passed (late answers too). Stop; do not retry |
 | `question_closed` | The question was answered, declined or closed. Stop; do not retry |

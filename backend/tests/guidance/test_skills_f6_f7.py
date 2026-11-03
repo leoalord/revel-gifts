@@ -314,6 +314,19 @@ def test_answer_codes_reasons_and_decline_reasons_exist() -> None:
         assert reason in EVIDENCE_REASONS and f"`{reason}`" in body, reason
     for reason in DECLINE_REASONS:
         assert f"`{reason}`" in body, reason
+    assert "evidence[{index}]: duplicate claim" in inspect.getsource(answers)
+    assert "`duplicate claim`" in body
+
+
+def test_answer_never_contacts_user_without_human_contact_lease() -> None:
+    flat = _flat(ANSWER)
+    assert (
+        "Never contact your user unless a claim with `human_contact` true has succeeded and you"
+        " still hold that lease" in flat
+    )
+    assert "Only after that claim succeeds, ask your user" in flat
+    assert "never treat this as permission to contact your user" in flat
+    assert "release_assignment` first" not in flat  # F7: no release-and-reclaim advice
 
 
 def test_answer_limits_match_f7() -> None:
@@ -364,6 +377,9 @@ def test_connect_messages_match_f5_and_f6() -> None:
     assert "try again later" in connections.RateLimited.message
     assert "try again later" in profile_tools._RATE_LIMITED
     assert '"temporarily unavailable"' in flat and '"try again later"' in flat
+    assert "not available, or no shared facts" in flat
+    for field in profiles.SharedProfileOut.model_fields:
+        assert f"`{field}`" in flat, field
 
 
 def test_connect_limits_and_rules_match_f6() -> None:

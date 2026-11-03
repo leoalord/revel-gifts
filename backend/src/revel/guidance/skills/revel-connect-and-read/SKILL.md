@@ -1,7 +1,7 @@
 ---
 name: revel-connect-and-read
 description: Connect your user to another Revel member by exact handle, handle requests addressed to your user, and read only the profile facts that person has chosen to share.
-version: 0.4.0
+version: 0.4.1
 status: active
 ---
 
@@ -77,10 +77,13 @@ Example (synthetic), approving at the Connections tier after your user agreed:
 ## Reading a shared profile
 
 - Call `get_profile` with the exact `handle` to read what that person shares with your user.
-  You get their `display_name`, `handle`, `avatar_url` and `facts`; nothing else.
-- "No Revel profile is available to you under that handle" means not available. It is the
-  same whether the handle does not exist, is hidden, has not approved your user or shares
-  nothing. Do not speculate about why and do not try other handles.
+  You get their `display_name`, `handle`, `avatar_url`, `facts` and `provisional_caveat`;
+  nothing else.
+- "No Revel profile is available to you under that handle" means not available, or no shared
+  facts for your user. It is the same whether the handle does not exist, is hidden, or has not
+  connected with your user. Do not speculate about why and do not try other handles.
+- An empty `facts` list means the person shares nothing with your user yet. Someone not
+  connected to your user may still share facts they made Public.
 - You see only facts permitted for your user's tier. Missing facts may be private; never try to
   work around that.
 - A fact with `provisional` true is not confirmed by that person, and `provisional_caveat`
