@@ -12,6 +12,7 @@ import {
   startSignIn,
 } from "./api";
 import type { WhoAmI } from "./api";
+import { ConnectionsScreen } from "./ConnectionsScreen";
 import { ContributionsScreen } from "./ContributionsScreen";
 import { PolicyScreen } from "./PolicyScreen";
 
@@ -23,7 +24,7 @@ type SessionState =
   | { kind: "unavailable"; detail: string | null }
   | { kind: "error"; message: string };
 
-// Screens; Connections waits for its owning backend contract (F6).
+// Screens, each over its owning backend contract (F5 profile, F6 connections, F2 agents).
 const SCREENS = [
   { path: "/app/", label: "Home" },
   { path: "/app/policy", label: "Policy" },
@@ -85,12 +86,7 @@ function Screen({ path }: { path: string }) {
   }
   if (screen.path === "/app/policy") return <PolicyScreen />;
   if (screen.path === "/app/contributions") return <ContributionsScreen />;
-  return (
-    <section>
-      <h2>{screen.label}</h2>
-      <p>Coming soon.</p>
-    </section>
-  );
+  return <ConnectionsScreen />;
 }
 
 export function App() {
