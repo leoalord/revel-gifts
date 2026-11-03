@@ -1,11 +1,23 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.5.0
+version: 0.5.1
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.5.1 (2026-11-03)
+
+- Owner controls use one two-step flow for every widening change: call without
+  `owner_confirmed`, quote Revel's `owner_confirmation_required` change list word for word,
+  and repeat the identical call with `owner_confirmed` true only after the owner's clear yes;
+  re-quote if the list changes or the call conflicts. Examples show both steps.
+- First approval: show each category's default audience, Public, `share_provisional` and
+  `require_review_all`, and say plainly that routine facts are then accepted and shared
+  automatically without the owner's review (Revel's own wording is quoted).
+- `category_settings` replaces the whole map: send the full current map with only the intended
+  edit. Index: the owner-controls sentence matches the skill.
 
 ## 0.5.0 (2026-11-03)
 

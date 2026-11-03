@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from revel.db.enums import Audience
 from revel.services import profiles
 from revel.services.profiles import PolicyUpdate
 
@@ -80,15 +81,15 @@ async def test_remove_fact_twice_is_an_error(session: Any, world: Any) -> None:
 # --- Owner controls (F5 #29): the documented examples through the real service ----------------
 
 
-def _owner_example(tool: str, **match: Any) -> dict[str, Any]:
-    from .test_owner_controls_f5 import owner_examples
+def _owner_example(tool: str, step: str | None, **match: Any) -> dict[str, Any]:
+    from .test_owner_controls_f5 import owner_steps
 
     found = [
         d
-        for t, d in owner_examples()
-        if t == tool and all(k in d and d[k] == v for k, v in match.items())
+        for t, st, d in owner_steps()
+        if t == tool and st == step and all(k in d and d[k] == v for k, v in match.items())
     ]
-    assert found, (tool, match)
+    assert len(found) == 1, (tool, step, match)
     return found[0]
 
 
@@ -97,49 +98,78 @@ def _policy_update(data: dict[str, Any]) -> tuple[PolicyUpdate, bool]:
     return PolicyUpdate(**body.model_dump(exclude={"owner_confirmed"})), body.owner_confirmed
 
 
-async def test_owner_controls_refused_without_flag_then_succeed(session: Any, world: Any) -> None:
+async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
+    from .test_owner_controls_f5 import _first_approval_change
+
     agent = world.alex.mcp
-    first, confirmed = _policy_update(
-        _owner_example("set_contribution_policy", expected_version=None)
-    )
-    assert confirmed is True
 
-    # Without the flag: refused with the documented changes list, and nothing is written.
+    # First approval, step 1 (no flag): refused with the change list the skill quotes.
+    step1, flag1 = _policy_update(_owner_example("set_contribution_policy", "1"))
+    assert flag1 is False
     with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
-        await profiles.set_policy(session, agent, first)
+        await profiles.set_policy(session, agent, step1, owner_confirmed=flag1)
     assert refused.value.reason_code == "owner_confirmation_required"
-    assert refused.value.changes[0].startswith("Approve the contribution policy for the first")
-    assert (await profiles.get_policy(session, agent)).policy is None
+    assert refused.value.changes == [_first_approval_change()]  # defaults, Public off
+    assert (await profiles.get_policy(session, agent)).policy is None  # nothing written
 
-    # The same call with the owner's confirmation succeeds.
-    approved = await profiles.set_policy(session, agent, first, owner_confirmed=True)
+    # Step 2: the identical call with the owner's confirmation succeeds.
+    step2, flag2 = _policy_update(_owner_example("set_contribution_policy", "2"))
+    assert step2 == step1 and flag2 is True
+    approved = await profiles.set_policy(session, agent, step2, owner_confirmed=flag2)
     assert approved.policy is not None and approved.policy.version == 1
 
-    # A stale expected_version is a version conflict (re-read before asking again).
+    # Repeating it now conflicts on the version: re-read and start over.
     with pytest.raises(profiles.PolicyVersionConflict):
-        await profiles.set_policy(session, agent, first, owner_confirmed=True)
+        await profiles.set_policy(session, agent, step2, owner_confirmed=True)
 
-    # The documented tightening needs no flag.
-    tighten, confirmed = _policy_update(
-        _owner_example("set_contribution_policy", expected_version=1)
-    )
-    assert confirmed is False
+    # The documented tightening succeeds in one call, without the flag.
+    tighten, flag = _policy_update(_owner_example("set_contribution_policy", None))
+    assert flag is False
     tightened = await profiles.set_policy(session, agent, tighten)
     assert tightened.policy is not None and tightened.policy.version == 2
 
-    # Held facts: approving needs the flag, rejecting does not.
+    # Approving a held fact: step 1 refused, step 2 succeeds. Rejecting needs no flag.
     held = next(i for a, i in examples() if i.get("involves_others"))
     other = held | {"statement": "Is planning a trip with Sam"}
     first_fact, second_fact = (await profiles.add_facts(session, agent, [held, other])).results
     assert {first_fact.outcome, second_fact.outcome} == {"pending_review"}
-    approve = _owner_example("review_pending_fact", decision="approve")
+    approve1 = _owner_example("review_pending_fact", "1")
     with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
-        await profiles.approve_fact(session, agent, first_fact.claim_id)
+        await profiles.approve_fact(
+            session,
+            agent,
+            first_fact.claim_id,
+            owner_confirmed=approve1.get("owner_confirmed", False),
+        )
+    assert len(refused.value.changes) == 1
     assert refused.value.changes[0].startswith("Approve the pending")
+    approve2 = _owner_example("review_pending_fact", "2")
     approved_fact = await profiles.approve_fact(
-        session, agent, first_fact.claim_id, owner_confirmed=approve["owner_confirmed"]
+        session, agent, first_fact.claim_id, owner_confirmed=approve2["owner_confirmed"]
     )
     assert approved_fact.status.value == "active"
-    assert "owner_confirmed" not in _owner_example("review_pending_fact", decision="reject")
+    reject = _owner_example("review_pending_fact", None)
+    assert reject["decision"] == "reject" and "owner_confirmed" not in reject
     rejected = await profiles.reject_fact(session, agent, second_fact.claim_id)
     assert rejected.status.value != "pending_review"
+
+    # Widening a fact's audience: step 1 refused with one change, step 2 succeeds.
+    narrow = {
+        "category": "interest",
+        "statement": "Enjoys birdwatching",
+        "evidence_type": "explicit",
+        "audience": "only_me",
+    }
+    (added,) = (await profiles.add_facts(session, agent, [narrow])).results
+    assert added.outcome == "accepted"
+    widen1 = _owner_example("set_fact_audience", "1")
+    with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
+        await profiles.set_fact_audience(
+            session, agent, added.claim_id, Audience(widen1["audience"]), owner_confirmed=False
+        )
+    assert len(refused.value.changes) == 1 and refused.value.changes[0].startswith("Widen")
+    widen2 = _owner_example("set_fact_audience", "2")
+    widened = await profiles.set_fact_audience(
+        session, agent, added.claim_id, Audience(widen2["audience"]), owner_confirmed=True
+    )
+    assert widened.audience.value == widen2["audience"]

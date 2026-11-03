@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.5.0
+version: 0.5.1
 status: active
 ---
 
@@ -116,6 +116,7 @@ Errors differ by area:
   `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
   `outreach_cooldown`.
 
-Changing the policy, widening an audience or approving a pending item widens access: do it
-only after the owner clearly agrees in the conversation to the exact changes you quoted (see
-the tool descriptions); never infer consent. Owners can also do this in the Revel website.
+Widening the policy or a fact's audience, or approving a pending item, needs the owner's
+explicit agreement in the conversation to the exact changes Revel lists; tightening does not,
+but tell the owner. See `revel-profile-discovery`. Owners can also do this in the Revel
+website.
