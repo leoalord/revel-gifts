@@ -1,11 +1,41 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.4.2
+version: 0.5.2
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.5.2 (2026-11-03)
+
+- Discovery corrections: a correction with `supersedes_id` and no `audience` keeps the old
+  fact's audience; an explicitly wider one is held for review (Revel's message is quoted) and
+  approving it uses the two-step owner confirmation.
+- Never remove a fact the owner narrowed or removed and re-add the same content as a new fact:
+  it would land at the category default and undo the owner's choice.
+
+## 0.5.1 (2026-11-03)
+
+- Owner controls use one two-step flow for every widening change: call without
+  `owner_confirmed`, quote Revel's `owner_confirmation_required` change list word for word,
+  and repeat the identical call with `owner_confirmed` true only after the owner's clear yes;
+  re-quote if the list changes or the call conflicts. Examples show both steps.
+- First approval: show each category's default audience, Public, `share_provisional` and
+  `require_review_all`, and say plainly that routine facts are then accepted and shared
+  automatically without the owner's review (Revel's own wording is quoted).
+- `category_settings` replaces the whole map: send the full current map with only the intended
+  edit. Index: the owner-controls sentence matches the skill.
+
+## 0.5.0 (2026-11-03)
+
+- Agent-first owner controls (F5 #29): `revel-profile-discovery` gains an owner-controls
+  section for `set_contribution_policy`, `review_pending_fact` and widening with
+  `set_fact_audience`. Widening changes need `owner_confirmed` true, passed only after the
+  owner clearly agrees in the conversation to the exact changes you quoted; tightening needs no
+  flag but is reported. On `owner_confirmation_required`, show the listed changes and ask; on a
+  policy version conflict, re-read and ask again if the change differs. The Revel website stays
+  an option. Agents are no longer told they can only narrow.
 
 ## 0.4.2 (2026-11-02)
 
