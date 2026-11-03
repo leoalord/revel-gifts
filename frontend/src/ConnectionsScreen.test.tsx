@@ -224,6 +224,40 @@ describe("outgoing requests", () => {
   });
 });
 
+describe("RG-48 follow-ups", () => {
+  it("gives the approve radios label-associated accessible names", async () => {
+    routes();
+    render(<ConnectionsScreen />);
+    const li = row(await screen.findByText("Sam Example"));
+    expect(li).toHaveTextContent(/Sam Example \(@sam\).* wants to see your profile\./);
+    for (const name of ["Connections", "Trusted Circle"]) {
+      const radio = within(li).getByRole("radio", { name });
+      expect(radio).toHaveAccessibleName(name);
+      expect(li.querySelector(`label[for="${radio.id}"]`)).toHaveTextContent(name);
+    }
+  });
+
+  it("blocks a current connection after confirmation", async () => {
+    const { calls } = routes({ "POST /api/connections/requests/req-3/block": ok() });
+    render(<ConnectionsScreen />);
+    const li = row(await screen.findByText("Pat Example"));
+    await userEvent.click(within(li).getByRole("button", { name: "Block" }));
+    expect(posts(calls)).toEqual([]);
+    await userEvent.click(within(li).getByRole("button", { name: "Confirm block" }));
+    await screen.findByText("Blocked Pat Example.");
+    expect(posts(calls).map((c) => c.url)).toEqual(["/api/connections/requests/req-3/block"]);
+  });
+
+  it("shows the server's 409 detail when a handle must be set first", async () => {
+    const detail = "Set your handle before sending connection requests";
+    routes({ "POST /api/connections/requests": err(409, "handle_required", detail) });
+    render(<ConnectionsScreen />);
+    await userEvent.type(await screen.findByLabelText("Request by handle"), "jo");
+    await userEvent.click(screen.getByRole("button", { name: "Send request" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+  });
+});
+
 describe("connections and blocked", () => {
   it("changes tier", async () => {
     const { calls } = routes({ "POST /api/connections/requests/req-3/tier": ok() });
