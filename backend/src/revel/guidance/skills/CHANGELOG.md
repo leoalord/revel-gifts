@@ -7,6 +7,21 @@ status: active
 
 # Revel agent guidance changelog
 
+## 0.6.0 (unreleased)
+
+- Fewer question tools (F7, RG-59): `update_assignment` replaces the five separate lease tools.
+  Pass `assignment_id` and an `action` (`claim`, `renew`, `release`, `decline` or
+  `report_user_contact`) with only that action's parameters; others are refused with
+  `invalid_request`. `revel-answer-question` lists each action's required and optional
+  parameters and the exact `invalid_request` messages, and its examples use the new call shape.
+- `get_question` replaces the separate status and answer tools: one call returns the status
+  fields plus `result` (`answer`, `no_shareable_answer` or `not_answered`) and the `answer`.
+  It records answer retrieval, so it is not read-only; calling it again is safe.
+- The lease and human-contact rules are unchanged: claim with `human_contact` true before
+  contacting your user, quote the latest `lease_version`, respect the deadline, cooldown and
+  `Retry-After`. HTTP routes are unchanged; the index route catalog maps each to the new tool
+  and action.
+
 ## 0.5.4 (2026-11-03)
 
 - Connections owner confirmation (F6, RG-27 follow-up): `revel-connect-and-read` gains a

@@ -1,0 +1,157 @@
+"""RG-59 tool consolidation: retired tool names never appear in served guidance.
+
+Served guidance is every rendered document (HTTP Markdown), the MCP server ``instructions`` and
+every MCP prompt and resource text. The only exception is CHANGELOG entries for versions before
+``RETIRED_IN_VERSION``, which describe the history. A retired name that is still a live action
+value (``report_user_contact`` is now an ``update_assignment`` action) may appear only as that
+action, never as a tool to call.
+"""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+from mcp import Client
+
+from revel.guidance import documents, render_markdown, server_instructions
+from revel.guidance.operations import (
+    IMPLEMENTED_MCP_TOOLS,
+    RETIRED_IN_VERSION,
+    RETIRED_MCP_TOOLS,
+)
+from revel.mcp.server import create_mcp_server
+from revel.settings import Settings
+
+from .test_skills_f6_f7 import TOOLS
+
+CHANGELOG = "CHANGELOG"
+VERSION_HEADING = re.compile(r"^## (\d+)\.(\d+)\.(\d+)\b", re.M)
+# Action values of registered tools (from their input schemas, not copied).
+ACTION_VALUES = frozenset(
+    value
+    for tool in TOOLS.values()
+    for value in tool.parameters["properties"].get("action", {}).get("enum", [])
+)
+# How far before an action-valued name the word "action" may appear (same sentence or clause).
+ACTION_WINDOW = 100
+
+
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def current_changelog(text: str) -> str:
+    """The changelog without entries for versions before RETIRED_IN_VERSION."""
+    cutoff = _version(RETIRED_IN_VERSION)
+    kept, keep = [], True
+    for line in text.split("\n"):
+        if m := VERSION_HEADING.match(line):
+            keep = tuple(int(g) for g in m.groups()) >= cutoff
+        if keep:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _in_action_table(lines: list[str], number: int) -> bool:
+    """A table row whose table's first header cell is `action`."""
+    if not lines[number].startswith("|"):
+        return False
+    for line in reversed(lines[:number]):
+        if not line.startswith("|"):
+            return False
+        if re.match(r"^\| `action` \|", line):
+            return True
+    return False
+
+
+def retired_mentions(text: str, retired: frozenset[str] = RETIRED_MCP_TOOLS) -> list[str]:
+    """Mentions of retired tool names; action values count only outside an action context."""
+    found = []
+    lines = text.split("\n")
+    flat_offsets, position = [], 0
+    for line in lines:
+        flat_offsets.append(position)
+        position += len(line) + 1
+    for name in sorted(retired):
+        pattern = re.compile(rf"(?<![\w/]){re.escape(name)}(?![\w/])")
+        for match in pattern.finditer(text):
+            number = text.count("\n", 0, match.start())
+            if name in ACTION_VALUES:
+                before = " ".join(text[: match.start()].split())[-ACTION_WINDOW:]
+                if re.search(r"\bactions?\b", before) or _in_action_table(lines, number):
+                    continue
+            found.append(f"{number + 1}: {name}")
+    return found
+
+
+def served_documents() -> dict[str, str]:
+    served = {name: render_markdown(name) for name in documents()}
+    served[CHANGELOG] = current_changelog(served[CHANGELOG])
+    served["server-instructions"] = server_instructions()
+    return served
+
+
+def test_retired_tools_are_not_registered_or_implemented() -> None:
+    assert RETIRED_MCP_TOOLS
+    assert not RETIRED_MCP_TOOLS & set(TOOLS)
+    assert not RETIRED_MCP_TOOLS & IMPLEMENTED_MCP_TOOLS
+
+
+@pytest.mark.parametrize("name", list(served_documents()))
+def test_served_guidance_names_no_retired_tool(name: str) -> None:
+    assert retired_mentions(served_documents()[name]) == []
+
+
+@pytest.mark.anyio
+async def test_mcp_prompts_resources_and_instructions_name_no_retired_tool() -> None:
+    settings = Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    server = create_mcp_server(settings)
+    async with Client(server) as client:
+        texts = {"instructions": server.instructions or ""}
+        for prompt in (await client.list_prompts()).prompts:
+            result = await client.get_prompt(prompt.name)
+            texts[f"prompt {prompt.name}"] = "\n".join(
+                m.content.text for m in result.messages if hasattr(m.content, "text")
+            )
+        for resource in (await client.list_resources()).resources:
+            result = await client.read_resource(resource.uri)
+            texts[f"resource {resource.uri}"] = "\n".join(
+                c.text for c in result.contents if hasattr(c, "text")
+            )
+    assert len(texts) > len(documents())  # every resource plus prompts were read
+    changelog_uri = f"resource revel://guidance/{CHANGELOG}"
+    texts[changelog_uri] = current_changelog(texts[changelog_uri])
+    for label, text in texts.items():
+        assert retired_mentions(text) == [], label
+
+
+def test_changelog_exemption_is_only_for_older_versions() -> None:
+    full = render_markdown(CHANGELOG)
+    # The history does name retired tools, so the exemption is doing something...
+    assert retired_mentions(full)
+    # ...and the entry for the retiring version exists and is checked.
+    current = current_changelog(full)
+    assert f"## {RETIRED_IN_VERSION}" in current
+    assert "## 0.5.4" not in current and "## 0.5.4" in full
+
+
+def test_retired_mentions_detects_tool_usage() -> None:
+    assert retired_mentions("Call `claim_assignment` now.") == ["1: claim_assignment"]
+    assert retired_mentions("Then `get_answer`.") == ["1: get_answer"]
+    assert "report_user_contact" in ACTION_VALUES
+    # An action-valued name is allowed as the action, never as a tool.
+    assert retired_mentions("Call `report_user_contact` with `lease_version`.") == [
+        "1: report_user_contact"
+    ]
+    assert retired_mentions("```json report_user_contact\n{}\n```") == ["1: report_user_contact"]
+    assert retired_mentions("Use action `report_user_contact`.") == []
+    assert retired_mentions('{"action": "report_user_contact"}') == []
+    table = "| `action` | Required |\n| --- | --- |\n| `report_user_contact` | x |"
+    assert retired_mentions(table) == []
+    assert retired_mentions("| Tool |\n| --- |\n| `report_user_contact` |") == [
+        "3: report_user_contact"
+    ]
+    assert (
+        current_changelog("# C\n\n## 0.6.0\n\nnew\n\n## 0.5.4\n\nold") == "# C\n\n## 0.6.0\n\nnew\n"
+    )

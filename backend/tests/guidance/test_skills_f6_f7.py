@@ -16,6 +16,7 @@ from typing import Any, get_args
 from uuid import uuid4
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel
 
 from revel.api import connections as connections_api
@@ -23,7 +24,7 @@ from revel.db.enums import AssignmentStatus, ConnectionRequestStatus, Connection
 from revel.db.models.connections import HANDLE_PATTERN
 from revel.guidance import documents
 from revel.guidance.operations import IMPLEMENTED_MCP_TOOLS
-from revel.mcp import connection_tools, profile_tools
+from revel.mcp import connection_tools, profile_tools, question_tools
 from revel.mcp.server import create_mcp_server
 from revel.services import answers, connections, profiles, question_leases, question_routing
 from revel.services import questions as questions_svc
@@ -54,13 +55,18 @@ TOOLS = _tools()
 SERVICE_MODELS: dict[str, tuple[type[BaseModel], frozenset[str]]] = {
     "submit_question": (questions_svc.SubmitQuestionRequest, frozenset()),
     "submit_answer": (answers.SubmitAnswerRequest, frozenset({"assignment_id"})),
-    "claim_assignment": (question_leases.ClaimRequest, frozenset({"assignment_id"})),
-    "renew_assignment": (question_leases.LeaseVersionRequest, frozenset({"assignment_id"})),
-    "release_assignment": (question_leases.LeaseVersionRequest, frozenset({"assignment_id"})),
-    "report_user_contact": (question_leases.UserContactRequest, frozenset({"assignment_id"})),
-    "decline_assignment": (question_leases.DeclineRequest, frozenset({"assignment_id"})),
     "request_connection": (connections_api.RequestBody, frozenset()),
 }
+# update_assignment action -> the strict service request model that action builds (the same
+# model its HTTP route takes); assignment_id and action are not part of it.
+ACTION_MODELS: dict[str, type[BaseModel]] = {
+    "claim": question_leases.ClaimRequest,
+    "renew": question_leases.LeaseVersionRequest,
+    "release": question_leases.LeaseVersionRequest,
+    "report_user_contact": question_leases.UserContactRequest,
+    "decline": question_leases.DeclineRequest,
+}
+ACTION_OUTSIDE = frozenset({"assignment_id", "action"})
 
 
 # --- Vocabulary derived from code ---------------------------------------------------------------
@@ -122,6 +128,7 @@ RESULT_MODELS: tuple[type[BaseModel], ...] = (
     answers.AnswerOut,
     answers.GetAnswerResponse,
     answers.QuestionStatusResponse,
+    question_tools.GetQuestionResponse,
     question_leases.LeaseResponse,
 )
 GET_ANSWER_RESULTS = frozenset(
@@ -187,6 +194,13 @@ def test_example_is_valid_tool_input(
     if tool in SERVICE_MODELS:
         model, outside = SERVICE_MODELS[tool]
         model.model_validate({k: v for k, v in data.items() if k not in outside})  # strict
+    if tool == "update_assignment":
+        action = data["action"]
+        required, allowed = question_tools._ACTION_PARAMS[action]
+        params = {k for k, v in data.items() if k not in ACTION_OUTSIDE and v is not None}
+        assert required <= params <= allowed, (action, sorted(params))
+        body = {k: v for k, v in data.items() if k not in ACTION_OUTSIDE}
+        ACTION_MODELS[action].model_validate(body)  # strict
 
 
 # --- Giver ---------------------------------------------------------------------------------------
@@ -330,16 +344,20 @@ def test_answer_never_contacts_user_without_human_contact_lease() -> None:
     )
     assert "Only after that claim succeeds, ask your user" in flat
     assert "never treat this as permission to contact your user" in flat
-    assert "release_assignment` first" not in flat  # F7: no release-and-reclaim advice
+    assert "action `release` first" not in flat  # F7: no release-and-reclaim advice
     assert "only the human-contact upgrade with your current `lease_version` succeeds" in flat
 
 
 def test_answer_upgrade_example_is_a_claim_request() -> None:
-    upgrades = [d for tool, _, d in examples(ANSWER) if tool == "claim_assignment"]
-    assert upgrades, "no claim_assignment upgrade example"
+    upgrades = [
+        d
+        for tool, _, d in examples(ANSWER)
+        if tool == "update_assignment" and d["action"] == "claim"
+    ]
+    assert upgrades, "no update_assignment claim (upgrade) example"
     for data in upgrades:
         request = question_leases.ClaimRequest.model_validate(
-            {k: v for k, v in data.items() if k != "assignment_id"}
+            {k: v for k, v in data.items() if k not in ACTION_OUTSIDE}
         )
         # F7 upgrades in place only with human_contact and the current lease_version.
         assert request.human_contact is True and request.lease_version is not None
@@ -513,3 +531,137 @@ def test_connect_requires_explicit_yes_before_owner_confirmed() -> None:
             assert re.search(r"(?i)\b(only|after|never|need)\b", sentence), sentence
     index = " ".join(documents()["index"].body.split())
     assert "approving a connection request or upgrading a connection to Trusted Circle" in index
+
+
+# --- Answer: update_assignment actions (RG-59) ---------------------------------------------------
+
+UPDATE = "update_assignment"
+ACTION_ROW = re.compile(r"^\| `([a-z_]+)` \|([^|]*)\|([^|]*)\|$", re.M)
+SAMPLE_PARAMS: dict[str, Any] = {
+    "lease_version": 1,
+    "human_contact": True,
+    "delivery_confirmed": True,
+    "reason": "other",
+}
+
+
+def _documented_actions() -> dict[str, tuple[set[str], set[str]]]:
+    """The answer skill's action table: action -> (required, optional) parameter names."""
+    body = documents()[ANSWER].body
+    header = "| `action` | Required | Optional |"
+    assert header in body
+    table = body.split(header, 1)[1].split("\n\n", 1)[0]
+    rows = {
+        action: (set(BACKTICK.findall(req)), set(BACKTICK.findall(opt)))
+        for action, req, opt in ACTION_ROW.findall(table)
+    }
+    assert rows
+    return rows
+
+
+def test_update_assignment_schema_lists_the_code_actions() -> None:
+    props = TOOLS[UPDATE].parameters["properties"]
+    assert props["action"]["enum"] == list(question_tools._ACTION_PARAMS)
+    assert set(props) == {"assignment_id", "action", *question_tools._ACTION_SIGNATURE}
+    assert set(TOOLS[UPDATE].parameters["required"]) == {"assignment_id", "action"}
+    assert set(SAMPLE_PARAMS) == set(question_tools._ACTION_SIGNATURE)
+
+
+def test_documented_action_params_match_code() -> None:
+    documented = _documented_actions()
+    assert list(documented) == list(question_tools._ACTION_PARAMS)
+    for action, (required, optional) in documented.items():
+        code_required, code_allowed = question_tools._ACTION_PARAMS[action]
+        assert required == code_required, action
+        assert required | optional == code_allowed, action
+        assert not required & optional, action
+        # The service model the action builds takes exactly the allowed parameters.
+        assert set(ACTION_MODELS[action].model_fields) == code_allowed, action
+
+
+async def _update_error(args: dict[str, Any]) -> str:
+    """The tool's own refusal; per-action validation runs before any principal or database."""
+    server = create_mcp_server(
+        Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    )
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool(UPDATE, {"assignment_id": str(uuid4()), **args})
+    text = str(exc.value)
+    prefix = f"Error executing tool {UPDATE}: "
+    assert text.startswith(prefix), text
+    return text.removeprefix(prefix)
+
+
+@pytest.mark.anyio
+async def test_documented_params_are_enforced_by_the_tool() -> None:
+    for action, (required, optional) in _documented_actions().items():
+        given = {name: SAMPLE_PARAMS[name] for name in required}
+        for name in sorted(required):
+            rest = {k: v for k, v in given.items() if k != name}
+            text = await _update_error({"action": action, **rest})
+            assert text == f"invalid_request: Action '{action}' requires {name}.", text
+        for name in sorted(set(SAMPLE_PARAMS) - required - optional):
+            text = await _update_error({"action": action, **given, name: SAMPLE_PARAMS[name]})
+            assert text == f"invalid_request: Action '{action}' does not accept {name}.", text
+
+
+QUOTED_INVALID = re.compile(r'"(invalid_request: [^"]+)"')
+
+
+@pytest.mark.anyio
+async def test_quoted_update_assignment_errors_match_the_tool() -> None:
+    flat = _flat(ANSWER)
+    kinds = set()
+    for text in QUOTED_INVALID.findall(flat):
+        args: dict[str, Any]
+        if m := re.fullmatch(r"invalid_request: Action '(\w+)' requires (\w+)\.", text):
+            action, missing = m.groups()
+            required = question_tools._ACTION_PARAMS[action][0]
+            args = {n: SAMPLE_PARAMS[n] for n in required if n != missing}
+            kinds.add("requires")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' does not accept (\w+)\.", text):
+            action, extra = m.groups()
+            required = question_tools._ACTION_PARAMS[action][0]
+            args = {n: SAMPLE_PARAMS[n] for n in required} | {extra: SAMPLE_PARAMS[extra]}
+            kinds.add("accept")
+        elif m := re.fullmatch(r"invalid_request: Unknown action '([^']+)' for \w+;.*", text):
+            action, args = m.group(1), {}
+            kinds.add("unknown")
+        else:
+            raise AssertionError(f"unrecognised quoted error: {text}")
+        assert await _update_error({"action": action, **args}) == text
+    assert kinds == {"requires", "accept", "unknown"}
+    assert '"Error executing tool <name>: "' in flat
+
+
+def test_answer_documents_lease_response_fields() -> None:
+    flat = _flat(ANSWER)
+    for field in question_leases.LeaseResponse.model_fields:
+        if field != "question_id":
+            assert f"`{field}`" in flat, field
+
+
+def test_answer_examples_show_the_action_shapes() -> None:
+    shown = {d["action"] for t, _, d in examples(ANSWER) if t == UPDATE}
+    assert {"claim", "report_user_contact", "decline"} <= shown
+
+
+# --- Giver: get_question (RG-59) -----------------------------------------------------------------
+
+
+def test_giver_get_question_matches_code() -> None:
+    flat = _flat(GIVER)
+    tool = TOOLS["get_question"]
+    assert set(tool.parameters["properties"]) == {"question_id"}
+    for field in question_tools.GetQuestionResponse.model_fields:
+        if field != "question_id":
+            assert f"`{field}`" in flat, field
+    result = question_tools.GetQuestionResponse.model_fields["result"].annotation
+    assert frozenset(get_args(result)) == GET_ANSWER_RESULTS
+    # get_question records answer retrieval: not read-only, and guidance never says it is.
+    assert tool.annotations.read_only_hint is False and tool.annotations.idempotent_hint is True
+    for name in documents():
+        for sentence in _sentences(name):
+            if "get_question" in sentence:
+                assert not re.search(r"(?i)read[- ]only", sentence), (name, sentence)
+    assert "Revel records when an answer is retrieved" in flat

@@ -48,7 +48,11 @@ pytestmark = [pytest.mark.anyio, _f7.requires_db]
 def _example(tool: str, predicate: Any = lambda d: True) -> dict[str, Any]:
     found = [d for t, _, d in examples(ANSWER) if t == tool and predicate(d)]
     assert found, tool
-    return {k: v for k, v in found[0].items() if k != "assignment_id"}
+    return {k: v for k, v in found[0].items() if k not in ("assignment_id", "action")}
+
+
+def _action(action: str) -> dict[str, Any]:
+    return _example("update_assignment", lambda d: d["action"] == action)
 
 
 async def _assignment(factory: Any, world: Any, deps: questions.QuestionDeps) -> UUID:
@@ -102,7 +106,7 @@ async def test_documented_human_contact_sequence(
     assert exc.value.code == "human_contact_required" and exc.value.status_code == 409
 
     # The documented upgrade, with the current lease_version.
-    upgrade = _example("claim_assignment") | {"lease_version": plain.lease_version}
+    upgrade = _action("claim") | {"lease_version": plain.lease_version}
     upgraded = await question_leases.claim_assignment(
         d1, assignment_id, question_leases.ClaimRequest.model_validate(upgrade), deps=deps
     )
@@ -111,12 +115,12 @@ async def test_documented_human_contact_sequence(
     assert upgraded.lease_expires_at == plain.lease_expires_at
     assert upgraded.prior_user_contacts == 0
 
+    # The documented report_user_contact action, with the current lease_version.
+    report = _action("report_user_contact") | {"lease_version": upgraded.lease_version}
     waiting = await question_leases.report_user_contact(
         d1,
         assignment_id,
-        question_leases.UserContactRequest(
-            lease_version=upgraded.lease_version, delivery_confirmed=True
-        ),
+        question_leases.UserContactRequest.model_validate(report),
         deps=deps,
     )
     assert waiting.status == "waiting_for_user"

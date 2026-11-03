@@ -12,6 +12,7 @@ from revel.guidance.operations import (
     IMPLEMENTED_MCP_TOOLS,
     PROVISIONAL_MARKER,
     PROVISIONAL_OPERATIONS,
+    RETIRED_MCP_TOOLS,
 )
 
 from .test_discovery_f5 import F5_VOCABULARY
@@ -25,7 +26,8 @@ IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 # Backticked lowercase identifiers that are not derived from F5/F6/F7 code (see
 # ``F5_VOCABULARY`` and ``F6_F7_VOCABULARY``): OAuth metadata fields and a JSON literal.
 FIELDS_AND_VALUES = frozenset({"resource", "authorization_servers", "true"})
-ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS)
+# Retired names are known (old CHANGELOG entries name them); test_retired_tools confines them.
+ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS) | RETIRED_MCP_TOOLS
 DOC_NAME_TOKENS = frozenset(DOC_NAMES)
 
 

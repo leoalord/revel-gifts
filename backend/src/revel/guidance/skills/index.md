@@ -23,10 +23,10 @@ and can ask surprise-safe questions.
   `list_connection_requests`, `respond_to_connection_request`, `list_connections`,
   `change_connection_tier`, `revoke_connection`, `cancel_connection_request` and `get_profile`
   (see `revel-connect-and-read`).
-- Questions, as the asker: `submit_question`, `get_question_status` and `get_answer` (see
+- Questions, as the asker: `submit_question` and `get_question` (status and answer; see
   `revel-giver-workflow`).
-- Questions, as your user's assistant: `get_updates`, `claim_assignment`, `renew_assignment`,
-  `release_assignment`, `report_user_contact`, `decline_assignment` and `submit_answer` (see
+- Questions, as your user's assistant: `get_updates`, `update_assignment` (actions `claim`,
+  `renew`, `release`, `decline` and `report_user_contact`) and `submit_answer` (see
   `revel-answer-question`).
 - This guidance: as MCP prompts and resources (`revel://guidance/<name>`) and as Markdown at
   `https://api.revel.gifts/guidance`.
@@ -90,14 +90,14 @@ MCP tools and the matching HTTP routes (bearer token):
 | List people your user approved | `list_connections` | MCP only |
 | Change a tier (upgrading to Trusted Circle needs the owner's confirmation), revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` | MCP only |
 | Ask a question | `submit_question` | `POST /api/questions` |
-| Check a question you asked | `get_question_status` | `GET /api/questions/{question_id}` |
-| Get the answer to a question you asked | `get_answer` | `GET /api/questions/{question_id}/answer` |
+| Check a question you asked | `get_question` | `GET /api/questions/{question_id}` |
+| Get the answer to a question you asked | `get_question` | `GET /api/questions/{question_id}/answer` |
 | Get assigned work | `get_updates` | `GET /api/updates` |
-| Claim an assignment | `claim_assignment` | `POST /api/assignments/{assignment_id}/claim` |
-| Renew a lease | `renew_assignment` | `POST /api/assignments/{assignment_id}/renew` |
-| Release a lease | `release_assignment` | `POST /api/assignments/{assignment_id}/release` |
-| Report that you asked your user | `report_user_contact` | `POST /api/assignments/{assignment_id}/user-contact` |
-| Decline an assignment | `decline_assignment` | `POST /api/assignments/{assignment_id}/decline` |
+| Claim an assignment | `update_assignment` (action `claim`) | `POST /api/assignments/{assignment_id}/claim` |
+| Renew a lease | `update_assignment` (action `renew`) | `POST /api/assignments/{assignment_id}/renew` |
+| Release a lease | `update_assignment` (action `release`) | `POST /api/assignments/{assignment_id}/release` |
+| Report that you asked your user | `update_assignment` (action `report_user_contact`) | `POST /api/assignments/{assignment_id}/user-contact` |
+| Decline an assignment | `update_assignment` (action `decline`) | `POST /api/assignments/{assignment_id}/decline` |
 | Answer a question | `submit_answer` | `POST /api/assignments/{assignment_id}/answer` |
 
 The HTTP routes take a bearer token, but how assistants obtain one for the HTTP API is not

@@ -31,19 +31,35 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "change_connection_tier",
         "revoke_connection",
         "cancel_connection_request",
-        # F7 #19/#20, merged (PR #33): revel/mcp/question_tools.py
+        # F7 #19/#20 (PR #33), consolidated by RG-59: revel/mcp/question_tools.py
         "submit_question",
         "get_updates",
+        "update_assignment",
+        "submit_answer",
+        "get_question",
+    }
+)
+
+# RG-59 (Build Task #31) tool consolidation: names no longer registered. Served guidance must
+# not mention them, except CHANGELOG entries for versions before RETIRED_IN_VERSION.
+RETIRED_IN_VERSION = "0.6.0"
+RETIRED_QUESTION_TOOLS = frozenset(
+    {
+        # -> update_assignment (actions claim, renew, release, report_user_contact, decline)
         "claim_assignment",
         "renew_assignment",
         "release_assignment",
         "report_user_contact",
         "decline_assignment",
-        "submit_answer",
+        # -> get_question
         "get_question_status",
         "get_answer",
     }
 )
+# Phase B adds F5's (get_my_profile, get_contribution_policy, set_fact_audience,
+# review_pending_fact) and F6's (list_connection_requests, change_connection_tier,
+# revoke_connection, cancel_connection_request) retired names as their own sets here.
+RETIRED_MCP_TOOLS = RETIRED_QUESTION_TOOLS
 IMPLEMENTED_HTTP = frozenset(
     {
         "GET /.well-known/oauth-protected-resource",
