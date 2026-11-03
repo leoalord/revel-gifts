@@ -13,6 +13,7 @@ from typing import Any, get_args
 
 import pytest
 
+from revel.api import profiles as profiles_api
 from revel.db.enums import Audience, ClaimStatus, Confidence, EvidenceType, ObservedPrecision
 from revel.guidance import documents
 from revel.services import categories, profiles
@@ -33,6 +34,11 @@ def _reason_codes() -> frozenset[str]:
     source = inspect.getsource(profiles)
     codes |= set(re.findall(r'_Rejected\(\s*"([a-z_]+)"', source))
     codes |= set(re.findall(r'_rejected\(\s*index,\s*"([a-z_]+)"', source))
+    # F5 #29 owner controls and the HTTP error bodies (detail strings and body keys).
+    codes.add(profiles.OwnerConfirmationRequired.reason_code)
+    api_source = inspect.getsource(profiles_api)
+    codes |= set(re.findall(r'"detail": "([a-z_]+)"', api_source))
+    codes |= set(re.findall(r'"([a-z_]+)": exc\.', api_source))
     return frozenset(codes)
 
 
@@ -102,8 +108,8 @@ def examples() -> list[tuple[dict[str, str], dict[str, Any]]]:
     body = documents()[DISCOVERY].body
     found = [(_attrs(info), json.loads(raw)) for info, raw in EXAMPLE_FENCE.findall(body)]
     assert found, "no fenced add_facts examples found"
-    # Every json fence in the skill must be a machine-checked add_facts example.
-    assert body.count("```json") == len(found)
+    # Every add_facts fence is checked here; owner-control fences in test_owner_controls_f5.
+    assert body.count("```json add_facts") == len(found)
     return found
 
 

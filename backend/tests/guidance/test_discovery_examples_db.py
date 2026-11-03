@@ -75,3 +75,71 @@ async def test_remove_fact_twice_is_an_error(session: Any, world: Any) -> None:
     await profiles.remove_fact(session, world.alex.mcp, result.claim_id)
     with pytest.raises(profiles.FactConflict):
         await profiles.remove_fact(session, world.alex.mcp, result.claim_id)
+
+
+# --- Owner controls (F5 #29): the documented examples through the real service ----------------
+
+
+def _owner_example(tool: str, **match: Any) -> dict[str, Any]:
+    from .test_owner_controls_f5 import owner_examples
+
+    found = [
+        d
+        for t, d in owner_examples()
+        if t == tool and all(k in d and d[k] == v for k, v in match.items())
+    ]
+    assert found, (tool, match)
+    return found[0]
+
+
+def _policy_update(data: dict[str, Any]) -> tuple[PolicyUpdate, bool]:
+    body = profiles.AgentPolicyUpdate.model_validate(data)
+    return PolicyUpdate(**body.model_dump(exclude={"owner_confirmed"})), body.owner_confirmed
+
+
+async def test_owner_controls_refused_without_flag_then_succeed(session: Any, world: Any) -> None:
+    agent = world.alex.mcp
+    first, confirmed = _policy_update(
+        _owner_example("set_contribution_policy", expected_version=None)
+    )
+    assert confirmed is True
+
+    # Without the flag: refused with the documented changes list, and nothing is written.
+    with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
+        await profiles.set_policy(session, agent, first)
+    assert refused.value.reason_code == "owner_confirmation_required"
+    assert refused.value.changes[0].startswith("Approve the contribution policy for the first")
+    assert (await profiles.get_policy(session, agent)).policy is None
+
+    # The same call with the owner's confirmation succeeds.
+    approved = await profiles.set_policy(session, agent, first, owner_confirmed=True)
+    assert approved.policy is not None and approved.policy.version == 1
+
+    # A stale expected_version is a version conflict (re-read before asking again).
+    with pytest.raises(profiles.PolicyVersionConflict):
+        await profiles.set_policy(session, agent, first, owner_confirmed=True)
+
+    # The documented tightening needs no flag.
+    tighten, confirmed = _policy_update(
+        _owner_example("set_contribution_policy", expected_version=1)
+    )
+    assert confirmed is False
+    tightened = await profiles.set_policy(session, agent, tighten)
+    assert tightened.policy is not None and tightened.policy.version == 2
+
+    # Held facts: approving needs the flag, rejecting does not.
+    held = next(i for a, i in examples() if i.get("involves_others"))
+    other = held | {"statement": "Is planning a trip with Sam"}
+    first_fact, second_fact = (await profiles.add_facts(session, agent, [held, other])).results
+    assert {first_fact.outcome, second_fact.outcome} == {"pending_review"}
+    approve = _owner_example("review_pending_fact", decision="approve")
+    with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
+        await profiles.approve_fact(session, agent, first_fact.claim_id)
+    assert refused.value.changes[0].startswith("Approve the pending")
+    approved_fact = await profiles.approve_fact(
+        session, agent, first_fact.claim_id, owner_confirmed=approve["owner_confirmed"]
+    )
+    assert approved_fact.status.value == "active"
+    assert "owner_confirmed" not in _owner_example("review_pending_fact", decision="reject")
+    rejected = await profiles.reject_fact(session, agent, second_fact.claim_id)
+    assert rejected.status.value != "pending_review"
