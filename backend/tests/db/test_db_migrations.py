@@ -79,9 +79,11 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
         "status",
         "connected_at",
         "disconnected_at",
+        "authorized_sid",
         "created_at",
         "updated_at",
     }
+    assert delegation_columns["authorized_sid"]["nullable"]
     assert "'active'" in delegation_columns["status"]["default"]
     assert delegation_columns["disconnected_at"]["nullable"]
     for table in TABLES:
@@ -100,12 +102,12 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
     assert {
         u["name"]: u["column_names"] for u in inspector.get_unique_constraints("agent_delegations")
     } == {
-        "uq_agent_delegations_user_id_agent_id": ["user_id", "agent_id"],
         "uq_agent_delegations_id_user_id": ["id", "user_id"],
     }
     assert {c["name"] for c in inspector.get_check_constraints("agent_delegations")} == {
         "ck_agent_delegations_status",
         "ck_agent_delegations_disconnected_at_matches_status",
+        "ck_agent_delegations_authorized_sid_not_empty",
     }
     fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("agent_delegations")}
     assert set(fks) == {
@@ -114,9 +116,20 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
     }
     for fk in fks.values():
         assert fk["options"].get("ondelete") == "RESTRICT"
-    assert {ix["name"]: ix["column_names"] for ix in inspector.get_indexes("agent_delegations")}[
-        "ix_agent_delegations_agent_id"
-    ] == ["agent_id"]
+    indexes = {
+        ix["name"]: ix
+        for ix in inspector.get_indexes("agent_delegations")
+        if "duplicates_constraint" not in ix  # skip UNIQUE constraints' backing indexes
+    }
+    assert {name: ix["column_names"] for name, ix in indexes.items()} == {
+        "ix_agent_delegations_agent_id": ["agent_id"],
+        "ix_agent_delegations_user_id_agent_id": ["user_id", "agent_id"],
+        "uq_agent_delegations_user_id_agent_id_active": ["user_id", "agent_id"],
+    }
+    active = indexes["uq_agent_delegations_user_id_agent_id_active"]
+    assert active["unique"]
+    assert active["dialect_options"]["postgresql_where"] == "(status = 'active'::text)"
+    assert not indexes["ix_agent_delegations_user_id_agent_id"]["unique"]
 
 
 def test_no_drift_between_models_and_migrations(
@@ -157,17 +170,29 @@ def test_duplicate_oauth_client_id_rejected(conn: Connection) -> None:
         conn.execute(insert(Agent).values(oauth_client_id="client_dup"))
 
 
-def test_duplicate_delegation_rejected(conn: Connection) -> None:
+def test_duplicate_active_delegation_rejected(conn: Connection) -> None:
     user_id, agent_id = _user(conn), _agent(conn)
     _delegation(conn, user_id, agent_id)
     with (
-        pytest.raises(IntegrityError, match="uq_agent_delegations_user_id_agent_id"),
+        pytest.raises(IntegrityError, match="uq_agent_delegations_user_id_agent_id_active"),
         conn.begin_nested(),
     ):
         _delegation(conn, user_id, agent_id)
 
 
-def test_on_conflict_do_nothing_keeps_disconnected(conn: Connection) -> None:
+def _register(conn: Connection, user_id: uuid.UUID, agent_id: uuid.UUID) -> uuid.UUID | None:
+    """Registration as F2 does it: ON CONFLICT on the partial (active-only) unique index."""
+    return conn.execute(
+        insert(AgentDelegation)
+        .values(user_id=user_id, agent_id=agent_id)
+        .on_conflict_do_nothing(
+            index_elements=["user_id", "agent_id"], index_where=text("status = 'active'")
+        )
+        .returning(AgentDelegation.id)
+    ).scalar_one_or_none()
+
+
+def test_on_conflict_active_never_reactivates_disconnected(conn: Connection) -> None:
     user_id, agent_id = _user(conn), _agent(conn)
     _delegation(
         conn,
@@ -176,20 +201,18 @@ def test_on_conflict_do_nothing_keeps_disconnected(conn: Connection) -> None:
         status=DelegationStatus.DISCONNECTED.value,
         disconnected_at=text("now()"),
     )
-    result = conn.execute(
-        insert(AgentDelegation)
-        .values(user_id=user_id, agent_id=agent_id)
-        .on_conflict_do_nothing(index_elements=["user_id", "agent_id"])
-        .returning(AgentDelegation.id)
-    )
-    assert result.first() is None  # nothing inserted or updated
-    row = conn.execute(
-        select(AgentDelegation.status, AgentDelegation.disconnected_at).where(
+    new_id = _register(conn, user_id, agent_id)  # reconnect: a new active row
+    assert new_id is not None
+    assert _register(conn, user_id, agent_id) is None  # an active row exists: nothing changes
+    rows = conn.execute(
+        select(AgentDelegation.id, AgentDelegation.status, AgentDelegation.disconnected_at).where(
             AgentDelegation.user_id == user_id, AgentDelegation.agent_id == agent_id
         )
-    ).one()
-    assert row.status == DelegationStatus.DISCONNECTED
-    assert row.disconnected_at is not None
+    ).all()
+    assert len(rows) == 2
+    by_status = {row.status: row for row in rows}
+    assert by_status[DelegationStatus.ACTIVE].id == new_id
+    assert by_status[DelegationStatus.DISCONNECTED].disconnected_at is not None
 
 
 @pytest.mark.parametrize(
@@ -252,5 +275,5 @@ def test_downgrade_and_reupgrade(migrated_engine: Engine, run_alembic: RunAlembi
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0003_connections_questions"
+            == "0004_delegation_reconnect"
         )

@@ -29,6 +29,18 @@ def _www_authenticate(
     return "Bearer " + ", ".join(parts)
 
 
+def _invalid_token(runtime: AuthRuntime) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired access token",
+        headers={
+            "WWW-Authenticate": _www_authenticate(
+                runtime, "invalid_token", "Invalid or expired token"
+            )
+        },
+    )
+
+
 def _bearer_token(request: Request) -> str | None:
     header = request.headers.get("authorization")
     if not header:
@@ -53,22 +65,13 @@ async def current_principal(
         )
     access_token = await runtime.verifier.verify_token(token) if token else None
     if access_token is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired access token",
-            headers={
-                "WWW-Authenticate": _www_authenticate(
-                    runtime, "invalid_token", "Invalid or expired token"
-                )
-            },
-        )
+        raise _invalid_token(runtime)
     try:
         return await runtime.require_resolver().resolve(access_token, via="api")
     except DelegationDisconnected:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This assistant has been disconnected from your Revel account",
-        ) from None
+        # Same 401 as any other invalid token (does not reveal that a delegation exists);
+        # it makes OAuth clients re-authorize, and a fresh authorization reconnects.
+        raise _invalid_token(runtime) from None
     except AuthNotConfigured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Identity store unavailable"
@@ -92,10 +95,10 @@ async def principal_from_mcp_context(runtime: AuthRuntime) -> Principal:
     """Resolve the principal for the current MCP request.
 
     **Every MCP tool that reads or writes user data must call this first** and act
-    only as the returned principal. The SDK middleware only verifies the token; it
-    does not check the delegation, so a disconnected assistant's still-valid token
-    passes it. This call is what rejects disconnected delegations (only data-free
-    tools such as ``ping`` may skip it).
+    only as the returned principal. The SDK middleware (``DelegationAwareVerifier``)
+    already answers 401 for a disconnected authorization's tokens, but it does not create
+    or select the delegation; this call does, and re-checks the disconnect rule (only
+    data-free tools such as ``ping`` may skip it).
 
     Raises :class:`ToolError` (returned to the client as a tool error) when the
     request is unauthenticated or the delegation is disconnected.
@@ -107,10 +110,10 @@ async def principal_from_mcp_context(runtime: AuthRuntime) -> Principal:
     try:
         return await runtime.require_resolver().resolve(access_token, via="mcp")
     except DelegationDisconnected:
-        raise ToolError(
-            "This assistant has been disconnected from the user's Revel account "
-            "and can no longer act for them."
-        ) from None
+        # Normally rejected earlier with HTTP 401 by ``DelegationAwareVerifier``; this covers
+        # a disconnect that lands between authentication and the tool call. Same wording as
+        # any other invalid token.
+        raise ToolError("Invalid access token") from None
     except AuthNotConfigured:
         raise ToolError("Revel identity service is unavailable") from None
     except IdentityError:

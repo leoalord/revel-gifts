@@ -5,10 +5,19 @@ F3 owns the models and migrations (``revel.db.models``: ``User``, ``Agent``,
 (``revel.db.session``). This module defines the narrow interface the resolver
 needs plus the SQLAlchemy implementation over F3's models.
 
-Every ``ensure_*`` method is an insert-if-absent that never updates an existing
-row. ``on_created`` runs inside the inserting transaction, so if it raises the
+Every ``ensure_*``/``create_*`` method is an insert-if-absent that never updates an
+existing row. ``on_created`` runs inside the inserting transaction, so if it raises the
 insert is rolled back and a retry will create the row (and call it) again. See
 ``revel.auth.hooks`` for the hook contract (idempotent, external-only).
+
+Reconnect (F2 decision on the Features record): a user may hold several delegations for one
+assistant over time, at most one ``active`` (partial unique index on ``(user_id, agent_id)
+WHERE status = 'active'``). Disconnected rows are history and are never modified again. Each
+delegation remembers the WorkOS ``sid`` values its tokens carried (``authorized_sid`` on the
+row, set by the inserting statement, plus ``agent_delegation_sessions`` rows recorded later),
+so the resolver can refuse tokens of a disconnected authorization. F3's migration
+``0004_delegation_reconnect`` and models (``AgentDelegation.authorized_sid``,
+``AgentDelegationSession``) define that schema.
 """
 
 from __future__ import annotations
@@ -27,7 +36,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.db.enums import DelegationStatus
-from revel.db.models import Agent, AgentDelegation, User
+from revel.db.models import Agent, AgentDelegation, AgentDelegationSession, User
 
 DelegationStatusValue = Literal["active", "disconnected"]
 
@@ -67,6 +76,22 @@ class DelegationView:
     agent: AgentRecord
 
 
+@dataclass(frozen=True)
+class DelegationState:
+    """What the resolver needs about one (user, assistant) pair, read in one session.
+
+    ``active`` is the pair's active delegation, if any. ``sid_on_active`` says whether the
+    token's ``sid`` is already associated with it; ``sid_on_disconnected`` whether that ``sid``
+    belongs to any disconnected delegation of the pair. ``last_disconnected_at`` is the pair's
+    latest disconnect (``None`` when it has no disconnected history).
+    """
+
+    active: DelegationRecord | None
+    sid_on_active: bool
+    sid_on_disconnected: bool
+    last_disconnected_at: datetime | None
+
+
 R = TypeVar("R")
 OnCreated = Callable[[R], Awaitable[None]]
 OnDisconnected = Callable[[DelegationRecord], Awaitable[None]]
@@ -88,13 +113,20 @@ class IdentityRepository(Protocol):
 
     async def set_agent_name_if_empty(self, agent_id: UUID, name: str) -> bool: ...
 
-    async def ensure_delegation(
+    async def get_delegation_state(
+        self, user_id: UUID, agent_id: UUID, sid: str | None
+    ) -> DelegationState: ...
+
+    async def create_delegation(
         self,
         user_id: UUID,
         agent_id: UUID,
         *,
+        authorized_sid: str | None,
         on_created: OnCreated[DelegationRecord] | None = None,
-    ) -> tuple[DelegationRecord, bool]: ...
+    ) -> tuple[DelegationRecord | None, bool]: ...
+
+    async def record_delegation_sid(self, delegation_id: UUID, sid: str) -> None: ...
 
     async def disconnect_delegation(
         self,
@@ -107,6 +139,8 @@ class IdentityRepository(Protocol):
     async def get_user(self, user_id: UUID) -> UserRecord | None: ...
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None: ...
+
+    async def get_agent_by_client_id(self, oauth_client_id: str) -> AgentRecord | None: ...
 
     async def list_delegations_for_user(self, user_id: UUID) -> list[DelegationView]: ...
 
@@ -135,12 +169,6 @@ def _agent(row: Agent) -> AgentRecord:
     return AgentRecord(id=row.id, oauth_client_id=row.oauth_client_id, name=row.name)
 
 
-def _delegation(row: AgentDelegation) -> DelegationRecord:
-    return DelegationRecord(
-        id=row.id, user_id=row.user_id, agent_id=row.agent_id, status=_status_value(row.status)
-    )
-
-
 def _delegation_view(row: AgentDelegation, agent: Agent) -> DelegationView:
     return DelegationView(
         id=row.id,
@@ -150,6 +178,10 @@ def _delegation_view(row: AgentDelegation, agent: Agent) -> DelegationView:
         disconnected_at=row.disconnected_at,
         agent=_agent(agent),
     )
+
+
+# Predicate of F3's partial unique index ``uq_agent_delegations_user_id_agent_id_active``.
+_ACTIVE_WHERE = text("status = 'active'")
 
 
 def _default_sessionmaker() -> sessionmaker[Session]:
@@ -210,14 +242,50 @@ class SqlAlchemyIdentityRepository:
             ).scalar_one_or_none()
             return _agent(row) if row is not None else None
 
-    def _get_delegation(self, user_id: UUID, agent_id: UUID) -> DelegationRecord | None:
+    def _get_delegation_state(
+        self, user_id: UUID, agent_id: UUID, sid: str | None
+    ) -> DelegationState:
+        # Plain reads (no explicit transaction): the common path takes no write lock.
         with self._session() as session:
-            row = session.execute(
-                select(AgentDelegation).where(
-                    AgentDelegation.user_id == user_id, AgentDelegation.agent_id == agent_id
+            rows = session.execute(
+                select(
+                    AgentDelegation.id,
+                    AgentDelegation.status,
+                    AgentDelegation.disconnected_at,
+                    AgentDelegation.authorized_sid,
+                ).where(AgentDelegation.user_id == user_id, AgentDelegation.agent_id == agent_id)
+            ).all()
+            sid_rows: set[UUID] = set()
+            if sid is not None and rows:
+                sid_rows = set(
+                    session.execute(
+                        select(AgentDelegationSession.delegation_id).where(
+                            AgentDelegationSession.sid == sid,
+                            AgentDelegationSession.delegation_id.in_([r.id for r in rows]),
+                        )
+                    ).scalars()
                 )
-            ).scalar_one_or_none()
-            return _delegation(row) if row is not None else None
+        active: DelegationRecord | None = None
+        sid_on_active = sid_on_disconnected = False
+        last_disconnected_at: datetime | None = None
+        for row in rows:
+            status = _status_value(row.status)
+            has_sid = sid is not None and (row.authorized_sid == sid or row.id in sid_rows)
+            if status == DelegationStatus.ACTIVE.value:
+                active = DelegationRecord(row.id, user_id, agent_id, status)
+                sid_on_active = has_sid
+                continue
+            sid_on_disconnected = sid_on_disconnected or has_sid
+            if row.disconnected_at is not None and (
+                last_disconnected_at is None or row.disconnected_at > last_disconnected_at
+            ):
+                last_disconnected_at = row.disconnected_at
+        return DelegationState(active, sid_on_active, sid_on_disconnected, last_disconnected_at)
+
+    async def get_delegation_state(
+        self, user_id: UUID, agent_id: UUID, sid: str | None
+    ) -> DelegationState:
+        return await anyio.to_thread.run_sync(self._get_delegation_state, user_id, agent_id, sid)
 
     def _delegation_views(
         self, user_id: UUID, delegation_id: UUID | None = None
@@ -256,6 +324,9 @@ class SqlAlchemyIdentityRepository:
 
     async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
         return await anyio.to_thread.run_sync(self._get_agent, agent_id)
+
+    async def get_agent_by_client_id(self, oauth_client_id: str) -> AgentRecord | None:
+        return await anyio.to_thread.run_sync(self._get_agent_by_client_id, oauth_client_id)
 
     # --- insert-if-absent ------------------------------------------------------------
 
@@ -302,35 +373,62 @@ class SqlAlchemyIdentityRepository:
             ).scalar_one()
             return _agent(row), created
 
-    def _ensure_delegation(
+    def _create_delegation(
         self,
         user_id: UUID,
         agent_id: UUID,
+        authorized_sid: str | None,
         on_created: OnCreated[DelegationRecord] | None,
-    ) -> tuple[DelegationRecord, bool]:
-        existing = self._get_delegation(user_id, agent_id)
-        if existing is not None:
-            return existing, False
+    ) -> tuple[DelegationRecord | None, bool]:
         with self._session() as session, session.begin():
-            # Never touches an existing row: a disconnected delegation stays disconnected.
+            # Writes only ``agent_delegations`` (F4 rule) and never touches an existing row: a
+            # disconnected delegation stays disconnected. A concurrent insert for the same pair
+            # loses on the partial unique index (one active delegation per user and assistant),
+            # waits for the winner to commit, then reads the winner's row.
             stmt = (
                 insert(AgentDelegation)
-                .values(user_id=user_id, agent_id=agent_id, status=DelegationStatus.ACTIVE.value)
+                .values(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    status=DelegationStatus.ACTIVE.value,
+                    authorized_sid=authorized_sid,
+                )
                 .on_conflict_do_nothing(
-                    index_elements=[AgentDelegation.user_id, AgentDelegation.agent_id]
+                    index_elements=[AgentDelegation.user_id, AgentDelegation.agent_id],
+                    index_where=_ACTIVE_WHERE,
                 )
                 .returning(AgentDelegation.id)
             )
             created = session.execute(stmt).scalar_one_or_none() is not None
-            row = session.execute(
-                select(AgentDelegation).where(
-                    AgentDelegation.user_id == user_id, AgentDelegation.agent_id == agent_id
+            row_id = session.execute(
+                select(AgentDelegation.id).where(
+                    AgentDelegation.user_id == user_id,
+                    AgentDelegation.agent_id == agent_id,
+                    AgentDelegation.status == DelegationStatus.ACTIVE.value,
                 )
-            ).scalar_one()
-            record = _delegation(row)
+            ).scalar_one_or_none()
+            if row_id is None:
+                # The concurrent winner was already disconnected again; nothing to act through.
+                return None, False
+            record = DelegationRecord(row_id, user_id, agent_id, "active")
             if created and on_created is not None:
                 anyio.from_thread.run(on_created, record)
         return record, created
+
+    def _record_delegation_sid(self, delegation_id: UUID, sid: str) -> None:
+        # Its own transaction, writing only ``agent_delegation_sessions`` (never combined with
+        # a delegation write). Idempotent.
+        with self._session() as session, session.begin():
+            session.execute(
+                insert(AgentDelegationSession)
+                .values(delegation_id=delegation_id, sid=sid)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        AgentDelegationSession.delegation_id,
+                        AgentDelegationSession.sid,
+                    ]
+                )
+            )
 
     def _disconnect_delegation(
         self,
@@ -426,13 +524,26 @@ class SqlAlchemyIdentityRepository:
             raise ValueError("name must be non-empty")
         return await anyio.to_thread.run_sync(self._set_agent_name_if_empty, agent_id, name)
 
-    async def ensure_delegation(
+    async def create_delegation(
         self,
         user_id: UUID,
         agent_id: UUID,
         *,
+        authorized_sid: str | None,
         on_created: OnCreated[DelegationRecord] | None = None,
-    ) -> tuple[DelegationRecord, bool]:
+    ) -> tuple[DelegationRecord | None, bool]:
+        """Insert an active delegation for the pair unless one is already active.
+
+        Returns ``(record, created)`` for the pair's active delegation (this call's row or a
+        concurrent winner's), or ``(None, False)`` when no active row remains to read.
+        ``on_created`` runs in the inserting transaction, only when this call inserted.
+        """
         return await anyio.to_thread.run_sync(
-            self._ensure_delegation, user_id, agent_id, on_created
+            self._create_delegation, user_id, agent_id, authorized_sid, on_created
         )
+
+    async def record_delegation_sid(self, delegation_id: UUID, sid: str) -> None:
+        """Remember that ``sid`` acted through ``delegation_id`` (insert-if-absent)."""
+        if not sid:
+            raise ValueError("sid must be non-empty")
+        await anyio.to_thread.run_sync(self._record_delegation_sid, delegation_id, sid)

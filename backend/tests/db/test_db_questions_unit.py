@@ -48,6 +48,7 @@ ALL_TABLES = {
     "users",
     "agents",
     "agent_delegations",
+    "agent_delegation_sessions",
     "profiles",
     "contribution_policies",
     "claims",
@@ -147,7 +148,11 @@ def test_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(
         Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     )
-    assert script.get_heads() == ["0003_connections_questions"]
+    assert script.get_heads() == ["0004_delegation_reconnect"]
+    assert (
+        script.get_revision("0004_delegation_reconnect").down_revision
+        == "0003_connections_questions"
+    )
     assert script.get_revision("0003_connections_questions").down_revision == "0002_profile"
 
 

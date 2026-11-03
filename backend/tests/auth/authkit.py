@@ -83,6 +83,9 @@ class TestAuthKit:
     applications: dict[str, dict[str, Any]] = field(default_factory=dict)
     application_requests: list[str] = field(default_factory=list)
     application_auth_headers: list[str] = field(default_factory=list)
+    # User authorized-applications mock (WorkOS consent records): user id -> items.
+    authorized_apps: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    authorized_app_requests: list[tuple[str, str]] = field(default_factory=list)
     # User Management authenticate mock: one-time codes and refresh tokens -> WorkOS user id.
     codes: dict[str, str] = field(default_factory=dict)
     refresh_tokens: dict[str, str] = field(default_factory=dict)
@@ -127,6 +130,8 @@ class TestAuthKit:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json=app)
         prefix = "https://api.workos.com/user_management/users/"
+        if url.startswith(prefix) and "/authorized_applications" in request.url.path:
+            return self._authorized_apps(request)
         if url.startswith(prefix):
             user_id = url[len(prefix) :]
             self.user_requests.append(user_id)
@@ -138,6 +143,40 @@ class TestAuthKit:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json=user)
         return httpx.Response(599, json={"unexpected": url})
+
+    def _authorized_apps(self, request: httpx.Request) -> httpx.Response:
+        """``GET``/``DELETE /user_management/users/{id}/authorized_applications[/{app}]``."""
+        parts = request.url.path.split(
+            "/"
+        )  # ['', 'user_management', 'users', id, 'authorized_applications', app?]
+        user_id = parts[3]
+        self.authorized_app_requests.append((request.method, request.url.path))
+        apps = self.authorized_apps.setdefault(user_id, [])
+        if request.method == "GET" and len(parts) == 5:
+            return httpx.Response(200, json={"object": "list", "data": apps, "list_metadata": {}})
+        if request.method == "DELETE" and len(parts) == 6:
+            kept = [a for a in apps if a["application"]["id"] != parts[5]]
+            if len(kept) == len(apps):
+                return httpx.Response(404, json={"message": "not found"})
+            self.authorized_apps[user_id] = kept
+            return httpx.Response(204)
+        return httpx.Response(405)
+
+    def authorize_application(self, user_id: str, client_id: str, app_id: str) -> None:
+        """Record that ``user_id`` has consented to ``client_id`` (WorkOS-shaped item)."""
+        self.authorized_apps.setdefault(user_id, []).append(
+            {
+                "object": "authorized_connect_application",
+                "id": f"authorized_connect_app_{app_id}",
+                "granted_scopes": ["openid"],
+                "application": {
+                    "object": "connect_application",
+                    "id": app_id,
+                    "client_id": client_id,
+                    "name": "Muse",
+                },
+            }
+        )
 
     def register_application(self, client_id: str, name: str) -> None:
         """A dynamically registered Connect application, shaped like WorkOS's response."""
