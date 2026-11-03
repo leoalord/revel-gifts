@@ -26,13 +26,20 @@ from revel.guidance import documents
 from revel.guidance.operations import IMPLEMENTED_MCP_TOOLS
 from revel.mcp import connection_tools, profile_tools, question_tools
 from revel.mcp.server import create_mcp_server
-from revel.services import answers, connections, profiles, question_leases, question_routing
+from revel.services import (
+    answers,
+    categories,
+    connections,
+    profiles,
+    question_leases,
+    question_routing,
+)
 from revel.services import questions as questions_svc
 from revel.services.categories import CategoryError
 from revel.settings import Settings
 
 CONNECT = "revel-connect-and-read"
-GIVER = "revel-giver-workflow"
+GIVER = "revel-find-a-gift"
 ANSWER = "revel-answer-question"
 SKILLS = (CONNECT, GIVER, ANSWER)
 
@@ -257,6 +264,72 @@ def test_giver_never_instructs_purpose_or_identity_in_requested_information() ->
     assert "Never write who is asking" in flat
 
 
+GUARD_SENTENCE = re.compile(
+    r"Revel checks your question, and the shorter question it routes, against (.+?), and keeps"
+)
+# Distinctive values, one per field, that no spoiler lexicon matches on its own.
+PURPOSE_PROBES = {
+    "occasion": "Zorbfest",
+    "occasion_date": "Quintember",
+    "budget": "Kumquat tokens",
+    "candidate_ideas": "tandem kayak",
+    "notes": "lilac ribbon wrapping",
+}
+
+
+def _purpose_with(field: str) -> question_routing.PrivatePurpose:
+    value = PURPOSE_PROBES[field]
+    data: dict[str, Any] = {field: [value] if field == "candidate_ideas" else value}
+    return question_routing.PrivatePurpose.model_validate(data)
+
+
+def test_giver_private_purpose_fields_are_the_spoiler_guard_inputs() -> None:
+    flat = _flat(GIVER)
+    m = GUARD_SENTENCE.search(flat)
+    assert m, "guard sentence missing"
+    named = set(BACKTICK.findall(m.group(1)))
+    fields = set(question_routing.PrivatePurpose.model_fields)
+    assert named == fields == set(PURPOSE_PROBES)
+    # Behaviour: the guard rejects each field's value in the routed question, which it would
+    # not do without that field (so every named field really is used).
+    asked = "What does Alex already have?"
+    for field, value in PURPOSE_PROBES.items():
+        text = f"Does Alex like {value}?"
+        with_field = question_routing.find_spoilers(
+            text, _purpose_with(field), requested_information=asked, model_output=True
+        )
+        without = question_routing.find_spoilers(
+            text,
+            question_routing.PrivatePurpose(),
+            requested_information=asked,
+            model_output=True,
+        )
+        assert question_routing.SpoilerCategory.PRIVATE_PURPOSE in with_field, field
+        assert not without, field
+
+
+def test_giver_defaults_to_full_private_purpose_with_occasion_only_fallback() -> None:
+    flat = _flat(GIVER)
+    assert (
+        "By default, include the `occasion`, `occasion_date`, `budget` and the `candidate_ideas` "
+        "you are weighing." in flat
+    )
+    assert "If your own client refuses to send these details, send the `occasion` alone." in flat
+    assert "never put a gift idea, brand or product name in `requested_information`" in flat
+    # Occasion-only is the fallback, never the default.
+    assert "By default, send the `occasion` alone" not in flat
+    # The default example sends them all; the fallback question is safe with the occasion alone.
+    (default,) = [d for a, d in _giver_questions() if "expect" not in a]
+    assert {"occasion", "occasion_date", "budget", "candidate_ideas"} <= set(
+        default["private_purpose"]
+    )
+    fallback = re.search(r'for example, ask "([^"]+)"', flat)
+    assert fallback
+    question_routing.validate_requested_information(
+        fallback.group(1), question_routing.PrivatePurpose(occasion="birthday"), IDENTITY_TERMS
+    )
+
+
 def test_giver_limits_match_f7() -> None:
     flat = _flat(GIVER)
     max_ideas = question_routing.PrivatePurpose.model_json_schema()["properties"][
@@ -339,6 +412,30 @@ def test_answer_codes_reasons_and_decline_reasons_exist() -> None:
         assert f"`{reason}`" in body, reason
     assert "evidence[{index}]: duplicate claim" in inspect.getsource(answers)
     assert "`duplicate claim`" in body
+
+
+def _documented_evidence_reasons() -> list[str]:
+    body = documents()[ANSWER].body
+    intro = "`invalid_evidence` lists a reason per item (`evidence[i]: <reason>`); fix only those"
+    assert intro in body
+    after = body.split(intro, 1)[1]
+    assert after.startswith(" items:\n\n")
+    block = after.removeprefix(" items:\n\n").split("\n\n", 1)[0]
+    return re.findall(r"^- `([^`]+)`:", block, re.M)
+
+
+def test_answer_evidence_reasons_are_exactly_the_codes() -> None:
+    # Every reason _validate_evidence can write, and no other, is listed in the skill.
+    source = inspect.getsource(answers._validate_evidence)
+    literal = set(re.findall(r'evidence\[\{index\}\]: ([a-z_][a-z_ ]*?)(?: \(|")', source))
+    assert "observed_month is in the future" in literal
+    assert "{exc.reason_code}" in source  # from validate_category, below
+    raised = set(re.findall(r"raise (\w+)\(", inspect.getsource(categories.validate_category)))
+    from_category = {getattr(categories, name).reason_code for name in raised}
+    assert from_category == {"unknown_category", "forbidden_category"}
+    documented = _documented_evidence_reasons()
+    assert len(documented) == len(set(documented))
+    assert set(documented) == literal | from_category
 
 
 def test_answer_never_contacts_user_without_human_contact_lease() -> None:
@@ -621,6 +718,51 @@ async def test_quoted_connect_errors_match_the_tools() -> None:
     }
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["decline", "block"])
+async def test_decline_and_block_accept_owner_confirmed_false(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    # The table says "refused when true": false (the default, or sent explicitly) passes
+    # validation and reaches F6's service, so the error is never invalid_request.
+    reached: list[Any] = []
+
+    async def fake_call(_settings: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        reached.append(fn)
+        raise ToolError("reached the service")
+
+    monkeypatch.setattr(connection_tools, "_call", fake_call)
+    for args in ({"action": action, "owner_confirmed": False}, {"action": action}):
+        text = await _connect_error(RESPOND, args)
+        assert not text.startswith("invalid_request"), text
+        assert text == "reached the service"
+    expected = connections.decline if action == "decline" else connections.block
+    assert reached == [expected, expected]
+
+
+def test_connect_quotes_each_change_line() -> None:
+    flat = _flat(CONNECT)
+    assert (
+        "Quote that list to the owner word for word: include each returned `- <change>` line in "
+        "your message to the owner, exactly as Revel wrote it, and ask. Never write that Revel "
+        "returned a list without the lines themselves." in flat
+    )
+
+
+def test_connect_examples_follow_sam_connecting_to_alex() -> None:
+    # One synthetic story across the skills: Sam (sam_rivers) asks to read Alex (alex_demo).
+    flat = _flat(CONNECT)
+    reads = [
+        d["handle"] for t, _, d in examples(CONNECT) if t in ("request_connection", "get_profile")
+    ]
+    assert reads and set(reads) == {"alex_demo"}
+    giver = [d["handle"] for t, _, d in examples(GIVER) if t == "submit_question"]
+    assert set(giver) == {"alex_demo"}
+    assert "when Alex approves Sam's request, Sam can read what Alex shares" in flat
+    assert "Sam asks for gift ideas for Alex. You are Sam's assistant" in flat
+    assert f'"Let {SAMPLE_REQUESTER} see facts you share with Connections"' in flat
+
+
 def test_connect_decline_block_and_pending_change_tier_rules() -> None:
     flat = _flat(CONNECT)
     assert (
@@ -646,7 +788,7 @@ def test_end_connection_retry_is_not_called_idempotent() -> None:
     message = connections.InvalidState.message
     assert (
         f'If a retried `end_connection` returns "{message}", the connection or request is already'
-        " ended. Check `list_connections` instead of retrying" in flat
+        " ended or cannot be ended that way; check `list_connections` rather than retrying." in flat
     )
     # revoke and cancel refuse a row that is no longer approved / pending.
     assert "raise InvalidState()" in inspect.getsource(connections.revoke)

@@ -3,14 +3,16 @@
 Public and unauthenticated: the documents are static, non-personal instructions that clients
 must be able to read before they hold a token. Names are looked up in the loaded document map,
 never used as filesystem paths. The routes are included in OpenAPI so an agent reading
-``/openapi.json`` can find the guidance.
+``/openapi.json`` can find the guidance. Renamed skills (``operations.RENAMED_SKILLS``) keep
+their old page URLs as a permanent redirect (308) to the new page.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
+from revel.guidance.operations import RENAMED_SKILLS
 from revel.guidance.render import UnknownGuidance, render_index, render_markdown
 
 MEDIA_TYPE = "text/markdown; charset=utf-8"
@@ -43,6 +45,12 @@ def router() -> APIRouter:
         summary="One agent guidance document (Markdown)",
     )
     async def guidance_document(name: str) -> Response:
+        if (new := RENAMED_SKILLS.get(name)) is not None:
+            return RedirectResponse(
+                f"/guidance/{new}.md",
+                status_code=status.HTTP_308_PERMANENT_REDIRECT,
+                headers=HEADERS,
+            )
         try:
             return _markdown(render_markdown(name))
         except UnknownGuidance:

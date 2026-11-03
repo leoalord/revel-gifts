@@ -1,13 +1,15 @@
 ---
-name: revel-profile-discovery
-description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.6.0
+name: revel-manage-profile
+description: Build, maintain and edit your user's own Revel gifting profile, from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience; and manage its policy, approvals and audiences with the owner's confirmation.
+version: 0.7.0
 status: active
 ---
 
-# Revel profile discovery
+# Revel: manage your user's profile
 
-Use this when your user asks you to set up or add to their own Revel gifting profile.
+Use this when your user asks you to set up, add to, correct or tidy up their own Revel gifting
+profile, or to change who can see it (its contribution policy, pending approvals and fact
+audiences).
 
 The MCP tools used here are live: `whoami`, `get_profile`, `add_facts`, `update_fact`,
 `remove_fact` and `set_contribution_policy`. If one is missing from your tool list, stop and
@@ -192,8 +194,10 @@ actually returned:
   Both stay visible to the owner, who can correct or remove either.
 - To correct a fact, call `add_facts` with `supersedes_id` set to the old fact's id. The old fact
   is retired only when the replacement is accepted.
-- Leave `audience` unset on a correction: the replacement keeps the old fact's audience. If you
-  set a wider audience, the replacement comes back `pending_review` with the message "Held for
+- A correction may keep the old fact's audience or set a narrower one. Leave `audience` unset
+  and the replacement keeps the old fact's audience (never wider than the category's
+  `effective_audience`), or set the same or a narrower audience. If you set a wider audience,
+  the replacement comes back `pending_review` with the message "Held for
   the owner's review because it would widen who can see the fact it replaces; the old fact stays
   live until approved." Approving it is a widening change: use the two-step flow in section 9
   (`update_fact` with `action` `approve`, then `owner_confirmed` true only after the owner's
@@ -248,7 +252,11 @@ Getting the owner's yes, for every change that may widen access (two calls):
 1. Make the call without `owner_confirmed` (or with it false).
 2. If it widens access, Revel refuses with `owner_confirmation_required` and the exact list of
    changes (MCP: one `- <change>` line each; HTTP: `changes` in a `403`). Nothing is written.
-3. Quote that list to the owner word for word. For the first policy approval, also show what
+3. Quote that list to the owner word for word: include each returned `- <change>` line in your
+   message to the owner, exactly as Revel wrote it. Never write that Revel returned a list
+   without the lines themselves. To approve a pending fact, also show the owner the fact's
+   `statement` (from `get_profile`), since the change line names only its category and
+   audience. For the first policy approval, also show what
    the policy will be: the default audience of each category (`effective_audience` in
    `get_profile`'s `policy.categories`), whether Public is on, and the `share_provisional` and
    `require_review_all` settings. Say plainly that after approval, routine facts your
@@ -330,7 +338,10 @@ Sensitive facts stay Only Me even when approved; Public needs the owner's Public
 that changed meanwhile fails with a conflict ("The fact changed; read the profile again and
 retry"); read the profile with `get_profile` and check its status before asking again.
 
-## HTTP equivalent
+## HTTP equivalent (assistants without MCP access)
+
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today.
 
 The same operations exist over HTTP under `/api/v1/profile` (see `/openapi.json`); `get_profile`
 without a handle is `GET /api/v1/profile` plus `GET /api/v1/profile/policy`, and rejecting a
@@ -342,7 +353,6 @@ and for owner controls `PUT /api/v1/profile/policy`,
 `POST /api/v1/profile/facts/{fact_id}/approve` and `POST /api/v1/profile/facts/{fact_id}/reject`
 (body `{"owner_confirmed": true}` when confirmed). The audience and policy routes take
 `owner_confirmed` in their bodies too.
-How assistants authenticate to the HTTP API is not decided yet; use MCP.
 
 `POST /api/v1/profile/facts` returns `200` with one outcome per item, so `rejected` items and
 their `reason_code` arrive in a successful response; read every item. `400` means the request

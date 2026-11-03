@@ -1,11 +1,46 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.6.0
+version: 0.7.0
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.7.0 (2026-11-03)
+
+Two skills are renamed (RG-23, RG-43). MCP tool names are unchanged.
+
+- `revel-manage-profile` (was `revel-profile-discovery`): it covers building, maintaining and
+  editing your user's own profile, and its policy, approvals and audiences.
+- `revel-find-a-gift` (was `revel-giver-workflow`).
+- The MCP prompts and `revel://guidance/<name>` resources use the new names only; the old names
+  are gone, with no aliases. The old website pages `/guidance/revel-profile-discovery.md` and
+  `/guidance/revel-giver-workflow.md` permanently redirect (`308`) to the new pages.
+
+Wording:
+
+- HTTP API: it is for assistants without MCP access. Access for them is not available yet
+  (issuing them tokens is deferred), so use MCP, the supported path today. People never use the
+  HTTP API themselves; they use their assistant or the Revel website. The index has an "HTTP API"
+  section, and the route catalog is labelled as the reference for assistants without MCP
+  access. `/openapi.json` now declares the bearer scheme (`bearerAuth`) on those routes; the
+  token is the access token an assistant gets by connecting over MCP.
+- Owner confirmation (`revel-manage-profile`, `revel-connect-and-read`): include each returned
+  `- <change>` line in the message to the owner, word for word, never a mention of the list
+  without its lines. To approve a pending fact, also show the owner the fact's `statement`.
+- Corrections (`revel-manage-profile`): a correction may keep the old fact's audience or set a
+  narrower one; only a wider one is held for review.
+- `revel-find-a-gift`: by default `private_purpose` carries the occasion, date, budget and the
+  candidate ideas being weighed, because Revel checks the routed question against them (and
+  `notes`) to keep it surprise-safe. If your client refuses to send them, send the occasion
+  alone and keep the question itself neutral (no idea, brand or product names).
+- `revel-answer-question`: lists the `invalid_evidence` reason "observed_month is in the
+  future".
+- `revel-connect-and-read`: a retried `end_connection` that is refused means the connection or
+  request is already ended or cannot be ended that way; check `list_connections` rather than
+  retrying. The examples now follow Sam connecting to Alex (handle "alex_demo"), as in the other
+  skills.
 
 ## 0.6.0 (2026-11-03)
 

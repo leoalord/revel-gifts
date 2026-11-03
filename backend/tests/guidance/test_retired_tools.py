@@ -17,6 +17,8 @@ from mcp import Client
 from revel.guidance import documents, render_markdown, server_instructions
 from revel.guidance.operations import (
     IMPLEMENTED_MCP_TOOLS,
+    RENAMED_IN_VERSION,
+    RENAMED_SKILLS,
     RETIRED_IN_VERSION,
     RETIRED_MCP_TOOLS,
 )
@@ -171,6 +173,104 @@ def test_changelog_exemption_is_only_for_older_versions() -> None:
     current = current_changelog(full)
     assert f"## {RETIRED_IN_VERSION}" in current
     assert "## 0.5.4" not in current and "## 0.5.4" in full
+
+
+# --- Renamed skills (0.7.0) ----------------------------------------------------------------------
+
+RETIRED_SKILL_NAMES = frozenset(RENAMED_SKILLS)
+# In the renaming CHANGELOG entry only, an old name may appear as the rename note
+# ("(was `old`)") or as the redirected page ("/guidance/old.md").
+_RENAME_NOTE = re.compile(r"\(was `([a-z-]+)`\)|/guidance/([a-z-]+)\.md")
+
+
+def changelog_since(text: str, version: str) -> str:
+    """The changelog without entries for versions before ``version``."""
+    cutoff, kept, keep = _version(version), [], True
+    for line in text.split("\n"):
+        if m := VERSION_HEADING.match(line):
+            keep = tuple(int(g) for g in m.groups()) >= cutoff
+        if keep:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def retired_skill_mentions(text: str, *, rename_notes: bool = False) -> list[str]:
+    """Mentions of old skill names (``rename_notes``: except in the renaming entry's notes)."""
+    if rename_notes:
+        text = _RENAME_NOTE.sub(
+            lambda m: "" if (m.group(1) or m.group(2)) in RETIRED_SKILL_NAMES else m.group(0), text
+        )
+    found = []
+    for name in sorted(RETIRED_SKILL_NAMES):
+        for match in re.finditer(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
+            found.append(f"{text.count(chr(10), 0, match.start()) + 1}: {name}")
+    return found
+
+
+def served_skill_texts() -> dict[str, str]:
+    """Every served text, the CHANGELOG reduced to entries since RENAMED_IN_VERSION."""
+    served = {name: render_markdown(name) for name in documents()}
+    served[CHANGELOG] = changelog_since(served[CHANGELOG], RENAMED_IN_VERSION)
+    served["server-instructions"] = server_instructions()
+    return served
+
+
+@pytest.mark.parametrize("name", list(served_skill_texts()))
+def test_served_guidance_names_no_retired_skill(name: str) -> None:
+    text = served_skill_texts()[name]
+    assert retired_skill_mentions(text, rename_notes=name == CHANGELOG) == []
+
+
+@pytest.mark.anyio
+async def test_mcp_texts_name_no_retired_skill() -> None:
+    settings = Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    server = create_mcp_server(settings)
+    async with Client(server) as client:
+        texts = {"instructions": server.instructions or ""}
+        for prompt in (await client.list_prompts()).prompts:
+            assert prompt.name not in RETIRED_SKILL_NAMES
+            result = await client.get_prompt(prompt.name)
+            texts[f"prompt {prompt.name}"] = "\n".join(
+                m.content.text for m in result.messages if hasattr(m.content, "text")
+            )
+        for resource in (await client.list_resources()).resources:
+            result = await client.read_resource(resource.uri)
+            texts[f"resource {resource.uri}"] = "\n".join(
+                c.text for c in result.contents if hasattr(c, "text")
+            )
+    changelog_uri = f"resource revel://guidance/{CHANGELOG}"
+    texts[changelog_uri] = changelog_since(texts[changelog_uri], RENAMED_IN_VERSION)
+    for label, text in texts.items():
+        assert retired_skill_mentions(text, rename_notes=label == changelog_uri) == [], label
+
+
+def test_retired_skill_exemptions_are_narrow() -> None:
+    full = render_markdown(CHANGELOG)
+    current = changelog_since(full, RENAMED_IN_VERSION)
+    # The history names the old skills (so the cutoff is doing something)...
+    assert retired_skill_mentions(full.replace(current, ""))
+    assert f"## {RENAMED_IN_VERSION}" in current and "## 0.6.0" not in current
+    # ...and the renaming entry names each old skill only as a rename note or redirect.
+    for old, new in RENAMED_SKILLS.items():
+        assert f"`{new}` (was `{old}`)" in current, old
+        assert f"`/guidance/{old}.md`" in current, old
+    assert retired_skill_mentions(current)  # the notes are there, and only notes are exempt
+    # Detection: plain mentions, URLs, prompt and resource names all count.
+    assert retired_skill_mentions("see `revel-giver-workflow`") == ["1: revel-giver-workflow"]
+    for text in (
+        "revel://guidance/revel-profile-discovery",
+        "https://api.revel.gifts/guidance/revel-profile-discovery.md",
+        "the prompt revel-profile-discovery",
+    ):
+        assert retired_skill_mentions(text) == ["1: revel-profile-discovery"], text
+    # Rename notes are exempt only when allowed, and only for retired names.
+    note = "`revel-find-a-gift` (was `revel-giver-workflow`)"
+    assert retired_skill_mentions(note) == ["1: revel-giver-workflow"]
+    assert retired_skill_mentions(note, rename_notes=True) == []
+    assert retired_skill_mentions("Use revel-giver-workflow.", rename_notes=True) == [
+        "1: revel-giver-workflow"
+    ]
+    assert retired_skill_mentions("revel-giver-workflow-v2 and xrevel-giver-workflow") == []
 
 
 def test_retired_mentions_detects_tool_usage() -> None:

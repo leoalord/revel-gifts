@@ -102,3 +102,13 @@ IMPLEMENTED_HTTP = frozenset(
 # Name -> owning feature, for operations (or error codes) guidance mentions before they are
 # merged. Empty since 0.4.2: everything named is merged (F5 #9/#28, F6 #15, F7 #19/#20/#36).
 PROVISIONAL_OPERATIONS: dict[str, str] = {}
+
+# RG-23/RG-43 skill renames (0.7.0): old skill name -> new name. The old website pages
+# permanently redirect (308) to the new ones (``revel.guidance.web``); the old MCP prompt names
+# and ``revel://guidance/<old>`` resources are gone (no aliases). Served guidance must not name
+# the old skills, except CHANGELOG entries for versions before RENAMED_IN_VERSION.
+RENAMED_IN_VERSION = "0.7.0"
+RENAMED_SKILLS: dict[str, str] = {
+    "revel-profile-discovery": "revel-manage-profile",
+    "revel-giver-workflow": "revel-find-a-gift",
+}

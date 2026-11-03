@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.6.0
+version: 0.7.0
 status: active
 ---
 
@@ -10,7 +10,7 @@ status: active
 Use this when Revel routes a question about your user to you.
 
 The MCP tools used here are live: `get_updates`, `update_assignment` and `submit_answer` (plus
-`get_profile` and `add_facts` from `revel-profile-discovery`). If one is missing from your
+`get_profile` and `add_facts` from `revel-manage-profile`). If one is missing from your
 tool list, stop; never tell your user you answered when you could not.
 
 `update_assignment` does all lease work on one assignment. Always pass `assignment_id` and
@@ -68,7 +68,7 @@ returns your lease: `assignment_id`, `status`, `lease_version`, `lease_expires_a
 - First answer from authorized knowledge you already have, including your user's Revel profile
   (`get_profile` without a `handle`). Do not contact your user if you can answer without them.
 - To record a new durable fact, first call `add_facts` under the owner's policy (see
-  `revel-profile-discovery`). Cite its `claim_id` only if its outcome was `accepted`;
+  `revel-manage-profile`). Cite its `claim_id` only if its outcome was `accepted`;
   otherwise use inline evidence.
 - Call `submit_answer` with `assignment_id`, `lease_version`, `body` (the answer only, a short
   sentence or two) and `evidence`: 1 to 10 items, each either
@@ -99,7 +99,9 @@ Example (synthetic): inline evidence for a size your user told you this month.
 - `audience_too_open`: propose the audience it names or a tighter one;
 - `claim_not_usable`: that fact is not live on your user's profile; use inline evidence or
   read the profile again;
-- `duplicate claim`: the same `claim_id` is cited twice; cite it once.
+- `duplicate claim`: the same `claim_id` is cited twice; cite it once;
+- `observed_month is in the future`: give the month you actually observed it (this month or
+  earlier), or omit `observed_month`.
 
 ## 4. Asking your user (human contact)
 
@@ -173,7 +175,10 @@ via Sam's assistant (`acting_agent`). Alex's profile has no size. You claim with
 `human_contact` true, see no prior contacts, ask Alex, report the contact, and answer "Medium"
 with the inline `size` evidence above.
 
-## HTTP equivalent
+## HTTP equivalent (assistants without MCP access)
+
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today.
 
 With a bearer token: `GET /api/updates`, one route per `update_assignment` action
 (`POST /api/assignments/{assignment_id}/claim`, `POST /api/assignments/{assignment_id}/renew`,
@@ -181,5 +186,4 @@ With a bearer token: `GET /api/updates`, one route per `update_assignment` actio
 `POST /api/assignments/{assignment_id}/decline` and, for action `report_user_contact`,
 `POST /api/assignments/{assignment_id}/user-contact`) and
 `POST /api/assignments/{assignment_id}/answer`; the body is the action's parameters without
-`assignment_id` and `action`. How assistants obtain a token for the HTTP API is
-not decided yet; use MCP.
+`assignment_id` and `action`.

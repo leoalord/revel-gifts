@@ -10,13 +10,17 @@ import ast
 import inspect
 import json
 import re
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel
 
 from revel.api import profiles as profiles_api
+from revel.db.enums import Audience, ClaimStatus
 from revel.guidance import documents
 from revel.mcp import profile_tools
 from revel.mcp.server import create_mcp_server
@@ -25,7 +29,7 @@ from revel.settings import Settings
 
 from .test_skills_f6_f7 import TOOLS
 
-DISCOVERY = "revel-profile-discovery"
+DISCOVERY = "revel-manage-profile"
 OWNER_TOOLS = ("set_contribution_policy", "update_fact", "remove_fact")
 FENCE = re.compile(r"^```json ([a-z_]+)([^\n]*)\n(.*?)\n```$", re.M | re.S)
 
@@ -195,8 +199,10 @@ def test_corrections_keep_audience_and_never_readd() -> None:
     assert hold.startswith("Held for the owner's review because it would widen who can see")
     assert f'"{hold}"' in flat
     assert (
-        "Leave `audience` unset on a correction: the replacement keeps the old fact's audience"
-        in flat
+        "A correction may keep the old fact's audience or set a narrower one. Leave `audience` "
+        "unset and the replacement keeps the old fact's audience (never wider than the "
+        "category's `effective_audience`), or set the same or a narrower audience. If you set a "
+        "wider audience, the replacement comes back `pending_review`" in flat
     )
     assert "Approving it is a widening change: use the two-step flow in section 9" in flat
     # F5 reviewer rule R1.
@@ -206,6 +212,56 @@ def test_corrections_keep_audience_and_never_readd() -> None:
     )
     assert "lands at the category default, which undoes the owner's choice" in flat
     assert "supersedes_id" in profiles.FactInput.model_fields
+
+
+def _plan_correction(replaced: Audience, audience: Audience | None) -> tuple[Any, str | None]:
+    """F5's own plan for an agent's correction of a fact at ``replaced`` (approved defaults)."""
+    agent = SimpleNamespace(via="mcp", delegation_id=uuid4())
+    policy = profiles.PolicyView(version=1, approved_at=datetime.now(UTC))
+    fact = profiles.FactInput.model_validate(
+        {
+            "category": "interest",
+            "statement": "Enjoys trail running",
+            "evidence_type": "explicit",
+            "supersedes_id": str(uuid4()),
+            **({"audience": audience.value} if audience else {}),
+        }
+    )
+    return profiles._plan_fact(agent, policy, fact, replaced)  # type: ignore[arg-type]
+
+
+def test_corrections_same_or_narrower_audience_match_f5() -> None:
+    # The skill: unset keeps the old audience, the same or a narrower one is fine, and only a
+    # wider one is held for review with _HOLD_WIDENS_REPLACED.
+    old = Audience.TRUSTED_CIRCLE  # narrower than the interest default (Connections)
+    kept, hold = _plan_correction(old, None)
+    assert (kept.audience, kept.status, hold) == (old, ClaimStatus.ACTIVE, None)
+    for audience in (old, Audience.ONLY_ME):  # the same, and narrower
+        planned, hold = _plan_correction(old, audience)
+        assert (planned.audience, planned.status, hold) == (audience, ClaimStatus.ACTIVE, None)
+    wider, hold = _plan_correction(old, Audience.CONNECTIONS)
+    assert wider.status is ClaimStatus.PENDING_REVIEW and hold == profiles._HOLD_WIDENS_REPLACED
+    # Unset never inherits wider than the category's effective audience.
+    capped, _ = _plan_correction(Audience.PUBLIC, None)
+    assert capped.audience is Audience.CONNECTIONS
+
+
+def test_quotes_each_change_line_and_shows_the_statement() -> None:
+    flat = _flat()
+    assert (
+        "Quote that list to the owner word for word: include each returned `- <change>` line in "
+        "your message to the owner, exactly as Revel wrote it. Never write that Revel returned a "
+        "list without the lines themselves." in flat
+    )
+    assert (
+        "To approve a pending fact, also show the owner the fact's `statement` (from "
+        "`get_profile`), since the change line names only its category and audience." in flat
+    )
+    # F5's approve change line carries the category and audience, never the statement.
+    source = inspect.getsource(profiles.approve_fact)
+    assert "Approve the pending {_quoted(spec)} fact" in source
+    assert "AUDIENCE_LABELS[audience]" in source and "statement" not in source
+    assert "statement" in profiles.FactOut.model_fields
 
 
 # --- update_fact actions, remove_fact and the owner read (RG-59) ---------------------------------

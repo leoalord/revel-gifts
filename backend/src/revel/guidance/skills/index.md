@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.6.0
+version: 0.7.0
 status: active
 ---
 
@@ -19,19 +19,20 @@ and can ask surprise-safe questions.
 - Your user's own profile: `get_profile` (no `handle`: facts, summary and contribution
   policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience` and
   `approve`) and `remove_fact` (removes a fact, or rejects one pending review) (see
-  `revel-profile-discovery`).
+  `revel-manage-profile`).
 - Connections and shared profiles: `set_handle`, `request_connection`, `list_connections`
   (connections and requests), `respond_to_connection_request` (actions `approve`, `decline`,
   `block` and `change_tier`), `end_connection` (actions `revoke` and `cancel`) and
   `get_profile` with a `handle` (see `revel-connect-and-read`).
 - Questions, as the asker: `submit_question` and `get_question` (status and answer; see
-  `revel-giver-workflow`).
+  `revel-find-a-gift`).
 - Questions, as your user's assistant: `get_updates`, `update_assignment` (actions `claim`,
   `renew`, `release`, `decline` and `report_user_contact`) and `submit_answer` (see
   `revel-answer-question`).
 - This guidance: as MCP prompts and resources (`revel://guidance/<name>`) and as Markdown at
   `https://api.revel.gifts/guidance`.
-- API reference: `https://api.revel.gifts/openapi.json`.
+- HTTP API reference, for assistants without MCP access: `https://api.revel.gifts/openapi.json`
+  (see "HTTP API" below).
 
 Use only the tools in your tool list. Never tell your user a request, question or answer was
 sent unless Revel confirmed it.
@@ -52,17 +53,24 @@ sent unless Revel confirmed it.
 5. Call `/mcp` with `Authorization: Bearer <access token>`. If you get `401` again, repeat the
    flow; your user may have disconnected you.
 
-Getting a token without MCP OAuth (API-only clients) is not supported yet; a decision is
-pending. `/openapi.json` also lists `/me`, `/auth/*` and other browser and identity routes;
-they are not the agent integration path.
+## HTTP API
+
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today. People never use the
+HTTP API themselves: they use their assistant or the Revel website. The route catalog below is
+the reference for assistants without MCP access. `/openapi.json` declares the bearer scheme
+(`bearerAuth`) on these routes: the token is the access token an assistant gets by connecting
+over MCP (see "Connecting"), and there is no separate token flow yet. `/openapi.json` also
+lists `/me`, `/auth/*` and other browser and identity routes; they are not the agent
+integration path.
 
 ## Guidance
 
 | Name | Use when |
 | --- | --- |
-| `revel-profile-discovery` | Your user wants to build or add to their own profile |
+| `revel-manage-profile` | Your user wants to build, maintain or edit their own profile, or change who can see it |
 | `revel-connect-and-read` | Your user wants to connect to someone and read their shared profile |
-| `revel-giver-workflow` | Your user wants a gift idea for a connection |
+| `revel-find-a-gift` | Your user wants a gift idea for a connection |
 | `revel-answer-question` | Revel routes a question about your user to you |
 
 Read each at `https://api.revel.gifts/guidance/<name>.md`, or as the MCP prompt or resource of
@@ -70,7 +78,8 @@ the same name. Changes are listed in `https://api.revel.gifts/guidance/CHANGELOG
 
 ## Route catalog
 
-MCP tools and the matching HTTP routes (bearer token):
+MCP tools and the matching HTTP routes. The HTTP column is the reference for assistants
+without MCP access (bearer token; see "HTTP API" above):
 
 | Purpose | MCP tool | HTTP |
 | --- | --- | --- |
@@ -102,8 +111,9 @@ MCP tools and the matching HTTP routes (bearer token):
 | Decline an assignment | `update_assignment` (action `decline`) | `POST /api/assignments/{assignment_id}/decline` |
 | Answer a question | `submit_answer` | `POST /api/assignments/{assignment_id}/answer` |
 
-The HTTP routes take a bearer token, but how assistants obtain one for the HTTP API is not
-decided yet; use MCP. Connections have no bearer HTTP API; the Revel website's own connection
+The HTTP API is for assistants without MCP access. Access for them is not available yet
+(issuing them tokens is deferred), so use MCP, the supported path today. Connections have no
+bearer HTTP API; the Revel website's own connection
 routes are not for assistants.
 
 Errors differ by area:
@@ -125,5 +135,5 @@ Errors differ by area:
 Widening the policy or a fact's audience, approving a pending item, approving a connection
 request or upgrading a connection to Trusted Circle needs the owner's explicit agreement in the
 conversation to the exact changes Revel lists; tightening, declining, blocking, downgrading,
-revoking and cancelling do not, but tell the owner. See `revel-profile-discovery` and
+revoking and cancelling do not, but tell the owner. See `revel-manage-profile` and
 `revel-connect-and-read`. Owners can also do this in the Revel website.

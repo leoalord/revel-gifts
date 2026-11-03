@@ -13,6 +13,13 @@ bytes:
 - MCP: each skill as a no-argument prompt named after the skill, and each document as the
   resource `revel://guidance/<name>` (`text/markdown`).
 
+The skills are `revel-manage-profile`, `revel-connect-and-read`, `revel-find-a-gift` and
+`revel-answer-question`. A renamed skill is listed in `RENAMED_SKILLS` in
+`revel.guidance.operations`: its old website page permanently redirects (`308`) to the new one,
+its old MCP prompt and resource are removed, and `backend/tests/guidance/test_retired_tools.py`
+fails if served guidance still names it. Since 0.7.0, `revel-profile-discovery` is
+`revel-manage-profile` and `revel-giver-workflow` is `revel-find-a-gift`.
+
 Operation names in the guidance are checked by `backend/tests/guidance/test_content_lint.py`
 against `revel.guidance.operations`: anything not live must be marked `<!-- PROVISIONAL ... -->`
 on the same line. Move a name to the implemented set only once its contract is merged and
