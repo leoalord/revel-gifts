@@ -767,6 +767,7 @@ async def submit_question(
                             actor_delegation_id=requester_delegation_id,
                             lease_version=0 if assignment_id is not None else None,
                             details=details,
+                            occurred_at=now,
                         )
                     )
                 session.commit()
