@@ -135,6 +135,10 @@ GET_ANSWER_RESULTS = frozenset(
     get_args(answers.GetAnswerResponse.model_fields["result"].annotation)
 )
 DECLINE_REASONS = frozenset(get_args(question_leases.DeclineReason))
+# list_connections returns a plain dict; its keys, read from F6's adapter.
+LIST_CONNECTIONS_KEYS = frozenset(
+    re.findall(r'result\["([a-z_]+)"\]', inspect.getsource(connection_tools))
+)
 F6_F7_VOCABULARY = frozenset(
     {term for tool in TOOLS.values() for term in _schema_terms(tool.parameters)}
     | {term for model in RESULT_MODELS for term in _schema_terms(model.model_json_schema())}
@@ -144,6 +148,7 @@ F6_F7_VOCABULARY = frozenset(
     | EVIDENCE_REASONS
     | GET_ANSWER_RESULTS
     | DECLINE_REASONS
+    | LIST_CONNECTIONS_KEYS
 )
 
 
@@ -435,7 +440,10 @@ def test_connect_limits_and_rules_match_f6() -> None:
 
 # --- Connect: owner confirmation (F6 RG-27 follow-up) -------------------------------------------
 
-CONFIRM_TOOLS = ("respond_to_connection_request", "change_connection_tier")
+RESPOND = "respond_to_connection_request"
+END = "end_connection"
+# The actions that can widen access (approve, and change_tier up to Trusted Circle).
+CONFIRM_ACTIONS = ("approve", "change_tier")
 SAMPLE_REQUESTER = "Sam Rivers (@sam_rivers)"
 
 
@@ -454,13 +462,12 @@ def _change_for(
 
 
 def test_connect_tools_take_owner_confirmed() -> None:
-    for name in CONFIRM_TOOLS:
-        prop = TOOLS[name].parameters["properties"]["owner_confirmed"]
-        assert prop["type"] == "boolean" and prop["default"] is False, name
-        assert prop["description"] == connections.OWNER_CONFIRMED_DESCRIPTION
-        assert "owner_confirmed" not in TOOLS[name].parameters.get("required", [])
-    for name in ("revoke_connection", "cancel_connection_request"):
-        assert "owner_confirmed" not in TOOLS[name].parameters["properties"], name
+    prop = TOOLS[RESPOND].parameters["properties"]["owner_confirmed"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+    assert prop["description"] == connections.OWNER_CONFIRMED_DESCRIPTION
+    assert "owner_confirmed" not in TOOLS[RESPOND].parameters.get("required", [])
+    assert "owner_confirmed" not in TOOLS[END].parameters["properties"]
+    assert "tier" not in TOOLS[END].parameters["properties"]
 
 
 def test_connect_confirmation_error_matches_f6() -> None:
@@ -489,27 +496,148 @@ def test_connect_change_lines_match_f6(monkeypatch: pytest.MonkeyPatch) -> None:
     # Downgrade and unchanged tier need no flag, as the skill says.
     assert _change_for(monkeypatch, approved, trusted.value, conn) is None
     assert _change_for(monkeypatch, approved, trusted.value, trusted) is None
+    assert _change_for(monkeypatch, approved, conn.value, conn) is None  # unchanged Connections
 
 
 def test_connect_two_step_examples(monkeypatch: pytest.MonkeyPatch) -> None:
-    found = [(t, a.get("step"), d) for t, a, d in examples(CONNECT) if t in CONFIRM_TOOLS]
-    ones = [(t, d) for t, s, d in found if s == "1"]
-    twos = [(t, d) for t, s, d in found if s == "2"]
-    assert {t for t, _ in ones} == set(CONFIRM_TOOLS) and len(ones) == len(twos)
-    for (tool1, first), (tool2, second) in zip(ones, twos, strict=True):
-        assert tool1 == tool2 and not first.get("owner_confirmed")
+    found = [(a.get("step"), d) for t, a, d in examples(CONNECT) if t == RESPOND]
+    ones = [d for s, d in found if s == "1"]
+    twos = [d for s, d in found if s == "2"]
+    assert {d["action"] for d in ones} == set(CONFIRM_ACTIONS) and len(ones) == len(twos)
+    for first, second in zip(ones, twos, strict=True):
+        assert not first.get("owner_confirmed")
         assert second == first | {"owner_confirmed": True}
-    singles = [(t, d) for t, s, d in found if s is None]
-    assert {t for t, _ in singles} == set(CONFIRM_TOOLS)
+    singles = [d for s, d in found if s is None]
+    assert {d["action"] for d in singles} == {"decline", "change_tier"}
     approved = ConnectionRequestStatus.APPROVED.value
-    for tool, data in singles:
-        assert not data.get("owner_confirmed"), (tool, data)
-        if tool == "change_connection_tier":  # a downgrade from Trusted Circle: no flag
+    for data in singles:
+        assert not data.get("owner_confirmed"), data
+        if data["action"] == "change_tier":  # a downgrade from Trusted Circle: no flag
             tier = ConnectionTier(data["tier"])
             trusted = ConnectionTier.TRUSTED_CIRCLE.value
             assert _change_for(monkeypatch, approved, trusted, tier) is None
+    ends = [d for t, _, d in examples(CONNECT) if t == END]
+    assert ends and all(set(d) == {"request_id", "action"} for d in ends)
+
+
+# --- Connect: action tools (RG-59) ---------------------------------------------------------------
+
+CONNECT_ROW = re.compile(r"^\| `([a-z_]+)` \| `([a-z_]+)` \|([^|]*)\|([^|]*)\|$", re.M)
+CONNECT_SAMPLES: dict[str, Any] = {"tier": "connections", "owner_confirmed": True}
+
+
+def _documented_connect_actions() -> dict[tuple[str, str], tuple[str, str]]:
+    """(tool, action) -> (tier cell, owner_confirmed cell) from the connect skill's table."""
+    body = documents()[CONNECT].body
+    header = "| Tool | `action` | `tier` | `owner_confirmed` |"
+    assert header in body
+    table = body.split(header, 1)[1].split("\n\n", 1)[0]
+    rows = {(t, a): (tier.strip(), oc.strip()) for t, a, tier, oc in CONNECT_ROW.findall(table)}
+    assert rows
+    return rows
+
+
+def test_connect_action_table_matches_code() -> None:
+    rows = _documented_connect_actions()
+    for tool, actions in (
+        (RESPOND, connection_tools._RESPOND_ACTIONS),
+        (END, connection_tools._END_ACTIONS),
+    ):
+        assert TOOLS[tool].parameters["properties"]["action"]["enum"] == list(actions)
+        assert [a for t, a in rows if t == tool] == list(actions), tool
+    for (tool, action), (tier, confirmed) in rows.items():
+        takes_tier = tool == RESPOND and action in connection_tools._TIER_ACTIONS
+        assert (tier == "required") is takes_tier, (tool, action)
+        assert (tier == "not accepted") is (not takes_tier), (tool, action)
+        assert (confirmed == "not accepted") is (not takes_tier), (tool, action)
+        if takes_tier:
+            assert confirmed.startswith("true only after the owner's yes"), (tool, action)
+    assert TOOLS["list_connections"].parameters["properties"]["include"]["enum"] == list(
+        connection_tools._INCLUDE
+    )
+
+
+async def _connect_error(tool: str, args: dict[str, Any]) -> str:
+    """The tool's own refusal; action validation runs before any principal or database."""
+    server = create_mcp_server(
+        Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    )
+    if tool != "list_connections":
+        args = {"request_id": str(uuid4()), **args}
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool(tool, args)
+    text = str(exc.value)
+    prefix = f"Error executing tool {tool}: "
+    assert text.startswith(prefix), text
+    return text.removeprefix(prefix)
+
+
+@pytest.mark.anyio
+async def test_documented_connect_params_are_enforced() -> None:
+    for (tool, action), (tier, _confirmed) in _documented_connect_actions().items():
+        if tier == "required":
+            text = await _connect_error(tool, {"action": action})
+            assert text == f"invalid_request: Action '{action}' requires tier.", text
+        elif tool == RESPOND:
+            for name in ("tier", "owner_confirmed"):
+                text = await _connect_error(tool, {"action": action, name: CONNECT_SAMPLES[name]})
+                assert text == f"invalid_request: Action '{action}' does not accept {name}."
+
+
+QUOTED_CONNECT_INVALID = re.compile(r'"(invalid_request: [^"]+)"')
+
+
+@pytest.mark.anyio
+async def test_quoted_connect_errors_match_the_tools() -> None:
+    flat = _flat(CONNECT)
+    kinds = set()
+    for text in QUOTED_CONNECT_INVALID.findall(flat):
+        if m := re.fullmatch(r"invalid_request: Action '(\w+)' requires (\w+)\.", text):
+            tool, args = RESPOND, {"action": m.group(1)}
+            kinds.add("requires")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' does not accept (\w+)\.", text):
+            action, extra = m.groups()
+            tool, args = RESPOND, {"action": action, extra: CONNECT_SAMPLES[extra]}
+            kinds.add(f"accept {extra}")
+        elif m := re.fullmatch(r"invalid_request: Unknown action '([^']+)' for (\w+);.*", text):
+            tool, args = m.group(2), {"action": m.group(1)}
+            kinds.add("unknown action")
+        elif m := re.fullmatch(r"invalid_request: Unknown include '([^']+)' for (\w+);.*", text):
+            tool, args = m.group(2), {"include": m.group(1)}
+            kinds.add("unknown include")
         else:
-            assert data["action"] != "approve"
+            raise AssertionError(f"unrecognised quoted error: {text}")
+        assert await _connect_error(tool, args) == text
+    assert kinds == {
+        "requires",
+        "accept tier",
+        "accept owner_confirmed",
+        "unknown action",
+        "unknown include",
+    }
+
+
+def test_connect_decline_block_and_pending_change_tier_rules() -> None:
+    flat = _flat(CONNECT)
+    assert "Never pass `owner_confirmed` or `tier` with `decline` or `block`" in flat
+    assert "Do not pass `owner_confirmed` (or `tier`) with `decline` or `block` at all" in flat
+    # change_tier on a pending request is refused with F6's fixed InvalidState text.
+    assert f'("{connections.InvalidState.message}")' in flat
+    assert "`change_tier` works only on an approved connection" in flat
+    assert "use `approve` with the tier instead" in flat
+    source = inspect.getsource(connections.change_tier)
+    assert "from_status=_APPROVED" in source
+    # The step about a changed change list is gone (it cannot happen for connections).
+    assert "returns a different change list" not in flat
+
+
+def test_list_connections_keys_are_documented() -> None:
+    flat = _flat(CONNECT)
+    assert {"connections", "incoming", "outgoing"} == LIST_CONNECTIONS_KEYS
+    for key in LIST_CONNECTIONS_KEYS:
+        assert f"`{key}`" in flat, key
+    for include in connection_tools._INCLUDE:
+        assert f"`{include}`" in flat, include
 
 
 def test_connect_requires_explicit_yes_before_owner_confirmed() -> None:

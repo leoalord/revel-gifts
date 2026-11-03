@@ -92,6 +92,13 @@ def served_documents() -> dict[str, str]:
     return served
 
 
+def test_retired_action_collisions_are_known() -> None:
+    # A retired tool name that is also a live action value is only allowed as that action;
+    # a new collision must be reviewed (and its action-context rule checked) before it ships.
+    assert {"report_user_contact"} == RETIRED_MCP_TOOLS & ACTION_VALUES
+    assert {"approve", "change_tier", "revoke", "cancel", "set_audience"} <= ACTION_VALUES
+
+
 def test_retired_tools_are_not_registered_or_implemented() -> None:
     assert RETIRED_MCP_TOOLS
     assert not RETIRED_MCP_TOOLS & set(TOOLS)
@@ -124,6 +131,25 @@ async def test_mcp_prompts_resources_and_instructions_name_no_retired_tool() -> 
     texts[changelog_uri] = current_changelog(texts[changelog_uri])
     for label, text in texts.items():
         assert retired_mentions(text) == [], label
+
+
+def test_every_document_is_at_the_latest_changelog_version() -> None:
+    # One release: every guidance file carries the version of the newest CHANGELOG entry, which
+    # is at least the version that retired the old tools.
+    first = VERSION_HEADING.search(documents()[CHANGELOG].body)
+    assert first is not None
+    latest = ".".join(first.groups())
+    assert _version(latest) >= _version(RETIRED_IN_VERSION)
+    assert "unreleased" not in documents()[CHANGELOG].body
+    for name, doc in documents().items():
+        assert doc.version == latest, name
+
+
+def test_index_what_works_today_lists_every_tool() -> None:
+    body = documents()["index"].body
+    section = body.split("## What works today", 1)[1].split("\n## ", 1)[0]
+    for tool in TOOLS:
+        assert f"`{tool}`" in section, tool
 
 
 def test_changelog_exemption_is_only_for_older_versions() -> None:

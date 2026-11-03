@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.5.4
+version: 0.6.0
 status: active
 ---
 
@@ -10,7 +10,7 @@ status: active
 Use this when Revel routes a question about your user to you.
 
 The MCP tools used here are live: `get_updates`, `update_assignment` and `submit_answer` (plus
-`get_my_profile` and `add_facts` from `revel-profile-discovery`). If one is missing from your
+`get_profile` and `add_facts` from `revel-profile-discovery`). If one is missing from your
 tool list, stop; never tell your user you answered when you could not.
 
 `update_assignment` does all lease work on one assignment. Always pass `assignment_id` and
@@ -66,7 +66,7 @@ returns your lease: `assignment_id`, `status`, `lease_version`, `lease_expires_a
 ## 3. Answer from what you already know
 
 - First answer from authorized knowledge you already have, including your user's Revel profile
-  (`get_my_profile`). Do not contact your user if you can answer without them.
+  (`get_profile` without a `handle`). Do not contact your user if you can answer without them.
 - To record a new durable fact, first call `add_facts` under the owner's policy (see
   `revel-profile-discovery`). Cite its `claim_id` only if its outcome was `accepted`;
   otherwise use inline evidence.
@@ -94,7 +94,7 @@ Example (synthetic): inline evidence for a size your user told you this month.
 
 `invalid_evidence` lists a reason per item (`evidence[i]: <reason>`); fix only those items:
 
-- `unknown_category`: use a category id from `get_contribution_policy`;
+- `unknown_category`: use a category id from `get_profile`'s `policy.categories`;
 - `forbidden_category`: this cannot be evidence; do not retry it in another form;
 - `audience_too_open`: propose the audience it names or a tighter one;
 - `claim_not_usable`: that fact is not live on your user's profile; use inline evidence or

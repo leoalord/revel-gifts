@@ -11,26 +11,18 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
     {
         "ping",
         "whoami",
-        # F5 #9, merged (PR #25, 763c4e5): docs/contracts/f5-profiles.md
-        "get_contribution_policy",
-        "add_facts",
-        "get_my_profile",
-        "set_fact_audience",
-        "remove_fact",
-        # F5 #28, merged (PR #34): docs/contracts/f5-profiles.md "Shared profile reads"
+        # F5 #9/#28/#29, consolidated by RG-59: revel/mcp/profile_tools.py
         "get_profile",
-        # F5 #29 (agent-first owner controls): docs/contracts/f5-profiles.md
+        "add_facts",
+        "update_fact",
+        "remove_fact",
         "set_contribution_policy",
-        "review_pending_fact",
-        # F6 #15, merged: revel/mcp/connection_tools.py
+        # F6 #15, consolidated by RG-59: revel/mcp/connection_tools.py
         "set_handle",
         "request_connection",
-        "list_connection_requests",
-        "respond_to_connection_request",
         "list_connections",
-        "change_connection_tier",
-        "revoke_connection",
-        "cancel_connection_request",
+        "respond_to_connection_request",
+        "end_connection",
         # F7 #19/#20 (PR #33), consolidated by RG-59: revel/mcp/question_tools.py
         "submit_question",
         "get_updates",
@@ -56,10 +48,24 @@ RETIRED_QUESTION_TOOLS = frozenset(
         "get_answer",
     }
 )
-# Phase B adds F5's (get_my_profile, get_contribution_policy, set_fact_audience,
-# review_pending_fact) and F6's (list_connection_requests, change_connection_tier,
-# revoke_connection, cancel_connection_request) retired names as their own sets here.
-RETIRED_MCP_TOOLS = RETIRED_QUESTION_TOOLS
+RETIRED_PROFILE_TOOLS = frozenset(
+    {
+        "get_my_profile",  # -> get_profile (no handle)
+        "get_contribution_policy",  # -> get_profile (no handle), its policy
+        "set_fact_audience",  # -> update_fact (action set_audience)
+        "review_pending_fact",  # -> update_fact (action approve); reject -> remove_fact
+    }
+)
+RETIRED_CONNECTION_TOOLS = frozenset(
+    {
+        "list_connection_requests",  # -> list_connections (include requests)
+        "change_connection_tier",  # -> respond_to_connection_request (action change_tier)
+        "revoke_connection",  # -> end_connection (action revoke)
+        "cancel_connection_request",  # -> end_connection (action cancel)
+    }
+)
+RETIRED_MCP_TOOLS = RETIRED_QUESTION_TOOLS | RETIRED_PROFILE_TOOLS | RETIRED_CONNECTION_TOOLS
+
 IMPLEMENTED_HTTP = frozenset(
     {
         "GET /.well-known/oauth-protected-resource",

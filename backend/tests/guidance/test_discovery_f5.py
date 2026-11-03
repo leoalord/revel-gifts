@@ -16,7 +16,8 @@ import pytest
 from revel.api import profiles as profiles_api
 from revel.db.enums import Audience, ClaimStatus, Confidence, EvidenceType, ObservedPrecision
 from revel.guidance import documents
-from revel.services import categories, profiles
+from revel.mcp import profile_tools
+from revel.services import categories, claim_writes, profiles
 
 DISCOVERY = "revel-profile-discovery"
 EXAMPLE_FENCE = re.compile(r"^```json add_facts([^\n]*)\n(.*?)\n```$", re.M | re.S)
@@ -36,9 +37,14 @@ def _reason_codes() -> frozenset[str]:
     codes |= set(re.findall(r'_rejected\(\s*index,\s*"([a-z_]+)"', source))
     # F5 #29 owner controls and the HTTP error bodies (detail strings and body keys).
     codes.add(profiles.OwnerConfirmationRequired.reason_code)
+    codes.add(profile_tools._INVALID_REQUEST)  # RG-59 per-action validation errors
     api_source = inspect.getsource(profiles_api)
     codes |= set(re.findall(r'"detail": "([a-z_]+)"', api_source))
     codes |= set(re.findall(r'"([a-z_]+)": exc\.', api_source))
+    # Fact-level 409 reasons (HTTP detail), e.g. fact_not_removable and fact_not_pending.
+    codes |= set(
+        re.findall(r'ClaimStateConflict\(claim, "([a-z_]+)"\)', inspect.getsource(claim_writes))
+    )
     return frozenset(codes)
 
 
@@ -57,7 +63,9 @@ MODEL_FIELDS = frozenset(
         profiles.FactInput,
         profiles.FactOutcome,
         profiles.PolicyResponse,
+        profiles.PolicyOut,
         profiles.CategoryOut,
+        profile_tools.OwnerProfileView,
     )
     for name in model.model_fields
 )
@@ -73,7 +81,10 @@ def _tool_params() -> frozenset[str]:
     )
     names: set[str] = set()
     for tool in server._tool_manager.list_tools():
-        names |= set(tool.parameters.get("properties", {}))
+        properties = tool.parameters.get("properties", {})
+        names |= set(properties)
+        # Action values (RG-59 action tools), from each tool's own schema.
+        names |= set(properties.get("action", {}).get("enum", []))
     return frozenset(names)
 
 
