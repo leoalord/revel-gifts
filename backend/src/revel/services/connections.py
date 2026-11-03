@@ -40,10 +40,11 @@ OpenFGA (``profile:<target>#blocked@user:<requester>``). Blocking also CANCELS t
 pending outgoing request to the blocked user (it would otherwise still ask them for access), in a
 separate short transaction after the block commits (never two pair locks in one transaction). It
 does not touch access the blocked user previously granted the blocker: that is the blocked
-user's own decision. The blocked requester sees the target exactly as a nonexistent handle; their
-outgoing list never shows declined, cancelled, revoked or blocked rows, so a block is
-indistinguishable from a decline. Unblocking restores no tier (``on_blocked`` deleted the tier
-tuples); the old requester must request again.
+user's own decision. The blocked requester sees the target exactly as a nonexistent handle.
+Their outgoing list never shows declined, cancelled, revoked or blocked rows, so in that list
+(only) a block looks the same as a decline; elsewhere they can differ (after a block the handle
+resolves as not found, after a decline it still resolves). Unblocking restores no tier
+(``on_blocked`` deleted the tier tuples); the old requester must request again.
 
 OpenFGA writes (F4 hook contract, ``revel.auth.authz`` docstring) and serialization. Every write
 to a directed pair runs under a per-pair transaction-scoped advisory lock
@@ -69,6 +70,16 @@ reconcile barrier fails CLOSED with the retryable ``ConnectionsUnavailable``. If
 fails or times out, Postgres stays approved and ``fga_reconcile`` (scheduled) restores it: a
 missing grant only denies. A revoke-hook failure rolls the change back; a commit failure after a
 successful revoke hook only over-denies until reconcile re-grants.
+
+Owner confirmation (agent-first owner controls, as F5 #29). Granting access through an agent,
+that is approving a pending request or upgrading a connection to ``trusted_circle``, needs
+``owner_confirmed=True``; otherwise ``OwnerConfirmationRequired`` (a ``NotAllowed``) lists the
+exact grant ("Let <name> (@handle) see facts you share with Connections"). The browser owner
+(``via="ui"``, no delegation) never needs it; decline, block, unblock, revoke, cancel and
+downgrades narrow access and need no flag. An unconfirmed agent grant is refused by a read-only
+preflight before any write, and re-checked on the locked row; both check side and state first,
+so ``RequestNotFound`` / ``InvalidState`` always win. Every grant records
+``owner_confirmed_at`` (the response time); a downgrade and a revoke keep it, a block clears it.
 
 Profiles. Tier and block tuples live on ``profile:<target profile id>``. Approve, tier change and
 block first call F5's ``revel.services.profiles.ensure_profile`` for the caller (the target or
@@ -98,7 +109,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
@@ -136,6 +147,8 @@ LOOKUP_LIMIT = 60  # handle lookups (found or not) per user ...
 LOOKUP_WINDOW = timedelta(hours=1)  # ... per rolling window (in-process, per instance)
 LOCK_TIMEOUT_MS = 5000  # pair/requester advisory locks and row locks (fail closed past it)
 LIST_LIMIT = 200  # rows per list call
+# The same consent wording as F5's owner controls (agent-first owner confirmation).
+OWNER_CONFIRMED_DESCRIPTION = profiles.OWNER_CONFIRMED_DESCRIPTION
 
 _HANDLE_RE = re.compile(HANDLE_PATTERN)
 _PENDING = ConnectionRequestStatus.PENDING.value
@@ -210,6 +223,20 @@ class NotAllowed(ConnectionsError):
     """The principal is inconsistent or its delegation is no longer active."""
 
     message = "Not authorized"
+
+
+class OwnerConfirmationRequired(NotAllowed):
+    """403 ``owner_confirmation_required``: the target's agent asked to grant access (approve a
+    request, or upgrade a connection to Trusted Circle) without ``owner_confirmed``. ``changes``
+    lists each grant in plain words so the agent can quote exactly what will change to the owner.
+    (A ``NotAllowed`` subclass: an adapter that does not map it specifically fails closed.)"""
+
+    message = "The owner must confirm this change"
+    reason_code = "owner_confirmation_required"
+
+    def __init__(self, changes: Sequence[str]) -> None:
+        super().__init__()
+        self.changes = list(changes)
 
 
 class ConnectionsUnavailable(ConnectionsError):
@@ -1045,15 +1072,94 @@ def _unblock_sync(factory: sessionmaker[Session], requester: UUID, target: UUID)
         )
 
 
+_TIER_LABELS = {
+    ConnectionTier.CONNECTIONS: "Connections",
+    ConnectionTier.TRUSTED_CIRCLE: "Trusted Circle",
+}
+
+
+def _is_owner_ui(principal: PrincipalLike) -> bool:
+    """The owner acting in the browser (no agent in between): never needs ``owner_confirmed``."""
+    return principal.via == "ui" and principal.delegation_id is None
+
+
+def _grants_access(row: ConnectionRequest, tier: ConnectionTier) -> bool:
+    """Approving a pending request, or upgrading an approved one to Trusted Circle, widens what
+    the requester can see. A downgrade or an unchanged tier does not."""
+    if row.status == _PENDING:
+        return True
+    return (
+        tier is ConnectionTier.TRUSTED_CIRCLE
+        and row.granted_tier != ConnectionTier.TRUSTED_CIRCLE.value
+    )
+
+
+def _requester_label(session: Session, requester: UUID) -> str:
+    """``Display Name (@handle)`` for the change text (the target's own incoming request)."""
+    found = session.execute(
+        select(User.display_name, Handle.handle)
+        .outerjoin(Handle, Handle.user_id == User.id)
+        .where(User.id == requester)
+    ).one_or_none()
+    name, handle = (found[0], found[1]) if found is not None else (None, None)
+    if name and handle:
+        return f"{name} (@{handle})"
+    if handle:
+        return f"@{handle}"
+    return name or "this person"
+
+
+def _require_confirmation(
+    session: Session,
+    principal: PrincipalLike,
+    row: ConnectionRequest,
+    tier: ConnectionTier,
+    owner_confirmed: bool,
+) -> None:
+    """An agent granting access needs ``owner_confirmed``; the browser owner never does.
+
+    Called only after the caller's side and the row's state are checked, so ``RequestNotFound``
+    and ``InvalidState`` always win and a non-target learns nothing from this error."""
+    if owner_confirmed or _is_owner_ui(principal) or not _grants_access(row, tier):
+        return
+    who = _requester_label(session, row.requester_user_id)
+    raise OwnerConfirmationRequired([f"Let {who} see facts you share with {_TIER_LABELS[tier]}"])
+
+
+def _preflight_sync(
+    factory: sessionmaker[Session],
+    principal: PrincipalLike,
+    request_id: UUID,
+    tier: ConnectionTier,
+    from_status: str,
+) -> None:
+    """Read-only refusal of an unconfirmed agent grant BEFORE any write (including the caller's
+    profile set-up). The same checks, in the same order, as the locked transaction, which stays
+    authoritative (the row may change in between)."""
+    with factory() as session, session.begin():
+        _begin(session)
+        _check_actor(session, principal)
+        _pair_for(session, principal, request_id, "target")
+        row = session.execute(
+            select(ConnectionRequest).where(ConnectionRequest.id == request_id)
+        ).scalar_one()
+        if row.status != from_status:
+            raise InvalidState()
+        _require_confirmation(session, principal, row, tier, owner_confirmed=False)
+
+
 async def _set_tier(
     principal: PrincipalLike,
     request_id: UUID,
     tier: ConnectionTier,
     *,
     from_status: str,
+    owner_confirmed: bool,
     sessions: SessionFactory | None,
 ) -> ResponseResult:
     factory = _factory(sessions)
+    if not owner_confirmed and not _is_owner_ui(principal):
+        await _run(partial(_preflight_sync, factory, principal, request_id, tier, from_status))
     await _ensure_own_profile(principal, factory)
 
     def tx1() -> tuple[ResponseResult, UUID, UUID]:
@@ -1063,6 +1169,7 @@ async def _set_tier(
             row = _locked_row(session, principal, request_id, "target")
             if row.status != from_status:
                 raise InvalidState()
+            _require_confirmation(session, principal, row, tier, owner_confirmed)
             profile_id = _require_profile(session, row.target_user_id)
             values: dict[str, Any] = {
                 "status": _APPROVED,
@@ -1071,6 +1178,10 @@ async def _set_tier(
             }
             if row.responded_at is None:
                 values["responded_at"] = func.now()
+            if _grants_access(row, tier):
+                # Confirmed by the owner (browser, or agent with owner_confirmed): record when.
+                # A downgrade or unchanged tier keeps the earlier confirmation (F3 0005).
+                values["owner_confirmed_at"] = func.now()
             row = _update_row(session, request_id, **values)
             _hook(
                 authz.on_connection_tier_changing,
@@ -1090,11 +1201,20 @@ async def approve(
     request_id: UUID,
     *,
     tier: str | ConnectionTier,
+    owner_confirmed: bool = False,
     sessions: SessionFactory | None = None,
 ) -> ResponseResult:
-    """Target approves a pending request at ``tier`` (``connections`` or ``trusted_circle``)."""
+    """Target approves a pending request at ``tier`` (``connections`` or ``trusted_circle``).
+
+    Through an agent this needs ``owner_confirmed=True`` (else ``OwnerConfirmationRequired``
+    listing the grant); the browser owner never needs it. Records ``owner_confirmed_at``."""
     return await _set_tier(
-        principal, request_id, _tier(tier), from_status=_PENDING, sessions=sessions
+        principal,
+        request_id,
+        _tier(tier),
+        from_status=_PENDING,
+        owner_confirmed=owner_confirmed,
+        sessions=sessions,
     )
 
 
@@ -1103,11 +1223,20 @@ async def change_tier(
     request_id: UUID,
     *,
     tier: str | ConnectionTier,
+    owner_confirmed: bool = False,
     sessions: SessionFactory | None = None,
 ) -> ResponseResult:
-    """Target changes an approved connection's tier; applies on the requester's next check."""
+    """Target changes an approved connection's tier; applies on the requester's next check.
+
+    Through an agent an upgrade to ``trusted_circle`` needs ``owner_confirmed=True`` (and
+    records ``owner_confirmed_at``); a downgrade or unchanged tier needs no flag."""
     return await _set_tier(
-        principal, request_id, _tier(tier), from_status=_APPROVED, sessions=sessions
+        principal,
+        request_id,
+        _tier(tier),
+        from_status=_APPROVED,
+        owner_confirmed=owner_confirmed,
+        sessions=sessions,
     )
 
 
@@ -1234,6 +1363,8 @@ async def block(
                 values: dict[str, Any] = {
                     "status": _BLOCKED,
                     "granted_tier": None,
+                    # F3 0005 CHECK: only approved/revoked rows keep a confirmation time.
+                    "owner_confirmed_at": None,
                     "responder_delegation_id": principal.delegation_id,
                 }
                 if row.responded_at is None:
@@ -1257,8 +1388,11 @@ async def block(
     result, blocked_user = await _run(work)
     try:
         await _run(partial(_cancel_reverse_pending, factory, principal.user_id, blocked_user))
-    except ConnectionsUnavailable:
-        logger.warning("connections: could not cancel the blocker's reverse pending request")
+    except Exception as exc:  # the block is committed; report it as done
+        logger.warning(
+            "connections: could not cancel the blocker's reverse pending request (%s)",
+            type(exc).__name__,
+        )
     return result
 
 
@@ -1292,6 +1426,7 @@ async def unblock(
 __all__ = [
     "LOOKUP_LIMIT",
     "LOOKUP_WINDOW",
+    "OWNER_CONFIRMED_DESCRIPTION",
     "REQUEST_LIMIT",
     "REQUEST_WINDOW",
     "BlockedEntry",
@@ -1308,6 +1443,7 @@ __all__ = [
     "InvalidTier",
     "NotAllowed",
     "OutgoingRequest",
+    "OwnerConfirmationRequired",
     "ProfileNotSetUp",
     "RateLimited",
     "RequestNotFound",

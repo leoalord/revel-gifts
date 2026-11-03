@@ -218,7 +218,12 @@ async def test_mcp_tools_flow_and_identical_hidden_errors(
     approved = _structured(
         await server.call_tool(
             "respond_to_connection_request",
-            {"request_id": rid, "action": "approve", "tier": "trusted_circle"},
+            {
+                "request_id": rid,
+                "action": "approve",
+                "tier": "trusted_circle",
+                "owner_confirmed": True,
+            },
         )
     )
     assert approved == {"request_id": rid, "status": "approved", "tier": "trusted_circle"}
@@ -280,7 +285,9 @@ async def test_end_to_end_on_real_openfga(
 
         req = await svc.lookup_and_request(sam.agent, handle="alex_demo", sessions=sessions)
         rid = req.request.id
-        await svc.approve(alex.agent, rid, tier="connections", sessions=sessions)
+        await svc.approve(
+            alex.agent, rid, tier="connections", owner_confirmed=True, sessions=sessions
+        )
         assert await tier(sam.ui, alex) is ViewerTier.connections
         assert await tier(sam.agent, alex) is ViewerTier.connections
         assert await tier(alex.ui, sam) is ViewerTier.none  # directional
@@ -347,7 +354,13 @@ async def test_block_and_approve_without_profiles_on_real_openfga(
         assert await resolve_viewer_tier(fga, sam.ui, alex_profile) is ViewerTier.none
 
         req = await svc.lookup_and_request(sam.agent, handle="cal_demo", sessions=sessions)
-        await svc.approve(cal.agent, req.request.id, tier="trusted_circle", sessions=sessions)
+        await svc.approve(
+            cal.agent,
+            req.request.id,
+            tier="trusted_circle",
+            owner_confirmed=True,
+            sessions=sessions,
+        )
         cal_profile = session.execute(
             select(Profile.id).where(Profile.user_id == cal.user.id)
         ).scalar_one()
