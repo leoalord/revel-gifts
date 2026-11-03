@@ -1,7 +1,7 @@
 ---
 name: revel-profile-discovery
 description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.3.0
+version: 0.4.2
 status: active
 ---
 
@@ -197,7 +197,10 @@ Example (synthetic), after the trip fact above came back `pending_review`:
 The same operations exist over HTTP under `/api/v1/profile` (see `/openapi.json`):
 `GET /api/v1/profile/policy`, `POST /api/v1/profile/facts` (body `{"facts": [...]}`),
 `GET /api/v1/profile`, `GET /api/v1/profile/summary`,
-`PATCH /api/v1/profile/facts/{id}/audience` and `DELETE /api/v1/profile/facts/{id}`. How
-assistants authenticate to the HTTP API is not decided yet; use MCP. Structural problems (a
-wrong type or enum value, a missing or unknown field) return `422`; semantic field errors return
-`400`.
+`PATCH /api/v1/profile/facts/{fact_id}/audience` and `DELETE /api/v1/profile/facts/{fact_id}`.
+How assistants authenticate to the HTTP API is not decided yet; use MCP.
+
+`POST /api/v1/profile/facts` returns `200` with one outcome per item, so `rejected` items and
+their `reason_code` arrive in a successful response; read every item. `400` means the request
+as a whole was refused as invalid, and `422` is a structural problem (a wrong type or enum
+value, a missing or unknown field).

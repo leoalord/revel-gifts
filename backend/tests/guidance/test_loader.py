@@ -43,8 +43,7 @@ def test_all_documents_load_and_validate() -> None:
     assert {n for n, d in docs.items() if d.is_skill} == EXPECTED_SKILLS
     assert {"index", "CHANGELOG"} <= set(docs)
     for doc in docs.values():
-        expected = "active" if doc.name == "revel-profile-discovery" else "draft"
-        assert doc.status == expected
+        assert doc.status == "active", doc.name  # 0.4.0: every operation named is merged
         assert loader.SEMVER_RE.match(doc.version)
         assert not doc.body.startswith("---")
 

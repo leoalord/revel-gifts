@@ -1,11 +1,53 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.3.0
-status: draft
+version: 0.4.2
+status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.4.2 (2026-11-02)
+
+- F7's human-contact change is merged: nothing is PROVISIONAL any more.
+- `revel-answer-question`: upgrade a plain claim you hold by calling `claim_assignment` with
+  `human_contact` true and your current `lease_version` (new `lease_version`, same expiry);
+  a plain claim again is still `already_claimed`. `report_user_contact` without a
+  human-contact lease fails with `human_contact_required`. The upgrade example and these codes
+  are checked against F7's code, with a database test of the upgrade path.
+
+## 0.4.1 (2026-11-02)
+
+- `revel-answer-question`: never contact your user unless a claim with `human_contact` true has
+  succeeded and you hold that lease. Decide before claiming; a second claim on your own lease
+  is `already_claimed`, which is never permission to contact your user. Upgrading a held claim
+  in place and the `human_contact_required` error are marked PROVISIONAL until F7's pending
+  change merges. Adds the `duplicate claim` evidence reason.
+- `revel-connect-and-read`: the `get_profile` not-found error means not available or no shared
+  facts; an empty `facts` list and Public facts for unconnected viewers are explained;
+  `provisional_caveat` is listed among the returned fields.
+
+## 0.4.0 (2026-11-02)
+
+- Every operation the guidance names is live; nothing is PROVISIONAL any more. All skills and
+  the index are `active`.
+- `revel-connect-and-read` matches F6's merged connection tools and F5's shared profile read
+  (`get_profile`): exact handles only, identical not-found for hidden, missing and blocking
+  handles, the shared 60 per hour lookup limit, directional approval, and a block that looks
+  like a decline.
+- `revel-giver-workflow` matches F7's `submit_question`, `get_question_status` and `get_answer`:
+  `requested_information` holds only the item or fact, `private_purpose` holds the occasion,
+  date, budget and ideas, deadlines (72 hours by default, 1 hour to 14 days, `deadline_clamped`),
+  stored but unused escalation, and every error code. `no_shareable_answer` carries no reason.
+- `revel-answer-question` matches F7's leases and answers: untrusted `minimized_question`,
+  identity only from `requester` and `acting_agent`, 15-minute leases with 8 renewals,
+  `lease_version` on every call, the exclusive human-contact lease, the 24-hour response window
+  and outreach cooldown, decline reasons, evidence (1 to 10 items) and `invalid_evidence`
+  reasons.
+- Index: "What works today" and the route catalog list every live tool and its HTTP route;
+  error formats per area. Discovery and index use `{fact_id}` in fact paths and explain that
+  `POST /api/v1/profile/facts` reports rejected items inside a `200`.
+- JSON examples in all four skills are checked against the real tool input models.
 
 ## 0.3.0 (2026-11-02)
 
@@ -36,7 +78,7 @@ status: draft
   tighter audience. Set `involves_others` for facts about other people.
 - Discovery: report only the outcome Revel returns; handle no approved policy,
   `enrichment_disabled` and `sensitive_not_explicit`. Contradictions stay visible to the owner.
-- Questions: `get_answer` and `submit_answer` replace earlier draft names; decline when the <!-- PROVISIONAL: validate against merged F7 contract -->
+- Questions: `get_answer` and `submit_answer` replace earlier draft names; decline when the
   context is not enough.
 - Connections: aligned with F6's tools (handle, requests in both directions, approve with tier,
   decline, block, tier change, revoke, cancel). Hidden handles return the same not-found error;
