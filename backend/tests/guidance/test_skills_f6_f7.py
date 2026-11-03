@@ -11,7 +11,9 @@ import inspect
 import json
 import re
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, get_args
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -411,3 +413,103 @@ def test_connect_limits_and_rules_match_f6() -> None:
     assert "lists only `pending` and `approved` requests" in flat
     for tier in ConnectionTier:
         assert f"`{tier.value}`" in flat
+
+
+# --- Connect: owner confirmation (F6 RG-27 follow-up) -------------------------------------------
+
+CONFIRM_TOOLS = ("respond_to_connection_request", "change_connection_tier")
+SAMPLE_REQUESTER = "Sam Rivers (@sam_rivers)"
+
+
+def _change_for(
+    monkeypatch: pytest.MonkeyPatch, status: str, granted: str | None, tier: ConnectionTier
+) -> list[str] | None:
+    """F6's own change list for an unconfirmed agent call, or None when no flag is needed."""
+    monkeypatch.setattr(connections, "_requester_label", lambda _s, _r: SAMPLE_REQUESTER)
+    row = SimpleNamespace(status=status, granted_tier=granted, requester_user_id=uuid4())
+    agent = SimpleNamespace(via="mcp", delegation_id=uuid4())
+    try:
+        connections._require_confirmation(None, agent, row, tier, owner_confirmed=False)  # type: ignore[arg-type]
+    except connections.OwnerConfirmationRequired as exc:
+        return exc.changes
+    return None
+
+
+def test_connect_tools_take_owner_confirmed() -> None:
+    for name in CONFIRM_TOOLS:
+        prop = TOOLS[name].parameters["properties"]["owner_confirmed"]
+        assert prop["type"] == "boolean" and prop["default"] is False, name
+        assert prop["description"] == connections.OWNER_CONFIRMED_DESCRIPTION
+        assert "owner_confirmed" not in TOOLS[name].parameters.get("required", [])
+    for name in ("revoke_connection", "cancel_connection_request"):
+        assert "owner_confirmed" not in TOOLS[name].parameters["properties"], name
+
+
+def test_connect_confirmation_error_matches_f6() -> None:
+    body = documents()[CONNECT].body
+    code = connections.OwnerConfirmationRequired.reason_code
+    assert code == "owner_confirmation_required" and f"`{code}`" in body
+    error = connection_tools._tool_error(connections.OwnerConfirmationRequired(["A", "B"]))
+    text = error.args[0]
+    assert text.startswith(f"{code}:") and text.endswith("\n- A\n- B")
+    assert "`- <change>`" in body
+
+
+def test_connect_change_lines_match_f6(monkeypatch: pytest.MonkeyPatch) -> None:
+    flat = _flat(CONNECT)
+    pending = ConnectionRequestStatus.PENDING.value
+    approved = ConnectionRequestStatus.APPROVED.value
+    conn, trusted = ConnectionTier.CONNECTIONS, ConnectionTier.TRUSTED_CIRCLE
+    # The label format the examples use is F6's own ("Display Name (@handle)").
+    assert 'f"{name} (@{handle})"' in inspect.getsource(connections._requester_label)
+    approve = _change_for(monkeypatch, pending, None, conn)
+    upgrade = _change_for(monkeypatch, approved, conn.value, trusted)
+    assert approve and upgrade
+    for change in (*approve, *upgrade):
+        assert f'"{change}"' in flat, change
+    assert _change_for(monkeypatch, pending, None, trusted)  # approving at either tier
+    # Downgrade and unchanged tier need no flag, as the skill says.
+    assert _change_for(monkeypatch, approved, trusted.value, conn) is None
+    assert _change_for(monkeypatch, approved, trusted.value, trusted) is None
+
+
+def test_connect_two_step_examples(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = [(t, a.get("step"), d) for t, a, d in examples(CONNECT) if t in CONFIRM_TOOLS]
+    ones = [(t, d) for t, s, d in found if s == "1"]
+    twos = [(t, d) for t, s, d in found if s == "2"]
+    assert {t for t, _ in ones} == set(CONFIRM_TOOLS) and len(ones) == len(twos)
+    for (tool1, first), (tool2, second) in zip(ones, twos, strict=True):
+        assert tool1 == tool2 and not first.get("owner_confirmed")
+        assert second == first | {"owner_confirmed": True}
+    singles = [(t, d) for t, s, d in found if s is None]
+    assert {t for t, _ in singles} == set(CONFIRM_TOOLS)
+    approved = ConnectionRequestStatus.APPROVED.value
+    for tool, data in singles:
+        assert not data.get("owner_confirmed"), (tool, data)
+        if tool == "change_connection_tier":  # a downgrade from Trusted Circle: no flag
+            tier = ConnectionTier(data["tier"])
+            trusted = ConnectionTier.TRUSTED_CIRCLE.value
+            assert _change_for(monkeypatch, approved, trusted, tier) is None
+        else:
+            assert data["action"] != "approve"
+
+
+def test_connect_requires_explicit_yes_before_owner_confirmed() -> None:
+    flat = _flat(CONNECT)
+    for phrase in (
+        "Make the call without `owner_confirmed` (or with it false)",
+        "Quote that list to the owner word for word",
+        "Only then repeat the identical call with `owner_confirmed` true",
+        "Wait for a clear yes from the owner in this conversation",
+        "A yes covers only the changes you quoted",
+        "Never infer consent",
+        "Never add `owner_confirmed` true on your own",
+        "never set it on the first call",
+        "Declining, blocking, downgrading, revoking and cancelling need no flag",
+    ):
+        assert phrase in flat, phrase
+    for sentence in re.split(r"(?<=[.:])\s+", flat):
+        if "`owner_confirmed` true" in sentence and "Needs" not in sentence:
+            assert re.search(r"(?i)\b(only|after|never|need)\b", sentence), sentence
+    index = " ".join(documents()["index"].body.split())
+    assert "approving a connection request or upgrading a connection to Trusted Circle" in index
