@@ -92,6 +92,7 @@ from revel.db.models import (
     QuestionEvent,
     User,
 )
+from revel.services import connections
 from revel.services.identity import agent_label
 from revel.services.muse_spark import MuseSparkClient
 from revel.services.question_routing import (
@@ -435,23 +436,37 @@ class _Prepared:
     recent_count: int
 
 
-def _normalize_handle(handle: str) -> str:
-    return handle.strip().removeprefix("@").lower()
-
-
-def _find_target(session: Session, request: SubmitQuestionRequest) -> _Target | None:
-    if request.profile_id is not None:
-        row = session.execute(
-            select(Profile.id, Profile.user_id).where(Profile.id == request.profile_id)
-        ).first()
-    else:
-        assert request.handle is not None
-        row = session.execute(
-            select(Profile.id, Profile.user_id)
-            .join(Handle, Handle.user_id == Profile.user_id)
-            .where(Handle.handle == _normalize_handle(request.handle))
-        ).first()
+def _find_target_by_profile(session: Session, profile_id: UUID) -> _Target | None:
+    row = session.execute(
+        select(Profile.id, Profile.user_id).where(Profile.id == profile_id)
+    ).first()
     return None if row is None else _Target(profile_id=row.id, owner_user_id=row.user_id)
+
+
+async def _find_target(
+    session: Session, principal: Principal, request: SubmitQuestionRequest
+) -> _Target | None:
+    """The question's target, or ``None`` (not permitted) for every hidden case.
+
+    A handle goes through F6's ``resolve_handle``: nonexistent, malformed, undiscoverable and
+    blocking targets fail identically, before any OpenFGA work, and misses spend the caller's
+    handle-lookup quota, so the questions path is no faster or cheaper enumeration oracle than
+    the connections one (Privacy: hidden targets answer identically).
+    """
+    if request.profile_id is not None:
+        return await _in_thread(lambda: _find_target_by_profile(session, request.profile_id))
+    assert request.handle is not None
+    try:
+        resolved = await connections.resolve_handle(session, principal, handle=request.handle)
+    except connections.RateLimited:
+        raise QuestionRateLimited(int(connections.LOOKUP_WINDOW.total_seconds())) from None
+    except connections.ConnectionsUnavailable as exc:
+        raise _authz_unavailable(exc) from None
+    except connections.ConnectionsError:  # TargetNotFound, NotAllowed: one indistinct answer
+        return None
+    if resolved.profile_id is None:
+        return None
+    return _Target(profile_id=resolved.profile_id, owner_user_id=resolved.user_id)
 
 
 def _questions_enabled(session: Session, profile_id: UUID) -> bool:
@@ -614,7 +629,7 @@ async def submit_question(
 
     # Phase A: short read-only session. Target, policy, step-1 context (tier check), pool.
     with deps.sessionmaker() as session:
-        target = await _in_thread(lambda: _find_target(session, request))
+        target = await _find_target(session, principal, request)
         session.rollback()  # no transaction held across the OpenFGA checks
         if target is None or target.owner_user_id == principal.user_id:
             raise QuestionNotPermitted()
