@@ -55,4 +55,6 @@ def build_mcp_asgi_app(server: MCPServer, settings: Settings) -> ASGIApp:
         transport_security=security,
     )
     audit.configure_audit_logger()
-    return audit.McpAuditMiddleware(sdk_app, settings.normalized_mcp_path)
+    return audit.McpAuditMiddleware(
+        sdk_app, settings.normalized_mcp_path, catalog=audit.server_catalog(server)
+    )

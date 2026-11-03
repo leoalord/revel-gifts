@@ -5,12 +5,14 @@ request to the MCP path it emits one structured line per JSON-RPC message on the
 ``revel.mcp.audit`` logger, so the onboarding client matrix can record which methods clients
 (Muse, Claude, ...) call.
 
-Logged: ``method``, a ``target`` (tool name for ``tools/call``, prompt name for
-``prompts/get``, resource URI without query/fragment/userinfo for ``resources/read``), the
-authenticated OAuth ``client_id`` (set by the SDK bearer-auth middleware), the response
-``status``, ``batch_size`` and ``http_method``. Never logged: params/arguments, bodies,
-results, tokens, subjects, emails, scopes, IPs or user agents. The response body is never
-read; the request body is buffered (up to ``MAX_AUDIT_BODY_BYTES``) and replayed unchanged.
+Logged: ``method`` (only names in ``MCP_METHODS``, else ``"unknown"``), a ``target`` (only a
+tool, prompt, resource URI or resource template registered on the server, else
+``"unknown"``), the authenticated OAuth ``client_id`` (set by the SDK bearer-auth middleware),
+the response ``status``, ``batch_size`` and ``http_method``. No client-supplied free text is
+logged. Never logged: params/arguments, bodies, results, tokens, subjects, emails, scopes, IPs
+or user agents. The response body is never read. The request body is buffered (up to
+``MAX_AUDIT_BODY_BYTES``) and replayed unchanged, and only when an ``Authorization`` header is
+present: unauthenticated requests pass straight through and log ``method="unauthenticated"``.
 """
 
 from __future__ import annotations
@@ -18,19 +20,66 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.shared.uri_template import UriTemplate
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import MCPServer
 
 AUDIT_LOGGER_NAME = "revel.mcp.audit"
 MAX_AUDIT_BODY_BYTES = 1024 * 1024
 # A batch of N messages yields N lines; bound it so one request cannot flood the logs.
 MAX_LOGGED_MESSAGES = 50
-_MAX_FIELD_CHARS = 200
 UNPARSED = "unparsed"
+UNKNOWN = "unknown"
+UNAUTHENTICATED = "unauthenticated"
+
+# Fixed allowlist of MCP method names (spec 2025-06-18 / 2025-11-25 plus those mcp==2.3.0
+# serves). Anything else is logged as "unknown" so client-chosen strings never reach the logs.
+MCP_METHODS: frozenset[str] = frozenset(
+    {
+        "initialize",
+        "ping",
+        "server/discover",
+        "subscriptions/listen",
+        "tools/list",
+        "tools/call",
+        "prompts/list",
+        "prompts/get",
+        "resources/list",
+        "resources/read",
+        "resources/templates/list",
+        "resources/subscribe",
+        "resources/unsubscribe",
+        "completion/complete",
+        "logging/setLevel",
+        "sampling/createMessage",
+        "roots/list",
+        "elicitation/create",
+        "tasks/get",
+        "tasks/result",
+        "tasks/list",
+        "tasks/cancel",
+        "notifications/initialized",
+        "notifications/cancelled",
+        "notifications/progress",
+        "notifications/message",
+        "notifications/roots/list_changed",
+        "notifications/resources/updated",
+        "notifications/resources/list_changed",
+        "notifications/tools/list_changed",
+        "notifications/prompts/list_changed",
+        "notifications/elicitation/complete",
+        "notifications/tasks/status",
+    }
+)
 
 logger = logging.getLogger(AUDIT_LOGGER_NAME)
 
@@ -69,57 +118,137 @@ def configure_audit_logger() -> None:
         logger.addHandler(_StdoutJsonHandler())
 
 
-def _clip(value: Any) -> str | None:
-    if not isinstance(value, str):
+@dataclass(frozen=True)
+class Catalog:
+    """Names registered on the MCP server: the only targets that may be logged."""
+
+    tools: frozenset[str] = frozenset()
+    prompts: frozenset[str] = frozenset()
+    resources: frozenset[str] = frozenset()
+    resource_templates: tuple[str, ...] = ()
+
+
+CatalogSource = Callable[[], Awaitable[Catalog]]
+
+
+async def _empty_catalog() -> Catalog:
+    return Catalog()
+
+
+def server_catalog(server: MCPServer) -> CatalogSource:
+    """Resolve the allowlist from ``server``'s public list APIs at request time, so tools,
+    prompts and resources registered after the app is built are included."""
+
+    async def load() -> Catalog:
+        return Catalog(
+            tools=frozenset(t.name for t in await server.list_tools()),
+            prompts=frozenset(p.name for p in await server.list_prompts()),
+            resources=frozenset(str(r.uri) for r in await server.list_resources()),
+            resource_templates=tuple(
+                t.uri_template for t in await server.list_resource_templates()
+            ),
+        )
+
+    return load
+
+
+@lru_cache(maxsize=256)
+def _parsed_template(uri_template: str) -> UriTemplate | None:
+    try:
+        return UriTemplate.parse(uri_template)
+    except Exception:
         return None
-    return value[:_MAX_FIELD_CHARS]
 
 
-def _resource_target(uri: Any) -> str | None:
-    """Scheme, host and path of a resource URI; no userinfo, port, query or fragment."""
+def _resource_target(uri: Any, catalog: Catalog) -> str:
+    """The registered resource URI (query/fragment ignored) or matching template; otherwise
+    ``"unknown"``. The result always equals a string from the server's registry."""
     if not isinstance(uri, str):
-        return None
+        return UNKNOWN
+    if uri in catalog.resources:
+        return uri
     try:
         parts = urlsplit(uri)
+        bare = f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else parts.path
     except ValueError:
-        return UNPARSED
-    host = parts.hostname or ""
-    if parts.scheme:
-        return _clip(f"{parts.scheme}://{host}{parts.path}")
-    return _clip(parts.path)
+        bare = ""
+    if bare in catalog.resources:
+        return bare
+    for uri_template in catalog.resource_templates:
+        parsed = _parsed_template(uri_template)
+        try:
+            if parsed is not None and parsed.match(uri) is not None:
+                return uri_template
+        except Exception:
+            continue
+    return UNKNOWN
 
 
-def _describe(message: Any) -> tuple[str | None, str | None]:
-    """Return ``(method, target)`` for one JSON-RPC message; never anything else from it."""
+def _registered(name: Any, names: frozenset[str]) -> str:
+    return name if isinstance(name, str) and name in names else UNKNOWN
+
+
+# (method, target kind, raw value) read from one message. The raw value is client-supplied:
+# it is only compared against the catalog, never logged.
+_Raw = tuple[str | None, str | None, Any]
+
+_TARGET_KIND = {"tools/call": "tool", "prompts/get": "prompt", "resources/read": "resource"}
+
+
+def _describe(message: Any) -> _Raw:
     if not isinstance(message, dict):
-        return UNPARSED, None
-    method = _clip(message.get("method"))
+        return UNPARSED, None, None
+    method = message.get("method")
+    if method is None:
+        return None, None, None  # a JSON-RPC response from the client
+    if not isinstance(method, str) or method not in MCP_METHODS:
+        return UNKNOWN, None, None
+    kind = _TARGET_KIND.get(method)
     params = message.get("params")
     params = params if isinstance(params, dict) else {}
-    if method in ("tools/call", "prompts/get"):
-        return method, _clip(params.get("name"))
-    if method == "resources/read":
-        return method, _resource_target(params.get("uri"))
-    return method, None
+    value = params.get("uri") if kind == "resource" else params.get("name")
+    return method, kind, value
 
 
-def _parse(body: bytes) -> tuple[list[tuple[str | None, str | None]], int | None]:
-    """Return per-message ``(method, target)`` pairs and the batch size."""
+def _parse(body: bytes) -> tuple[list[_Raw], int | None]:
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
-        return [(UNPARSED, None)], None
+        return [(UNPARSED, None, None)], None
     if isinstance(payload, dict):
         return [_describe(payload)], 1
     if isinstance(payload, list) and payload:
         return [_describe(m) for m in payload[:MAX_LOGGED_MESSAGES]], len(payload)
-    return [(UNPARSED, None)], None
+    return [(UNPARSED, None, None)], None
+
+
+async def _resolve(raw: list[_Raw], source: CatalogSource) -> list[tuple[str | None, str | None]]:
+    catalog: Catalog | None = None
+    entries: list[tuple[str | None, str | None]] = []
+    for method, kind, value in raw:
+        if kind is None:
+            entries.append((method, None))
+            continue
+        if catalog is None:
+            try:
+                catalog = await source()
+            except Exception:
+                logger.warning("mcp audit catalog unavailable; targets logged as unknown")
+                catalog = Catalog()
+        if kind == "tool":
+            target = _registered(value, catalog.tools)
+        elif kind == "prompt":
+            target = _registered(value, catalog.prompts)
+        else:
+            target = _resource_target(value, catalog)
+        entries.append((method, target))
+    return entries
 
 
 def _client_id(scope: Scope) -> str | None:
     user = scope.get("user")
     if isinstance(user, AuthenticatedUser):
-        return _clip(user.access_token.client_id)
+        return user.access_token.client_id[:200]
     return None
 
 
@@ -131,14 +260,21 @@ def _route_path(scope: Scope) -> str:
     return path
 
 
-def _content_length(scope: Scope) -> int | None:
+def _header(scope: Scope, name: bytes) -> bytes | None:
     for key, value in scope.get("headers", ()):
-        if key == b"content-length":
-            try:
-                return int(value)
-            except ValueError:
-                return None
+        if key.lower() == name:
+            return value
     return None
+
+
+def _content_length(scope: Scope) -> int | None:
+    value = _header(scope, b"content-length")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _emit(
@@ -165,17 +301,25 @@ def _emit(
 class McpAuditMiddleware:
     """ASGI wrapper logging MCP JSON-RPC methods for requests to ``mcp_path``.
 
-    POST: one line per JSON-RPC message (``method="unparsed"`` for malformed or oversized
-    bodies). Other HTTP methods (GET/DELETE): one line with ``method=null`` and their
-    ``http_method``. The line is emitted when the response starts, so long-lived streams are
-    logged immediately; the response body itself is passed through untouched.
+    POST with an ``Authorization`` header: one line per JSON-RPC message
+    (``method="unparsed"`` for malformed or oversized bodies). POST without one: the body is
+    not read; one line with ``method="unauthenticated"``. Other HTTP methods (GET/DELETE): one
+    line with ``method=null`` and their ``http_method``. ``catalog`` supplies the registered
+    names ``target`` may take (none by default). The line is emitted when the response
+    starts, so long-lived streams are logged immediately; the response body is untouched.
     """
 
     def __init__(
-        self, app: ASGIApp, mcp_path: str, *, max_body_bytes: int = MAX_AUDIT_BODY_BYTES
+        self,
+        app: ASGIApp,
+        mcp_path: str,
+        *,
+        catalog: CatalogSource | None = None,
+        max_body_bytes: int = MAX_AUDIT_BODY_BYTES,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
+        self.catalog = catalog or _empty_catalog
         self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -185,10 +329,16 @@ class McpAuditMiddleware:
 
         http_method: str = scope.get("method", "")
         downstream_receive = receive
-        if http_method == "POST":
-            entries, batch_size, downstream_receive = await self._read_body(scope, receive)
+        entries: list[tuple[str | None, str | None]]
+        batch_size: int | None = None
+        if http_method != "POST":
+            entries = [(None, None)]
+        elif _header(scope, b"authorization") is None:
+            # The SDK answers 401 without reading the body; don't hold the request for it.
+            entries = [(UNAUTHENTICATED, None)]
         else:
-            entries, batch_size = [(None, None)], None
+            raw, batch_size, downstream_receive = await self._read_body(scope, receive)
+            entries = await _resolve(raw, self.catalog)
 
         logged = False
 
@@ -220,11 +370,11 @@ class McpAuditMiddleware:
 
     async def _read_body(
         self, scope: Scope, receive: Receive
-    ) -> tuple[list[tuple[str | None, str | None]], int | None, Receive]:
-        """Buffer up to the cap; return parsed entries and a receive that replays the body."""
+    ) -> tuple[list[_Raw], int | None, Receive]:
+        """Buffer up to the cap; return parsed messages and a receive that replays the body."""
         declared = _content_length(scope)
         if declared is not None and declared > self.max_body_bytes:
-            return [(UNPARSED, None)], None, receive
+            return [(UNPARSED, None, None)], None, receive
 
         buffered: list[Message] = []
         size = 0
@@ -249,7 +399,6 @@ class McpAuditMiddleware:
             return await receive()
 
         if not complete:
-            return [(UNPARSED, None)], None, replay
-        body = b"".join(m.get("body", b"") for m in buffered)
-        entries, batch_size = _parse(body)
-        return entries, batch_size, replay
+            return [(UNPARSED, None, None)], None, replay
+        raw, batch_size = _parse(b"".join(m.get("body", b"") for m in buffered))
+        return raw, batch_size, replay
