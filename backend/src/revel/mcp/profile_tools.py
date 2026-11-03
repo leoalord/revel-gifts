@@ -31,6 +31,7 @@ from revel.auth.identity import Principal
 from revel.auth.runtime import runtime_for
 from revel.db.enums import Audience
 from revel.services import connections, profiles
+from revel.services.categories import CATEGORY_BY_ID
 from revel.services.profiles import (
     AddFactsResult,
     CategorySetting,
@@ -158,9 +159,22 @@ def _confirmation_text(changes: list[str]) -> str:
     )
 
 
+# Field-path parts that are schema names, never agent-supplied text.
+_SCHEMA_FIELDS = frozenset(PolicyUpdate.model_fields) | frozenset(CategorySetting.model_fields)
+
+
+def _path_part(part: Any) -> str:
+    """A field path part, or ``*`` for anything that is not a schema field or a known
+    category id (agent-supplied keys are never echoed)."""
+    text = str(part)
+    return text if text in _SCHEMA_FIELDS or text in CATEGORY_BY_ID else "*"
+
+
 def _invalid_text(errors: list[dict[str, Any]]) -> str:
-    """Policy field errors (service-generated text, no input echoed beyond field paths)."""
-    parts = [f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}" for e in errors]
+    """Policy field errors: generic field paths plus the service's fixed messages."""
+    parts = [
+        f"{'.'.join(_path_part(p) for p in e.get('loc', []))}: {e.get('msg', '')}" for e in errors
+    ]
     return f"{_INVALID}: " + "; ".join(parts) if parts else _INVALID
 
 

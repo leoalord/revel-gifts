@@ -240,7 +240,8 @@ def test_mcp_owner_controls(stack: tuple[TestClient, AuthRuntime, Any]) -> None:
             {"expected_version": 3, "category_settings": {"health": {"audience": "only_me"}}},
         )
     )
-    assert invalid.endswith("category_settings.health: unknown category")
+    assert invalid.endswith("category_settings.*: unknown category")  # key not echoed
+    assert "health" not in invalid
 
 
 def test_mcp_review_and_audience(stack: tuple[TestClient, AuthRuntime, Any]) -> None:
@@ -332,3 +333,101 @@ def test_mcp_review_and_audience(stack: tuple[TestClient, AuthRuntime, Any]) -> 
         )
     )
     assert bob["policy"]["version"] == 1 and bob["policy"]["require_review_all"] is False
+
+
+def _add_mcp(client: TestClient, item: dict[str, Any]) -> dict[str, Any]:
+    (result,) = ok(mcp_call(client, "add_facts", {"facts": [item]}))["results"]
+    return result
+
+
+def _add_bearer(client: TestClient, item: dict[str, Any]) -> dict[str, Any]:
+    response = client.post("/api/v1/profile/facts", json={"facts": [item]})
+    assert response.status_code == 200, response.text
+    (result,) = response.json()["results"]
+    return result
+
+
+@pytest.mark.parametrize("add", [_add_mcp, _add_bearer], ids=["mcp", "bearer"])
+def test_agent_corrections_never_widen_silently(
+    stack: tuple[TestClient, AuthRuntime, Any], add: Any
+) -> None:
+    """Review B1 through each transport: inherit when omitted (also cross-category), cap at
+    the category default, hold an explicit wider audience, accept equal or narrower."""
+    client, _, _ = stack
+    ok(
+        mcp_call(
+            client, "set_contribution_policy", {"expected_version": None, "owner_confirmed": True}
+        )
+    )
+    interest = {"category": "interest", "evidence_type": "explicit"}
+    private = add(client, {**interest, "statement": "Loves tea", "audience": "only_me"})
+    assert private["audience"] == "only_me"
+
+    def status_of(fact_id: str) -> str:
+        facts = client.get(
+            "/api/v1/profile", params={"status": ["active", "superseded", "pending_review"]}
+        ).json()["facts"]
+        return next(f["status"] for f in facts if f["id"] == fact_id)
+
+    same_cat = add(
+        client, {**interest, "statement": "Loves sencha", "supersedes_id": private["claim_id"]}
+    )
+    assert (same_cat["outcome"], same_cat["audience"]) == ("accepted", "only_me")
+    assert status_of(private["claim_id"]) == "superseded"
+
+    cross = add(
+        client,
+        {
+            "category": "style",
+            "statement": "Minimalist",
+            "evidence_type": "explicit",
+            "supersedes_id": same_cat["claim_id"],
+        },
+    )
+    assert (cross["outcome"], cross["audience"]) == ("accepted", "only_me")
+
+    wider = add(
+        client,
+        {
+            "category": "style",
+            "statement": "Scandinavian",
+            "evidence_type": "explicit",
+            "audience": "trusted_circle",
+            "supersedes_id": cross["claim_id"],
+        },
+    )
+    assert (wider["outcome"], wider["audience"]) == ("pending_review", "trusted_circle")
+    assert status_of(cross["claim_id"]) == "active"
+    refused = client.post(f"/api/v1/profile/facts/{wider['claim_id']}/approve")
+    assert refused.status_code == 403 and refused.json()["detail"] == CONFIRM
+    client.post(f"/api/v1/profile/facts/{wider['claim_id']}/reject")
+    assert status_of(cross["claim_id"]) == "active"
+
+    wide = add(client, {**interest, "statement": "Loves coffee"})
+    assert wide["audience"] == "connections"
+    capped = add(
+        client,
+        {
+            "category": "size",
+            "statement": "Wears M",
+            "evidence_type": "explicit",
+            "details": {"item": "shirt", "size": "M"},
+            "supersedes_id": wide["claim_id"],
+        },
+    )
+    assert (capped["outcome"], capped["audience"]) == ("accepted", "trusted_circle")
+    assert status_of(wide["claim_id"]) == "superseded"
+
+    narrower = add(
+        client,
+        {
+            "category": "size",
+            "statement": "Wears L",
+            "evidence_type": "explicit",
+            "details": {"item": "shirt", "size": "L"},
+            "audience": "only_me",
+            "supersedes_id": capped["claim_id"],
+        },
+    )
+    assert (narrower["outcome"], narrower["audience"]) == ("accepted", "only_me")
+    assert status_of(capped["claim_id"]) == "superseded"
