@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from revel.db.enums import Audience, ConnectionTier, EvidenceType
 
@@ -19,6 +20,15 @@ RECIPIENT_HANDLE = "leo_walker"
 SAM_HANDLE = "sam_demo"
 JORDAN_HANDLE = "jordan_demo"
 DEMO_HANDLES: tuple[str, ...] = (RECIPIENT_HANDLE, SAM_HANDLE, JORDAN_HANDLE)
+
+# Expected user ids of the synthetic demo accounts on dev (not secrets). A handle that resolves
+# to any other user is refused, so a released-and-reclaimed handle never brings a stranger into
+# scope. Tests pass their own ids.
+DEMO_USER_IDS: dict[str, UUID] = {
+    RECIPIENT_HANDLE: UUID("cce306e8-2ac1-4a9b-bedd-4d0f634b0f0a"),
+    SAM_HANDLE: UUID("3a39e3cf-0f4c-4b99-8cf4-78abc66dcab2"),
+    JORDAN_HANDLE: UUID("b2f16f94-e4a4-461b-b299-289e1cf0be15"),
+}
 
 # Required baseline: Jordan (requester) approved by Leo (target) at Trusted Circle, so Jordan
 # reads Leo's profile at trusted_circle. It needs a live approval and is never created here.

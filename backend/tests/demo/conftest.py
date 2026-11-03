@@ -33,6 +33,7 @@ from revel.db.enums import ConnectionTier  # noqa: E402
 from revel.db.models import (  # noqa: E402
     Agent,
 )
+from revel.demo import seed  # noqa: E402
 from revel.services import connections, profiles  # noqa: E402
 from revel.settings import Settings  # noqa: E402
 
@@ -107,10 +108,11 @@ def dev_settings() -> Settings:
 
 
 @pytest.fixture
-async def world(session: Session, fga: FakeFga, sessions) -> World:
+async def world(session: Session, fga: FakeFga, sessions, monkeypatch: pytest.MonkeyPatch) -> World:
     """Leo (recipient, policy v1), Sam and Jordan (demo) and Cal (non-demo), each with an
     active delegation (authorized_sid + a delegation session). Baseline: Jordan approved by Leo
-    at trusted_circle."""
+    at trusted_circle. The pinned demo user ids are replaced by this world's ids for the test
+    (``seed.DEMO_USER_IDS`` is the reset's default ``expected_user_ids``)."""
     agent = Agent(oauth_client_id=f"client_muse_{uuid4().hex[:6]}", name="Muse")
     session.add(agent)
     session.flush()
@@ -121,6 +123,8 @@ async def world(session: Session, fga: FakeFga, sessions) -> World:
     add_policy(session, leo, 1)
     session.commit()
     await connect(sessions, jordan, leo, ConnectionTier.TRUSTED_CIRCLE)
+    for person in (leo, sam, jordan):
+        monkeypatch.setitem(seed.DEMO_USER_IDS, person.handle, person.user.id)
     return World(leo=leo, sam=sam, jordan=jordan, cal=cal, agent=agent)
 
 

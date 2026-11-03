@@ -14,10 +14,12 @@ Safety:
 - ``--target dev`` is required and must equal ``PUBLIC_BASE_URL`` (``DEMO_TARGETS``).
 - ``--apply`` also needs ``--no-active-hold``: the operator confirms no verification hold is
   announced (a reset changes shared test state).
-- Only the allowlisted handles (``revel.demo.seed.DEMO_HANDLES``) are in scope. A missing handle,
-  a missing recipient profile, or any row in the computed clear scope that names a user outside
-  the allowlist aborts before any write (fail closed). Connection requests with a non-demo party
-  are left alone and counted.
+- Only the allowlisted handles (``revel.demo.seed.DEMO_HANDLES``) are in scope, each pinned to its
+  expected user id (``DEMO_USER_IDS``). A missing handle, a handle resolving to another user,
+  a missing recipient profile, a connections plan with errors (e.g. a missing or wrong-tier
+  baseline: the run would fail, so the dry run and an apply both refuse), or any row in the
+  computed clear scope that names a user outside the allowlist aborts before any write (fail
+  closed). Connection requests with a non-demo party are left alone and counted.
 - Output carries counts, request ids, claim ids and seed keys only: never fact text, emails,
   tokens or names. Uses the shared ``get_sessionmaker`` (no extra engines or pools).
 
@@ -31,15 +33,17 @@ A. Clear, ONE transaction (``lock_timeout`` 3s): the demo questions (profile or 
 B. Connections, through F6's service functions only (each its own transaction; F4's hook
    contract): among the demo users, pending requests are declined by the target (cancelled by
    the requester if only the requester's list shows them), approved ones other than the
-   Leo <-> Jordan Trusted Circle baseline are revoked by the target, blocks are unblocked. A
-   missing baseline is an ERROR (never created). Then ``fga_reconcile`` (window 0, no prune).
+   Leo <-> Jordan Trusted Circle baseline are revoked by the target, blocks are unblocked. The
+   baseline is never created (a missing one refuses before Phase A). Then ``fga_reconcile``
+   (window 0, no prune).
 C. Re-seed the recipient's prepared facts through F5's ``add_facts`` as the owner (browser UI
    principal) and print the disclosure manifest (seed key, claim id, audience, "prepared").
 
 Verify: before/after counts and read-only authorization checks through F4 (Sam denied on
 Leo's profile; Jordan at trusted_circle sees the Trusted Circle seed); no demo questions remain;
-only the baseline connection is live among the demo users. Exit codes: 0 success, 1 a phase or
-verification failed, 2 refused (nothing written).
+only the baseline connection is live among the demo users. A database error in a phase prints
+the phase and exception class only (that phase's transaction rolls back) and exits 1. Exit
+codes: 0 success, 1 a phase or verification failed, 2 refused (nothing written).
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ import asyncio
 import json
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, TextIO
@@ -57,6 +61,7 @@ from uuid import UUID
 
 import anyio.to_thread
 from sqlalchemy import delete, exists, func, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from revel.auth import authz, fga_reconcile
@@ -87,6 +92,7 @@ from revel.demo.seed import (
     BASELINE_TARGET,
     BASELINE_TIER,
     DEMO_HANDLES,
+    DEMO_USER_IDS,
     JORDAN_HANDLE,
     KEPT_CONNECTIONS,
     PREPARED_LABEL,
@@ -148,7 +154,9 @@ class DemoScope:
         return Principal(user_id=self.users[handle], agent_id=None, delegation_id=None, via="ui")
 
 
-def resolve_scope(session: Session) -> DemoScope:
+def resolve_scope(
+    session: Session, expected_user_ids: Mapping[str, UUID] = DEMO_USER_IDS
+) -> DemoScope:
     rows = session.execute(
         select(Handle.handle, Handle.user_id).where(Handle.handle.in_(DEMO_HANDLES))
     ).all()
@@ -156,6 +164,9 @@ def resolve_scope(session: Session) -> DemoScope:
     missing = [h for h in DEMO_HANDLES if h not in users]
     if missing:
         raise ResetRefused(f"demo handle(s) not found: {', '.join(missing)}")
+    moved = [h for h in DEMO_HANDLES if users[h] != expected_user_ids.get(h)]
+    if moved:
+        raise ResetRefused(f"demo handle(s) resolve to an unexpected user: {', '.join(moved)}")
     by_user = dict(
         session.execute(
             select(Profile.user_id, Profile.id).where(Profile.user_id.in_(users.values()))
@@ -729,6 +740,7 @@ async def run(
     sessions: SessionFactory = _default_sessionmaker,
     fga: FgaClient | None = None,
     out: TextIO = sys.stdout,
+    expected_user_ids: Mapping[str, UUID] = DEMO_USER_IDS,
 ) -> int:
     settings = settings or get_settings()
     try:
@@ -746,7 +758,7 @@ async def run(
     def read_plan() -> tuple[DemoScope, ClearPlan, dict[str, int]]:
         with factory() as session, session.begin():
             session.execute(text("SET TRANSACTION READ ONLY"))
-            scope = resolve_scope(session)
+            scope = resolve_scope(session, expected_user_ids)
             return scope, plan_clear(session, scope), demo_counts(session, scope)
 
     try:
@@ -773,6 +785,12 @@ async def run(
         print("REFUSED: scope check failed; nothing written", file=sys.stderr)
         return EXIT_REFUSED
     print("Scope check: PASS (only the three demo users are touched)", file=out)
+    if conn_plan.errors:
+        # E.g. a missing or wrong-tier baseline: the run would fail, so nothing destructive runs.
+        print("Connections check: FAIL (see ERROR lines above)", file=out)
+        print("REFUSED: connections plan has errors; nothing written", file=sys.stderr)
+        return EXIT_REFUSED
+    print("Connections check: PASS (baseline present)", file=out)
 
     if not apply:
         print("Dry run: no writes made. Re-run with --apply --no-active-hold.", file=out)
@@ -786,7 +804,8 @@ async def run(
             await client.close()
         return EXIT_REFUSED
     authz.configure_authz(client)
-    errors: list[str] = list(conn_plan.errors)
+    errors: list[str] = []
+    phase = "A (clear)"
     try:
         # Phase A: one transaction, committed before Phase C.
         def clear() -> dict[str, int]:
@@ -801,6 +820,7 @@ async def run(
         _print_counts("Phase A: deleted", done, out)
 
         # Phase B: F6 service calls (own transactions), then reconcile.
+        phase = "B (connections)"
         print("Phase B: connections", file=out)
         errors += await apply_connections(scope, conn_plan, sessions, out)
         reconcile_error = await run_reconcile(client, sessions, out)
@@ -808,6 +828,7 @@ async def run(
             errors.append(reconcile_error)
 
         # Phase C: re-seed through F5.
+        phase = "C (re-seed)"
         print("Phase C: re-seed", file=out)
         manifest, seed_errors = await reseed(scope, sessions)
         errors += seed_errors
@@ -816,6 +837,7 @@ async def run(
             print(f"  {m.seed_key}: claim {m.claim_id}, audience {m.audience}, {m.label}", file=out)
 
         # Verify.
+        phase = "verify"
         print("Verify:", file=out)
         failures = await verify(scope, sessions, client, manifest, conn_plan.kept, out)
 
@@ -832,6 +854,13 @@ async def run(
         print(manifest_json(manifest), file=out)
         print(MANIFEST_END, file=out)
         return EXIT_FAILED if errors or failures else EXIT_OK
+    except (SQLAlchemyError, profiles.ProfileServiceError) as exc:
+        # Class name only (no row data). The failing phase's transaction was rolled back;
+        # earlier phases stay committed.
+        message = f"ERROR: phase {phase} failed ({type(exc).__name__}); its transaction rolled back"
+        print(message, file=out)
+        print(message, file=sys.stderr)
+        return EXIT_FAILED
     finally:
         authz.reset_authz(client)
         if own_client:

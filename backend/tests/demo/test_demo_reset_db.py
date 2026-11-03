@@ -188,8 +188,10 @@ async def run(
     apply: bool = False,
     hold: bool = True,
     target: str = "dev",
+    ids: dict[str, UUID] | None = None,
 ) -> tuple[int, str]:
     out = io.StringIO()
+    extra: dict[str, Any] = {} if ids is None else {"expected_user_ids": ids}
     code = await reset.run(
         target=target,
         apply=apply,
@@ -198,6 +200,7 @@ async def run(
         sessions=sessions,
         fga=fga,
         out=out,
+        **extra,
     )
     return code, out.getvalue()
 
@@ -519,15 +522,22 @@ async def test_missing_baseline_is_reported_and_fails(
 ) -> None:
     baseline = session.scalar(select(ConnectionRequest.id))
     await connections.revoke(world.leo.ui, baseline, sessions=sessions)
+    messy(session, world)
+    sam_to_leo = await connect(sessions, world.sam, world.leo, None)
+    before, states, tuples = table_counts(session), request_states(session), set(fga.tuples)
 
+    # Both the dry run and --apply refuse (exit 2) BEFORE any destructive phase.
     code, out = await run(sessions, fga, dev_settings)
-    assert code == reset.EXIT_OK  # dry run reports, writes nothing
-    assert "ERROR: baseline missing" in out
-
+    assert code == reset.EXIT_REFUSED
+    assert "ERROR: baseline missing" in out and "Connections check: FAIL" in out
     code, out = await run(sessions, fga, dev_settings, apply=True)
-    assert code == reset.EXIT_FAILED
+    assert code == reset.EXIT_REFUSED
     assert "ERROR: baseline missing" in out
-    assert "VERIFY FAILED: jordan_demo is denied" in out
+    assert "Phase A" not in out
+    assert table_counts(session) == before
+    assert request_states(session) == states
+    assert states[sam_to_leo][0] == "pending"
+    assert fga.tuples == tuples
     # It is reported, never created.
     with factory() as s:
         assert (
@@ -538,6 +548,214 @@ async def test_missing_baseline_is_reported_and_fails(
             )
             == 0
         )
+
+
+async def test_wrong_tier_baseline_refuses_before_phase_a(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    baseline = session.scalar(select(ConnectionRequest.id))
+    await connections.change_tier(
+        world.leo.ui, baseline, tier=ConnectionTier.CONNECTIONS, sessions=sessions
+    )
+    messy(session, world)
+    before, states = table_counts(session), request_states(session)
+    for apply in (False, True):
+        code, out = await run(sessions, fga, dev_settings, apply=apply)
+        assert code == reset.EXIT_REFUSED
+        assert "approved at connections, not trusted_circle" in out
+    assert table_counts(session) == before
+    assert request_states(session) == states
+    assert states[baseline] == ("approved", "connections")
+
+
+# --- Pinned user ids --------------------------------------------------------------------------
+
+
+async def test_refuses_handle_resolving_to_unexpected_user(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)
+    before = table_counts(session)
+    ids = {p.handle: p.user.id for p in (world.leo, world.sam, world.jordan)}
+    ids["sam_demo"] = world.cal.user.id  # sam_demo now names someone else
+    for apply in (False, True):
+        code, out = await run(sessions, fga, dev_settings, apply=apply, ids=ids)
+        assert code == reset.EXIT_REFUSED
+        assert out == ""
+    assert table_counts(session) == before
+    # The recipient pinned to the shipped dev id does not match this world's Leo either.
+    ids = {p.handle: p.user.id for p in (world.leo, world.sam, world.jordan)}
+    ids["leo_walker"] = UUID("cce306e8-2ac1-4a9b-bedd-4d0f634b0f0a")
+    code, _ = await run(sessions, fga, dev_settings, apply=True, ids=ids)
+    assert code == reset.EXIT_REFUSED
+    assert table_counts(session) == before
+
+
+def test_pinned_dev_user_ids() -> None:
+    from revel.demo import seed
+
+    # Read the module source constants (the world fixture is not active here).
+    assert {h: str(u) for h, u in seed.DEMO_USER_IDS.items()} == {
+        "leo_walker": "cce306e8-2ac1-4a9b-bedd-4d0f634b0f0a",
+        "sam_demo": "3a39e3cf-0f4c-4b99-8cf4-78abc66dcab2",
+        "jordan_demo": "b2f16f94-e4a4-461b-b299-289e1cf0be15",
+    }
+    assert set(seed.DEMO_USER_IDS) == set(seed.DEMO_HANDLES)
+
+
+# --- Adversarial scope cases ------------------------------------------------------------------
+
+
+async def assert_refused_unchanged(
+    session: Session, sessions: Any, fga: FakeFga, settings: Settings, violation: str
+) -> None:
+    before, states, tuples = table_counts(session), request_states(session), set(fga.tuples)
+    code, out = await run(sessions, fga, settings, apply=True)
+    assert code == reset.EXIT_REFUSED
+    assert "Scope check: FAIL" in out
+    assert f"{violation}: 1" in out
+    assert "Phase A" not in out
+    assert table_counts(session) == before
+    assert request_states(session) == states
+    assert fga.tuples == tuples
+
+
+async def test_refuses_non_demo_answer_citing_leo_claim(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    made = messy(session, world)
+    add_question(session, world.leo, world.sam, world.cal, cite=made["loose"])
+    session.commit()
+    await assert_refused_unchanged(
+        session, sessions, fga, dev_settings, "answers_by_non_demo_respondent"
+    )
+
+
+async def test_refuses_non_demo_requester_about_leo(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)
+    add_question(session, world.leo, world.cal, world.leo)
+    session.commit()
+    await assert_refused_unchanged(
+        session, sessions, fga, dev_settings, "questions_by_non_demo_requester"
+    )
+
+
+async def test_refuses_non_demo_approver_of_leo_policy_version(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)  # Leo has v1-v3
+    session.add(
+        ContributionPolicy(
+            profile_id=world.leo.profile.id,
+            version=4,
+            approved_by_user_id=world.cal.user.id,
+            approved_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    await assert_refused_unchanged(
+        session, sessions, fga, dev_settings, "policies_approved_by_non_demo_user"
+    )
+
+
+async def test_question_inserted_between_plan_and_phase_a_refuses(
+    session: Session,
+    factory: sessionmaker[Session],
+    sessions: Any,
+    fga: FakeFga,
+    world: World,
+    dev_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messy(session, world)
+    original = reset.plan_connections
+
+    async def plan_then_insert(*args: Any, **kwargs: Any) -> reset.ConnPlan:
+        plan = await original(*args, **kwargs)
+        # Runs after the read-only plan and before Phase A: a new demo question appears.
+        with factory() as s:
+            add_question(s, world.leo, world.jordan, world.leo)
+            s.commit()
+        return plan
+
+    monkeypatch.setattr(reset, "plan_connections", plan_then_insert)
+    states, tuples = request_states(session), set(fga.tuples)
+    code, out = await run(sessions, fga, dev_settings, apply=True)
+    assert code == reset.EXIT_REFUSED
+    assert "Phase A: deleted" not in out
+    # Nothing deleted: the 2 planned demo questions + the new one + Cal's are all still there.
+    session.expire_all()
+    assert session.scalar(select(func.count()).select_from(Question)) == 4
+    assert session.scalar(select(func.count()).select_from(Claim)) == 7
+    assert request_states(session) == states
+    assert fga.tuples == tuples
+
+
+async def test_apply_twice_is_idempotent(
+    session: Session, sessions: Any, fga: FakeFga, world: World, dev_settings: Settings
+) -> None:
+    messy(session, world)
+    await connect(sessions, world.sam, world.leo, None)
+    code1, out1 = await run(sessions, fga, dev_settings, apply=True)
+    assert code1 == reset.EXIT_OK, out1
+    code2, out2 = await run(sessions, fga, dev_settings, apply=True)
+    assert code2 == reset.EXIT_OK, out2
+    assert "decline: 0" in out2 and "revoke: 0" in out2
+    first = {f["claim_id"] for f in manifest_of(out1)["facts"]}
+    second = {f["claim_id"] for f in manifest_of(out2)["facts"]}
+    assert len(second) == 6 and not first & second
+    session.expire_all()
+    leo_claims = set(
+        session.scalars(select(Claim.id).where(Claim.profile_id == world.leo.profile.id))
+    )
+    assert {UUID(c) for c in second} == leo_claims
+    assert "live_requests_among_demo: 1 -> 1" in out2
+
+
+# --- Database errors --------------------------------------------------------------------------
+
+
+async def test_lock_timeout_in_phase_a_exits_cleanly_and_rolls_back(
+    session: Session,
+    factory: sessionmaker[Session],
+    sessions: Any,
+    fga: FakeFga,
+    world: World,
+    dev_settings: Settings,
+) -> None:
+    made = messy(session, world)
+    before = table_counts(session)
+    # Another transaction holds a row lock on a planned claim: Phase A's delete waits past
+    # its 3s lock_timeout and fails with OperationalError.
+    with factory() as locker, locker.begin():
+        locker.execute(select(Claim.id).where(Claim.id == made["loose"]).with_for_update())
+        code, out = await run(sessions, fga, dev_settings, apply=True)
+    assert code == reset.EXIT_FAILED
+    assert "ERROR: phase A (clear) failed (OperationalError)" in out
+    assert "Traceback" not in out and "Synthetic" not in out
+    assert table_counts(session) == before  # rolled back as a whole
+
+
+async def test_integrity_error_in_phase_c_exits_cleanly(
+    session: Session,
+    sessions: Any,
+    fga: FakeFga,
+    world: World,
+    dev_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    async def failing_reseed(*args: Any, **kwargs: Any) -> Any:
+        raise IntegrityError("INSERT", {}, Exception("synthetic"))
+
+    monkeypatch.setattr(reset, "reseed", failing_reseed)
+    code, out = await run(sessions, fga, dev_settings, apply=True)
+    assert code == reset.EXIT_FAILED
+    assert "ERROR: phase C (re-seed) failed (IntegrityError)" in out
+    assert reset.MANIFEST_BEGIN not in out
 
 
 async def test_unconfigured_openfga_refuses_apply(
