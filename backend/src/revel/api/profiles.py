@@ -5,12 +5,17 @@ go through F4's ``visible_claims``/``owner_claims`` inside the service).
 - ``/api/v1/profile*``: agent API, bearer token (``CurrentPrincipal``).
 - ``/api/ui/profile*``: browser (F8), session cookie; unsafe methods are same-origin checked
   (``SameOriginUIPrincipal``).
+- ``/api/v1/profiles/{handle}`` (bearer only) and ``/api/ui/profiles/{handle}`` (browser
+  session, read-only GET): another person's profile as the caller may see it (RG-56, #28).
+  Principal first, then F6's ``resolve_handle``, then ``read_shared_profile`` with the
+  resolved profile id; both return the same body and errors. No route accepts a profile id.
 
 Contract: ``docs/contracts/f5-profiles.md``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Awaitable
 from datetime import datetime
 from typing import Annotated, Any
@@ -23,9 +28,10 @@ from sqlalchemy.orm import Session
 
 from revel.auth.authz import AuthorizationDenied
 from revel.auth.deps import CurrentPrincipal
+from revel.auth.identity import Principal
 from revel.auth.ui import CurrentUIPrincipal, SameOriginUIPrincipal
 from revel.db.enums import Audience, ClaimStatus
-from revel.services import profiles
+from revel.services import connections, profiles
 from revel.services.profiles import (
     AddFactsResult,
     FactInput,
@@ -34,8 +40,11 @@ from revel.services.profiles import (
     PolicyResponse,
     PolicyUpdate,
     ProfileOut,
+    SharedProfileOut,
     SummaryOut,
 )
+
+logger = logging.getLogger(__name__)
 
 UNAVAILABLE = "Authorization service unavailable"
 
@@ -221,6 +230,47 @@ async def ui_reject_fact(
     return await _call(profiles.reject_fact(session, principal, fact_id), response)
 
 
+# --- Shared reads: another person's profile by exact handle ------------------------------------
+
+
+async def _read_shared(principal: Principal, handle: str) -> SharedProfileOut:
+    """Every hidden case (nonexistent, malformed, undiscoverable, blocking, no profile, no
+    access) is the same 404 ``target_not_found``; errors never carry service text."""
+    try:
+        async with profiles.session_scope() as session:
+            target = await connections.resolve_handle(session, principal, handle=handle)
+            return await profiles.read_shared_profile(
+                session, principal, profile_id=target.profile_id
+            )
+    except (connections.TargetNotFound, profiles.SharedProfileNotFound):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "target_not_found") from None
+    except connections.RateLimited:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited") from None
+    except connections.NotAllowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_allowed") from None
+    except Exception as exc:
+        logger.warning("shared profile read failed (%s)", type(exc).__name__)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, UNAVAILABLE) from None
+
+
+shared = APIRouter(prefix="/api/v1/profiles", tags=["profile"])
+
+
+@shared.get("/{handle}", response_model=SharedProfileOut)
+async def api_get_shared_profile(handle: str, principal: CurrentPrincipal) -> Any:
+    return await _read_shared(principal, handle)
+
+
+ui_shared = APIRouter(prefix="/api/ui/profiles", tags=["profile-ui"])
+
+
+@ui_shared.get("/{handle}", response_model=SharedProfileOut)
+async def ui_get_shared_profile(handle: str, principal: CurrentUIPrincipal) -> Any:
+    return await _read_shared(principal, handle)
+
+
 router = APIRouter()
 router.include_router(api)
 router.include_router(ui)
+router.include_router(shared)
+router.include_router(ui_shared)

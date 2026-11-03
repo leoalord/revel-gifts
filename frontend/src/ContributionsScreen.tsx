@@ -57,22 +57,35 @@ function SummaryView({
   summary,
   labels,
   audienceLabel,
+  onShowPending,
 }: {
   summary: Summary;
   labels: Map<string, string>;
   audienceLabel: AudienceLabel;
+  onShowPending: () => void;
 }) {
   return (
     <section aria-labelledby="summary-heading" className="summary">
-      <h3 id="summary-heading">Summary</h3>
-      <p>
-        <strong>{summary.pending_review}</strong> waiting for your review. Since{" "}
-        {formatTime(summary.since)}.
-      </p>
-      <div className="counts-row">
+      <h3 id="summary-heading">At a glance</h3>
+      <div className="glance">
+        <div className="glance-pending">
+          <p>
+            <span className="big-number">{summary.pending_review}</span> waiting for your review.
+          </p>
+          {summary.pending_review > 0 && (
+            <button type="button" className="primary" onClick={onShowPending}>
+              Review pending facts
+            </button>
+          )}
+        </div>
+        <Counts
+          title="Facts by audience"
+          counts={summary.counts.by_audience}
+          label={audienceLabel}
+        />
         <Counts title="By status" counts={summary.counts.by_status} />
-        <Counts title="By audience" counts={summary.counts.by_audience} label={audienceLabel} />
       </div>
+      <p className="hint">Activity since {formatTime(summary.since)}.</p>
       <h4>Recent activity</h4>
       {summary.recent.length === 0 ? (
         <p>No recent activity.</p>
@@ -188,7 +201,16 @@ export function ContributionsScreen() {
         {notice}
       </p>
 
-      <SummaryView summary={profile.summary} labels={labels} audienceLabel={audienceLabel} />
+      <SummaryView
+        summary={profile.summary}
+        labels={labels}
+        audienceLabel={audienceLabel}
+        onShowPending={() => {
+          // Presentation only: the server filters via ?status=.
+          setFilter("pending_review");
+          document.getElementById("status-filter")?.focus();
+        }}
+      />
 
       <section aria-labelledby="facts-heading">
         <h3 id="facts-heading">Facts</h3>

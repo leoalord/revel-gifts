@@ -3,12 +3,16 @@
 
 Thin adapters over ``revel.services.profiles`` (same behavior as ``/api/v1/profile*``). Each
 tool resolves the caller with ``principal_from_mcp_context`` first (rejects disconnected
-delegations) and acts only on that user's own profile. Errors are ``ToolError`` with generic
-text (no SDK or internal detail). Contract: ``docs/contracts/f5-profiles.md``.
+delegations) and acts only on that user's own profile, except ``get_profile(handle)`` (RG-56,
+#28), which reads another person's profile as the caller may see it: principal first, then
+F6's ``resolve_handle``, then ``read_shared_profile`` with the resolved profile id (no tool
+takes a profile id). Errors are ``ToolError`` with generic text (no SDK or internal detail).
+Contract: ``docs/contracts/f5-profiles.md``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
@@ -24,8 +28,17 @@ from revel.auth.deps import principal_from_mcp_context
 from revel.auth.identity import Principal
 from revel.auth.runtime import runtime_for
 from revel.db.enums import Audience
-from revel.services import profiles
-from revel.services.profiles import AddFactsResult, FactInput, FactOut, PolicyResponse, ProfileOut
+from revel.services import connections, profiles
+from revel.services.profiles import (
+    AddFactsResult,
+    FactInput,
+    FactOut,
+    PolicyResponse,
+    ProfileOut,
+    SharedProfileOut,
+)
+
+logger = logging.getLogger(__name__)
 
 POLICY_DESCRIPTION = (
     "Read the user's contribution policy and the fact categories: for each category its "
@@ -62,7 +75,18 @@ REMOVE_DESCRIPTION = (
     "fact is an error (not idempotent)."
 )
 
+SHARED_PROFILE_DESCRIPTION = (
+    "Read another Revel user's profile by their EXACT handle (no partial search): their "
+    "display name, handle and avatar plus only the facts they share with the user (by "
+    "connection tier, or Public facts if they opted in). Facts marked provisional are not yet "
+    "confirmed by that person; mention the caveat. Read-only. If nothing is available under "
+    "that handle the result is the same whether the handle does not exist, is hidden or "
+    "shares nothing with the user; do not guess other handles. Rate limited."
+)
+
 _NOT_FOUND = "Fact not found"
+_PROFILE_NOT_FOUND = "No Revel profile is available to you under that handle"
+_RATE_LIMITED = "Too many lookups; try again later"
 _NOT_ALLOWED = "Not allowed"
 _UNAVAILABLE = "Authorization service unavailable"
 _CONFLICT = "The fact changed; read the profile again and retry"
@@ -84,6 +108,25 @@ async def _run[T](settings: Any, operation: Callable[[Session, Principal], Await
         raise ToolError(_CONFLICT) from None
     except (profiles.InvalidRequest, profiles.PolicyInvalid):
         raise ToolError(_INVALID) from None
+
+
+async def _read_shared(settings: Any, handle: str) -> SharedProfileOut:
+    principal = await principal_from_mcp_context(runtime_for(settings))
+    try:
+        async with profiles.session_scope() as session:
+            target = await connections.resolve_handle(session, principal, handle=handle)
+            return await profiles.read_shared_profile(
+                session, principal, profile_id=target.profile_id
+            )
+    except (connections.TargetNotFound, profiles.SharedProfileNotFound):
+        raise ToolError(_PROFILE_NOT_FOUND) from None
+    except connections.RateLimited:
+        raise ToolError(_RATE_LIMITED) from None
+    except connections.NotAllowed:
+        raise ToolError(_NOT_ALLOWED) from None
+    except Exception as exc:
+        logger.warning("get_profile failed (%s)", type(exc).__name__)
+        raise ToolError(_UNAVAILABLE) from None
 
 
 def register(server: MCPServer, settings: Any) -> None:
@@ -109,6 +152,11 @@ def register(server: MCPServer, settings: Any) -> None:
     async def remove_fact(fact_id: UUID) -> FactOut:
         return await _run(settings, lambda s, p: profiles.remove_fact(s, p, fact_id))
 
+    async def get_profile(
+        handle: Annotated[str, Field(description="The person's exact Revel handle.")],
+    ) -> SharedProfileOut:
+        return await _read_shared(settings, handle)
+
     read_only = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     tools: list[tuple[Callable[..., Any], str, str, str, ToolAnnotations]] = [
         (
@@ -131,6 +179,13 @@ def register(server: MCPServer, settings: Any) -> None:
             ),
         ),
         (get_my_profile, "get_my_profile", "My profile", PROFILE_DESCRIPTION, read_only),
+        (
+            get_profile,
+            "get_profile",
+            "Someone's shared profile",
+            SHARED_PROFILE_DESCRIPTION,
+            read_only,
+        ),
         (
             set_fact_audience,
             "set_fact_audience",

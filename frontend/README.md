@@ -9,6 +9,7 @@ Use the [agreed stack](https://app.notion.com/p/4092bade7f31805191e7c4c884960908
 - `src/api.ts` — the only HTTP client. Same-origin JSON requests with `credentials: "same-origin"`, typed `ApiError`/`UnauthorizedError`, and a 401 hook that sends the browser to `/auth/login?return_to=<current /app path>`. Every screen uses it.
 - `src/App.tsx` — app shell: session bootstrap (`GET /auth/session`, with a sign-in redirect-loop guard), sign-out and navigation.
 - `src/profileApi.ts`, `src/PolicyScreen.tsx`, `src/ContributionsScreen.tsx`, `src/FactItem.tsx` — the contribution policy and contributions screens over F5's `/api/ui/profile*` operations (`docs/contracts/f5-profiles.md`). Categories, labels, allowed audiences and details fields always come from the server.
+- `src/connectionsApi.ts`, `src/ConnectionsScreen.tsx`, `src/AgentsSection.tsx` — handle, connection requests, tiers, blocks (F6 `/api/connections`, contract in `backend/src/revel/api/connections.py`) and connected assistants (F2 `/api/agents`, `backend/src/revel/auth/agents_router.py`). An assistant's label is its registered app name, not a verified identity.
 - Server and agent strings render as React text only; lint forbids `dangerouslySetInnerHTML` and `innerHTML`.
 - Browser auth routes and payloads are the F2 contract in `backend/src/revel/auth/router.py` and `backend/src/revel/auth/ui.py`.
 

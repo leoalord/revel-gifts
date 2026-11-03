@@ -59,6 +59,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("ContributionsScreen at a glance", () => {
+  it("leads with pending count and jumps to pending facts via ?status=", async () => {
+    const { calls } = routes();
+    render(<ContributionsScreen />);
+    expect(await screen.findByRole("heading", { name: "At a glance" })).toBeInTheDocument();
+    expect(screen.getByText("Facts by audience")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Review pending facts" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.url === "/api/ui/profile?status=pending_review")).toBe(true),
+    );
+    expect(screen.getByLabelText("Show")).toHaveValue("pending_review");
+  });
+});
+
 describe("ContributionsScreen", () => {
   it("shows the summary and facts with status, evidence, date and contributor", async () => {
     routes();

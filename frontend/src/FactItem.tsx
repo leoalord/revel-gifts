@@ -269,7 +269,7 @@ function CorrectionForm({
       </div>
       <FieldError id={`${prefix}-form-error`} message={errors._ ?? errors.body} />
       <div className="actions">
-        <button type="submit" disabled={busy}>
+        <button type="submit" className="primary" disabled={busy}>
           Save correction
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
