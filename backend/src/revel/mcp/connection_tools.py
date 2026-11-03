@@ -8,12 +8,13 @@ mapped to fixed, generic ``ToolError`` messages (never SDK, database or OpenFGA 
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from revel.auth.deps import principal_from_mcp_context
 from revel.auth.runtime import runtime_for
@@ -22,7 +23,18 @@ from revel.services import connections as svc
 logger = logging.getLogger(__name__)
 
 
+def _confirmation_text(changes: list[str]) -> str:
+    """``owner_confirmation_required: ...`` with every grant, one per line (as F5's tools)."""
+    listed = "\n".join(f"- {change}" for change in changes)
+    return (
+        "owner_confirmation_required: this widens access. Ask the owner, quoting exactly these "
+        "changes, and call again with owner_confirmed=true only if they clearly agree:\n" + listed
+    )
+
+
 def _tool_error(exc: Exception) -> ToolError:
+    if isinstance(exc, svc.OwnerConfirmationRequired):
+        return ToolError(_confirmation_text(exc.changes))
     if isinstance(exc, svc.ConnectionsError):
         return ToolError(exc.message)
     logger.error("connection tool failed (%s)", type(exc).__name__)
@@ -72,11 +84,18 @@ LIST_REQUESTS = (
     "asking to see the user's profile, with who asked and through which assistant. "
     "direction='outgoing': the user's own pending or approved requests to others."
 )
+_CONFIRM = (
+    "Approving needs owner_confirmed=true: first ask the owner, quote exactly what will change "
+    "(the person and the tier; a call without the flag returns owner_confirmation_required with "
+    "the exact change), and set owner_confirmed only after the owner clearly agrees in this "
+    "conversation. Never infer consent."
+)
 RESPOND = (
     "Respond to a connection request addressed to the user. action='approve' with "
     "tier='connections' or 'trusted_circle' (Trusted Circle sees more sensitive facts), "
     "'decline', or 'block' (also works on an approved connection; the person can no longer "
-    "find or request the user). Always confirm the decision and tier with the user first."
+    "find or request the user). " + _CONFIRM + " Decline and block need no owner_confirmed, "
+    "but confirm the decision with the user first."
 )
 LIST_CONNECTIONS = (
     "List the people the user has approved to see their profile, with each person's tier "
@@ -84,13 +103,19 @@ LIST_CONNECTIONS = (
 )
 CHANGE_TIER = (
     "Change an approved connection's tier ('connections' or 'trusted_circle') by request_id. "
-    "Takes effect on the person's next request. Confirm with the user first."
+    "Takes effect on the person's next request. An upgrade to 'trusted_circle' needs "
+    "owner_confirmed=true: first ask the owner, quote exactly what will change, and set "
+    "owner_confirmed only after the owner clearly agrees in this conversation. A downgrade to "
+    "'connections' needs no flag; confirm it with the user first."
 )
 REVOKE = (
     "Revoke an approved connection by request_id: the person loses access to the user's "
     "profile from their next request (they may ask again later). Confirm with the user first."
 )
 CANCEL = "Withdraw one of the user's own pending outgoing connection requests by request_id."
+
+
+OwnerConfirmed = Annotated[bool, Field(description=svc.OWNER_CONFIRMED_DESCRIPTION)]
 
 
 def register(server: MCPServer, settings: Any) -> None:
@@ -120,11 +145,14 @@ def register(server: MCPServer, settings: Any) -> None:
         request_id: UUID,
         action: Literal["approve", "decline", "block"],
         tier: Literal["connections", "trusted_circle"] | None = None,
+        owner_confirmed: OwnerConfirmed = False,
     ) -> svc.ResponseResult:
         if action == "approve":
             if tier is None:
                 raise ToolError(svc.InvalidTier.message)
-            return await _call(settings, svc.approve, request_id, tier=tier)
+            return await _call(
+                settings, svc.approve, request_id, tier=tier, owner_confirmed=owner_confirmed
+            )
         if action == "decline":
             return await _call(settings, svc.decline, request_id)
         if action == "block":
@@ -136,9 +164,13 @@ def register(server: MCPServer, settings: Any) -> None:
         return {"connections": [r.model_dump(mode="json") for r in rows]}
 
     async def change_connection_tier(
-        request_id: UUID, tier: Literal["connections", "trusted_circle"]
+        request_id: UUID,
+        tier: Literal["connections", "trusted_circle"],
+        owner_confirmed: OwnerConfirmed = False,
     ) -> svc.ResponseResult:
-        return await _call(settings, svc.change_tier, request_id, tier=tier)
+        return await _call(
+            settings, svc.change_tier, request_id, tier=tier, owner_confirmed=owner_confirmed
+        )
 
     async def revoke_connection(request_id: UUID) -> svc.ResponseResult:
         return await _call(settings, svc.revoke, request_id)

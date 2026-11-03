@@ -3,7 +3,10 @@
 Thin adapter over ``revel.services.connections``. Authentication is the browser session (F2,
 ``revel.auth.ui``): reads use ``CurrentUIPrincipal``; every state-changing route uses
 ``SameOriginUIPrincipal`` (CSRF ``Origin`` check). UI actions are the user acting directly, so
-no delegation is recorded on the request rows.
+no delegation is recorded on the request rows, and approve / tier upgrade never need
+``owner_confirmed`` here: the browser owner is the confirmation (the service still records
+``owner_confirmed_at``). There are no agent-API (bearer) connection routes; agents use the MCP
+tools, where approving or upgrading to ``trusted_circle`` needs ``owner_confirmed``.
 
 Contract (all JSON; ids are UUID strings; timestamps ISO 8601). Prefix ``/api/connections``:
 
@@ -11,7 +14,8 @@ Contract (all JSON; ids are UUID strings; timestamps ISO 8601). Prefix ``/api/co
 - ``PUT  /handle`` body ``{handle?, discoverable?, avatar_url?}`` -> ``HandleInfo``
   (``handle`` required the first time; omitted fields are kept; ``avatar_url: null`` clears)
 - ``POST /requests`` body ``{handle}`` -> ``RequestResult`` (exact handle; creates or returns
-  the live request)
+  the live request; 409 ``invalid_state`` with detail "Set your handle before sending a
+  connection request." when the caller has no handle yet)
 - ``GET  /requests/incoming`` -> ``[IncomingRequest]`` (pending requests to me)
 - ``GET  /requests/outgoing`` -> ``[OutgoingRequest]`` (my pending/approved requests)
 - ``POST /requests/{id}/approve`` body ``{tier}`` -> ``ResponseResult``
@@ -36,10 +40,13 @@ Person}``; ``BlockedEntry {request_id, blocked_at, person: PublicIdentity}``; ``
 Errors: ``{"detail": <fixed message>, "code": <code>}`` with
 404 ``target_not_found`` (nonexistent, hidden, blocking or own handle: identical),
 404 ``request_not_found`` (unknown or not yours: identical),
-409 ``invalid_state``, 409 ``handle_unavailable``, 409 ``profile_not_set_up``,
+409 ``invalid_state`` (detail "Set your handle before sending a connection request." when the
+requester has no handle), 409 ``handle_unavailable``, 409 ``profile_not_set_up``,
 422 ``invalid_handle`` / ``invalid_avatar_url`` / ``invalid_tier`` (and FastAPI's own 422 for a
 malformed body), 429 ``rate_limited``, 403 ``not_allowed``, 503 ``unavailable`` (retryable;
 nothing changed), plus F2's 401 ``Not signed in`` / 403 cross-origin from the dependencies.
+403 ``owner_confirmation_required`` ``{detail, code, changes}`` is mapped for completeness (as
+F5's agent API) but is unreachable from these browser routes.
 """
 
 from __future__ import annotations
@@ -81,6 +88,15 @@ def error_response(exc: Exception) -> JSONResponse:
     Returned (not raised) so no exception text can reach the client. A session cookie refreshed
     by F2's dependency is still delivered (F2's ``RefreshedSessionCookieMiddleware``).
     """
+    if isinstance(exc, svc.OwnerConfirmationRequired):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": exc.reason_code,
+                "code": exc.reason_code,
+                "changes": exc.changes,
+            },
+        )
     for cls, (status, code) in ERRORS.items():
         if isinstance(exc, cls):
             return JSONResponse(status_code=status, content={"detail": exc.message, "code": code})
