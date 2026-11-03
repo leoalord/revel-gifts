@@ -175,7 +175,8 @@ def test_bearer_mcp_and_ui_share_one_profile(
         assert client.get("/api/v1/profile/summary").json()["pending_review"] == 0
         assert ui.get("/api/ui/profile/summary").status_code == 200
 
-        # Agent narrowing via MCP and bearer; widening is 403 / tool error; UI may widen.
+        # Agent narrowing via MCP and bearer; widening without the owner's confirmation is
+        # 403 / tool error (#29, covered in test_owner_controls_http_mcp_db); UI may widen.
         fid = mcp_result["claim_id"]
         narrowed = mcp_call(client, "set_fact_audience", {"fact_id": fid, "audience": "only_me"})
         assert narrowed["structuredContent"]["audience"] == "only_me"
@@ -183,11 +184,12 @@ def test_bearer_mcp_and_ui_share_one_profile(
             f"/api/v1/profile/facts/{fid}/audience", json={"audience": "connections"}
         )
         assert widen.status_code == 403
+        assert widen.json()["detail"] == "owner_confirmation_required"
         tool_widen = mcp_call(
             client, "set_fact_audience", {"fact_id": fid, "audience": "connections"}
         )
         assert tool_widen["isError"] is True
-        assert tool_widen["content"][0]["text"].endswith("Not allowed")
+        assert "owner_confirmation_required" in tool_widen["content"][0]["text"]
         assert (
             ui.patch(f"/api/ui/profile/facts/{fid}", json={"audience": "connections"}).status_code
             == 403
@@ -225,8 +227,8 @@ def test_bearer_mcp_and_ui_share_one_profile(
         assert tool_missing["isError"] is True
         assert tool_missing["content"][0]["text"].endswith("Fact not found")
 
-        # Agents never approve: no bearer route exists for it.
-        assert client.post(f"/api/v1/profile/facts/{fid}/approve").status_code in (404, 405)
+        # Agents approve only with the owner's confirmation (#29): a live fact is a conflict.
+        assert client.post(f"/api/v1/profile/facts/{fid}/approve").status_code == 409
 
     with factory() as s:
         vias = {c.contributed_via for c in s.execute(select(Claim)).scalars()}

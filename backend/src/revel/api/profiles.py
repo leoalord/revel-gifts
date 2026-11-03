@@ -2,7 +2,9 @@
 ``revel.services.profiles``, which owns behavior, authorization and claim access (claim reads
 go through F4's ``visible_claims``/``owner_claims`` inside the service).
 
-- ``/api/v1/profile*``: agent API, bearer token (``CurrentPrincipal``).
+- ``/api/v1/profile*``: agent API, bearer token (``CurrentPrincipal``). Owner controls (#29:
+  policy writes, approve/reject, audience changes) take ``owner_confirmed``; a widening change
+  without it is 403 ``{"detail": "owner_confirmation_required", "changes": [...]}``.
 - ``/api/ui/profile*``: browser (F8), session cookie; unsafe methods are same-origin checked
   (``SameOriginUIPrincipal``).
 - ``/api/v1/profiles/{handle}`` (bearer only) and ``/api/ui/profiles/{handle}`` (browser
@@ -34,9 +36,11 @@ from revel.db.enums import Audience, ClaimStatus
 from revel.services import connections, profiles
 from revel.services.profiles import (
     AddFactsResult,
+    AgentPolicyUpdate,
     FactInput,
     FactOut,
     FactPatch,
+    OwnerConfirmation,
     PolicyResponse,
     PolicyUpdate,
     ProfileOut,
@@ -63,6 +67,7 @@ class FactsBody(BaseModel):
 
 class AudienceBody(BaseModel):
     audience: Audience
+    owner_confirmed: bool = Field(default=False, description=profiles.OWNER_CONFIRMED_DESCRIPTION)
 
 
 async def _call[T](operation: Awaitable[T], response: Response) -> T | JSONResponse:
@@ -72,6 +77,11 @@ async def _call[T](operation: Awaitable[T], response: Response) -> T | JSONRespo
     that copies any refreshed session cookie the UI dependency set on ``response``."""
     try:
         return await operation
+    except profiles.OwnerConfirmationRequired as exc:
+        body = {"detail": exc.reason_code, "changes": exc.changes}
+        return _with_cookies(
+            JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content=body), response
+        )
     except profiles.FactNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "fact_not_found") from None
     except (profiles.NotAllowed, AuthorizationDenied):
@@ -84,10 +94,13 @@ async def _call[T](operation: Awaitable[T], response: Response) -> T | JSONRespo
         body = {"detail": exc.reason, "fact": exc.fact.model_dump(mode="json")}
     except profiles.PolicyVersionConflict as exc:
         body = {"detail": "policy_version_conflict", **exc.policy.model_dump(mode="json")}
-    conflict = JSONResponse(status_code=status.HTTP_409_CONFLICT, content=body)
+    return _with_cookies(JSONResponse(status_code=status.HTTP_409_CONFLICT, content=body), response)
+
+
+def _with_cookies(result: JSONResponse, response: Response) -> JSONResponse:
     for cookie in response.headers.getlist("set-cookie"):
-        conflict.headers.append("set-cookie", cookie)
-    return conflict
+        result.headers.append("set-cookie", cookie)
+    return result
 
 
 StatusFilter = Annotated[list[ClaimStatus] | None, Query(alias="status")]
@@ -103,6 +116,13 @@ async def api_get_policy(
     response: Response, principal: CurrentPrincipal, session: DbSession
 ) -> Any:
     return await _call(profiles.get_policy(session, principal), response)
+
+
+@api.put("/policy", response_model=PolicyResponse)
+async def api_set_policy(
+    response: Response, body: AgentPolicyUpdate, principal: CurrentPrincipal, session: DbSession
+) -> Any:
+    return await _call(profiles.set_policy(session, principal, body), response)
 
 
 @api.post("/facts", response_model=AddFactsResult)
@@ -141,7 +161,10 @@ async def api_set_audience(
     session: DbSession,
 ) -> Any:
     return await _call(
-        profiles.set_fact_audience(session, principal, fact_id, body.audience), response
+        profiles.set_fact_audience(
+            session, principal, fact_id, body.audience, owner_confirmed=body.owner_confirmed
+        ),
+        response,
     )
 
 
@@ -150,6 +173,37 @@ async def api_remove_fact(
     response: Response, fact_id: UUID, principal: CurrentPrincipal, session: DbSession
 ) -> Any:
     return await _call(profiles.remove_fact(session, principal, fact_id), response)
+
+
+OptionalConfirmation = Annotated[OwnerConfirmation | None, Body()]
+
+
+@api.post("/facts/{fact_id}/approve", response_model=FactOut)
+async def api_approve_fact(
+    response: Response,
+    fact_id: UUID,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    body: OptionalConfirmation = None,
+) -> Any:
+    confirmed = body is not None and body.owner_confirmed
+    return await _call(
+        profiles.approve_fact(session, principal, fact_id, owner_confirmed=confirmed), response
+    )
+
+
+@api.post("/facts/{fact_id}/reject", response_model=FactOut)
+async def api_reject_fact(
+    response: Response,
+    fact_id: UUID,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    body: OptionalConfirmation = None,
+) -> Any:
+    confirmed = body is not None and body.owner_confirmed
+    return await _call(
+        profiles.reject_fact(session, principal, fact_id, owner_confirmed=confirmed), response
+    )
 
 
 # --- Browser UI (cookie; unsafe methods same-origin) ------------------------------------------

@@ -6,7 +6,9 @@ tool resolves the caller with ``principal_from_mcp_context`` first (rejects disc
 delegations) and acts only on that user's own profile, except ``get_profile(handle)`` (RG-56,
 #28), which reads another person's profile as the caller may see it: principal first, then
 F6's ``resolve_handle``, then ``read_shared_profile`` with the resolved profile id (no tool
-takes a profile id). Errors are ``ToolError`` with generic text (no SDK or internal detail).
+takes a profile id). Errors are ``ToolError`` with generic text (no SDK or internal detail),
+except ``owner_confirmation_required`` (#29), whose text lists the exact widening changes so the
+assistant can quote them to the owner.
 Contract: ``docs/contracts/f5-profiles.md``.
 """
 
@@ -14,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from mcp.server.mcpserver import MCPServer
@@ -31,9 +33,11 @@ from revel.db.enums import Audience
 from revel.services import connections, profiles
 from revel.services.profiles import (
     AddFactsResult,
+    CategorySetting,
     FactInput,
     FactOut,
     PolicyResponse,
+    PolicyUpdate,
     ProfileOut,
     SharedProfileOut,
 )
@@ -65,9 +69,35 @@ PROFILE_DESCRIPTION = (
     "Read the user's own profile facts (live and pending review) with their audience and "
     "status, the current contribution policy and a summary of recent contributions. Read-only."
 )
+CONFIRMATION_RULE = (
+    "Anything that widens access needs owner_confirmed=true: first ask the owner, quote "
+    "exactly what will change, and set owner_confirmed only after the owner clearly agrees in "
+    "this conversation. Never infer consent (not from earlier messages, general enthusiasm or "
+    "your own judgment). Without it the call fails with owner_confirmation_required and lists "
+    "the exact changes to quote."
+)
+SET_POLICY_DESCRIPTION = (
+    "Approve or change the user's contribution policy for the user, when they ask you to. "
+    "Call get_contribution_policy first and pass its policy version as expected_version (null "
+    "before the first approval); omitted fields keep their current values and "
+    "category_settings, when sent, replaces the whole map. Widening (the first approval, "
+    "public_opt_in on, a looser category audience, turning off require_review_all or a "
+    "category's require_review, enrichment_enabled or share_provisional back on) needs the "
+    "owner's confirmation; narrowing (tighter audiences, requiring review, withdrawing "
+    "Public, turning provisional sharing or contributions off) does not. "
+    + CONFIRMATION_RULE
+    + " Returns the same shape as get_contribution_policy."
+)
+REVIEW_DESCRIPTION = (
+    "Approve or reject one of the user's facts that is pending their review, when they decide. "
+    "Approving makes it active and shared with its audience (a replacement retires the fact it "
+    "corrects) and always needs the owner's confirmation; rejecting needs none. "
+    + CONFIRMATION_RULE
+)
 AUDIENCE_DESCRIPTION = (
-    "Narrow who can see one of the user's facts (public > connections > trusted_circle > "
-    "only_me). Assistants can only narrow; widening is done by the user in Revel."
+    "Change who can see one of the user's facts (public > connections > trusted_circle > "
+    "only_me). Narrowing needs no confirmation; widening does. Sensitive facts are always "
+    "only_me and Public needs the user's Public opt-in. " + CONFIRMATION_RULE
 )
 REMOVE_DESCRIPTION = (
     "Remove one of the user's facts (e.g. undo a wrong contribution or a fact the user asked "
@@ -90,6 +120,9 @@ _RATE_LIMITED = "Too many lookups; try again later"
 _NOT_ALLOWED = "Not allowed"
 _UNAVAILABLE = "Authorization service unavailable"
 _CONFLICT = "The fact changed; read the profile again and retry"
+_POLICY_CONFLICT = (
+    "The policy changed; read it again with get_contribution_policy and retry with its version"
+)
 _INVALID = "Invalid request"
 
 
@@ -100,14 +133,35 @@ async def _run[T](settings: Any, operation: Callable[[Session, Principal], Await
             return await operation(session, principal)
     except profiles.FactNotFound:
         raise ToolError(_NOT_FOUND) from None
+    except profiles.OwnerConfirmationRequired as exc:
+        raise ToolError(_confirmation_text(exc.changes)) from None
     except (profiles.NotAllowed, AuthorizationDenied):
         raise ToolError(_NOT_ALLOWED) from None
     except profiles.AuthorizationUnavailable:
         raise ToolError(_UNAVAILABLE) from None
-    except (profiles.FactConflict, profiles.PolicyVersionConflict):
+    except profiles.PolicyVersionConflict:
+        raise ToolError(_POLICY_CONFLICT) from None
+    except profiles.FactConflict:
         raise ToolError(_CONFLICT) from None
-    except (profiles.InvalidRequest, profiles.PolicyInvalid):
+    except profiles.PolicyInvalid as exc:
+        raise ToolError(_invalid_text(exc.errors)) from None
+    except profiles.InvalidRequest:
         raise ToolError(_INVALID) from None
+
+
+def _confirmation_text(changes: list[str]) -> str:
+    """``owner_confirmation_required: ...`` with every widening change, one per line."""
+    listed = "\n".join(f"- {change}" for change in changes)
+    return (
+        "owner_confirmation_required: this widens access. Ask the owner, quoting exactly these "
+        "changes, and call again with owner_confirmed=true only if they clearly agree:\n" + listed
+    )
+
+
+def _invalid_text(errors: list[dict[str, Any]]) -> str:
+    """Policy field errors (service-generated text, no input echoed beyond field paths)."""
+    parts = [f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}" for e in errors]
+    return f"{_INVALID}: " + "; ".join(parts) if parts else _INVALID
 
 
 async def _read_shared(settings: Any, handle: str) -> SharedProfileOut:
@@ -129,6 +183,9 @@ async def _read_shared(settings: Any, handle: str) -> SharedProfileOut:
         raise ToolError(_UNAVAILABLE) from None
 
 
+OwnerConfirmed = Annotated[bool, Field(description=profiles.OWNER_CONFIRMED_DESCRIPTION)]
+
+
 def register(server: MCPServer, settings: Any) -> None:
     async def get_contribution_policy() -> PolicyResponse:
         return await _run(settings, profiles.get_policy)
@@ -144,9 +201,56 @@ def register(server: MCPServer, settings: Any) -> None:
     async def get_my_profile() -> ProfileOut:
         return await _run(settings, profiles.get_my_profile)
 
-    async def set_fact_audience(fact_id: UUID, audience: Audience) -> FactOut:
+    async def set_fact_audience(
+        fact_id: UUID, audience: Audience, owner_confirmed: OwnerConfirmed = False
+    ) -> FactOut:
         return await _run(
-            settings, lambda s, p: profiles.set_fact_audience(s, p, fact_id, audience)
+            settings,
+            lambda s, p: profiles.set_fact_audience(
+                s, p, fact_id, audience, owner_confirmed=owner_confirmed
+            ),
+        )
+
+    async def set_contribution_policy(
+        expected_version: Annotated[
+            int | None,
+            Field(description="The current policy version (null before the first approval)."),
+        ],
+        public_opt_in: bool | None = None,
+        share_provisional: bool | None = None,
+        require_review_all: bool | None = None,
+        enrichment_enabled: bool | None = None,
+        category_settings: Annotated[
+            dict[str, CategorySetting] | None,
+            Field(
+                description="Replaces the whole map when sent: {category: {audience?, "
+                "require_review?}}."
+            ),
+        ] = None,
+        owner_confirmed: OwnerConfirmed = False,
+    ) -> PolicyResponse:
+        update = PolicyUpdate(
+            expected_version=expected_version,
+            public_opt_in=public_opt_in,
+            share_provisional=share_provisional,
+            require_review_all=require_review_all,
+            enrichment_enabled=enrichment_enabled,
+            category_settings=category_settings,
+        )
+        return await _run(
+            settings,
+            lambda s, p: profiles.set_policy(s, p, update, owner_confirmed=owner_confirmed),
+        )
+
+    async def review_pending_fact(
+        fact_id: UUID,
+        decision: Literal["approve", "reject"],
+        owner_confirmed: OwnerConfirmed = False,
+    ) -> FactOut:
+        operation = profiles.approve_fact if decision == "approve" else profiles.reject_fact
+        return await _run(
+            settings,
+            lambda s, p: operation(s, p, fact_id, owner_confirmed=owner_confirmed),
         )
 
     async def remove_fact(fact_id: UUID) -> FactOut:
@@ -187,9 +291,31 @@ def register(server: MCPServer, settings: Any) -> None:
             read_only,
         ),
         (
+            set_contribution_policy,
+            "set_contribution_policy",
+            "Change the contribution policy",
+            SET_POLICY_DESCRIPTION,
+            ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,  # a repeat with the old expected_version conflicts
+                openWorldHint=False,
+            ),
+        ),
+        (
+            review_pending_fact,
+            "review_pending_fact",
+            "Approve or reject a pending fact",
+            REVIEW_DESCRIPTION,
+            # Rejecting removes the fact; a repeat is a conflict (ToolError).
+            ToolAnnotations(
+                readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+            ),
+        ),
+        (
             set_fact_audience,
             "set_fact_audience",
-            "Narrow a fact's audience",
+            "Change a fact's audience",
             AUDIENCE_DESCRIPTION,
             ToolAnnotations(
                 readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False

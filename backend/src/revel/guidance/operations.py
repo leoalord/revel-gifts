@@ -19,6 +19,9 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "remove_fact",
         # F5 #28, merged (PR #34): docs/contracts/f5-profiles.md "Shared profile reads"
         "get_profile",
+        # F5 #29 (agent-first owner controls): docs/contracts/f5-profiles.md
+        "set_contribution_policy",
+        "review_pending_fact",
         # F6 #15, merged: revel/mcp/connection_tools.py
         "set_handle",
         "request_connection",
@@ -56,6 +59,10 @@ IMPLEMENTED_HTTP = frozenset(
         "DELETE /api/v1/profile/facts/{fact_id}",
         # F5 #28, merged
         "GET /api/v1/profiles/{handle}",
+        # F5 #29
+        "PUT /api/v1/profile/policy",
+        "POST /api/v1/profile/facts/{fact_id}/approve",
+        "POST /api/v1/profile/facts/{fact_id}/reject",
         # F7 #19/#20, merged (bearer; revel/api/questions.py)
         "POST /api/questions",
         "GET /api/updates",

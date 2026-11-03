@@ -76,7 +76,10 @@ MCP tools and the matching HTTP routes (bearer token):
 | Contribute facts (and corrections with `supersedes_id`) | `add_facts` | `POST /api/v1/profile/facts` |
 | Read your user's own profile and summary | `get_my_profile` | `GET /api/v1/profile` |
 | Contribution summary | (in `get_my_profile`) | `GET /api/v1/profile/summary` |
-| Narrow a fact's audience | `set_fact_audience` | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
+| Change the owner's contribution policy (widening needs the owner's confirmation) | `set_contribution_policy` | `PUT /api/v1/profile/policy` |
+| Change a fact's audience (widening needs the owner's confirmation) | `set_fact_audience` | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
+| Approve a pending fact (needs the owner's confirmation) | `review_pending_fact` | `POST /api/v1/profile/facts/{fact_id}/approve` |
+| Reject a pending fact | `review_pending_fact` | `POST /api/v1/profile/facts/{fact_id}/reject` |
 | Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{fact_id}` |
 | Read a person's shared profile by exact handle | `get_profile` | `GET /api/v1/profiles/{handle}` |
 | Set your user's handle and discoverability | `set_handle` | MCP only |
@@ -113,5 +116,6 @@ Errors differ by area:
   `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
   `outreach_cooldown`.
 
-Agents can never change the owner's contribution policy, widen an audience or approve
-pending items; owners do that in the Revel website.
+Changing the policy, widening an audience or approving a pending item widens access: do it
+only after the owner clearly agrees in the conversation to the exact changes you quoted (see
+the tool descriptions); never infer consent. Owners can also do this in the Revel website.

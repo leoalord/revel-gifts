@@ -260,9 +260,11 @@ def narrow_category(
     audience: Audience,
     actor: Actor,
     policy_version: int,
+    acceptance: AcceptanceMode = AcceptanceMode.EXPLICIT,
 ) -> int:
-    """Owner tightened a category: narrow its live and pending facts that are wider than
-    ``audience`` (explicit, under the new policy version). Returns how many changed."""
+    """Owner tightened a category (in the browser or through their agent): narrow its live and
+    pending facts that are wider than ``audience`` (``acceptance`` as the caller decided, under
+    the new policy version). Returns how many changed."""
     wider = [a.value for a in Audience if a.rank < audience.rank]
     claims = (
         session.execute(
@@ -288,7 +290,7 @@ def narrow_category(
             claim,
             action=ClaimEventAction.AUDIENCE_CHANGED,
             actor=actor,
-            acceptance=AcceptanceMode.EXPLICIT,
+            acceptance=acceptance,
             policy_version=policy_version,
             changes={"audience": {"old": old, "new": audience.value}},
         )
@@ -392,6 +394,7 @@ def reject(
     claim_id: UUID,
     actor: Actor,
     policy_version: int | None,
+    acceptance: AcceptanceMode = AcceptanceMode.EXPLICIT,
 ) -> Claim:
     """Owner rejects a pending fact (status ``removed``); a replacement's target stays live."""
     claim = lock_claim(session, profile_id, claim_id)
@@ -404,7 +407,7 @@ def reject(
         claim,
         action=ClaimEventAction.REJECTED,
         actor=actor,
-        acceptance=AcceptanceMode.EXPLICIT,
+        acceptance=acceptance,
         policy_version=policy_version,
         changes=_status_change(old, ClaimStatus.REMOVED),
     )
