@@ -332,6 +332,7 @@ def register(server: MCPServer, settings: Any) -> None:
             Field(
                 description="set_audience only: the new audience (public, connections, "
                 "trusted_circle or only_me).",
+                json_schema_extra={"enum": [*AUDIENCES, None]},
             ),
         ] = None,
         owner_confirmed: OwnerConfirmed = False,

@@ -6,6 +6,7 @@ unchanged."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
@@ -26,6 +27,13 @@ from revel.auth.runtime import AuthRuntime, reset_auth_runtimes
 from revel.db.models import ClaimEvent
 
 CONFIRM = "owner_confirmation_required"
+# Removed in RG-59 (#31), not aliased.
+OLD_F5_TOOLS = (
+    "get_my_profile",
+    "get_contribution_policy",
+    "set_fact_audience",
+    "review_pending_fact",
+)
 
 
 @pytest.fixture
@@ -78,6 +86,14 @@ def test_tools_are_listed_with_the_confirmation_rule(
     assert "expected_version" in tools["set_contribution_policy"]["inputSchema"]["required"]
     update = tools["update_fact"]["inputSchema"]
     assert update["properties"]["action"]["enum"] == ["set_audience", "approve"]
+    assert update["properties"]["audience"]["enum"] == [
+        "public",
+        "connections",
+        "trusted_circle",
+        "only_me",
+        None,
+    ]
+    assert "audience" not in update["required"]
     assert set(update["required"]) == {"fact_id", "action"}
     assert "set_audience" in tools["update_fact"]["description"]
     assert "requires audience" in tools["update_fact"]["description"]
@@ -98,12 +114,7 @@ def test_f5_tool_set_and_annotations(stack: tuple[TestClient, AuthRuntime, Any])
         "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=MCP_HEADERS
     )
     tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
-    for old in (
-        "get_my_profile",
-        "get_contribution_policy",
-        "set_fact_audience",
-        "review_pending_fact",
-    ):
+    for old in OLD_F5_TOOLS:
         assert old not in tools, old
     expected = {
         # name: (readOnly, destructive, idempotent)
@@ -121,11 +132,14 @@ def test_f5_tool_set_and_annotations(stack: tuple[TestClient, AuthRuntime, Any])
         assert hints["openWorldHint"] is False, name
     schema = tools["get_profile"]["inputSchema"]
     assert set(schema["properties"]) == {"handle"} and not schema.get("required")
-    # No old name survives in any F5 tool description either.
+    # No old name survives anywhere an agent reads: descriptions, titles and the whole input
+    # schema (field descriptions of nested models such as FactInput included).
     for name in expected:
-        for old in ("get_my_profile", "get_contribution_policy", "set_fact_audience"):
-            assert old not in tools[name]["description"], (name, old)
-        assert "review_pending_fact" not in tools[name]["description"], name
+        shipped = json.dumps(
+            [tools[name]["description"], tools[name].get("title"), tools[name]["inputSchema"]]
+        )
+        for old in OLD_F5_TOOLS:
+            assert old not in shipped, (name, old)
 
 
 def test_update_fact_per_action_validation(stack: tuple[TestClient, AuthRuntime, Any]) -> None:

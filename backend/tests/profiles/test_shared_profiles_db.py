@@ -254,7 +254,7 @@ async def test_shared_reads_follow_tier_policy_and_revocation_on_real_openfga(
         session,
         alex.ui,
         [
-            fact("interest", "Collects stamps"),
+            fact("interest", "Collects stamps", audience="public"),
             fact("favorite_brand", "Likes Muji", audience="connections"),
             fact("size", "Shoe size 42", details={"item": "shoes", "size": "42"}),
             fact("owned_item", "Owns a secret diary", audience="only_me"),
@@ -459,7 +459,7 @@ async def test_get_profile_owner_and_shared_paths_stay_separate(
         session,
         alex.ui,
         [
-            fact("interest", "Collects stamps"),
+            fact("interest", "Collects stamps", audience="public"),
             fact("interest", "Secret hobby", audience="only_me"),
         ],
     )

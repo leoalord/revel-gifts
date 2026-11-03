@@ -255,7 +255,7 @@ class FactInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    category: str = Field(description="Category id from get_contribution_policy.")
+    category: str = Field(description="Category id from get_profile's policy.categories.")
     statement: str = Field(
         description="Short actionable fact, 1-500 characters. Never raw conversation."
     )
