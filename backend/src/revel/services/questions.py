@@ -28,10 +28,12 @@ submit_question (routing ladder steps 1-2; step 3 is the lease work of #20, step
    committing an unrouted question), INSERT ``available`` assignments and ``made_available``
    events, commit.
 
-get_updates: the calling delegation's ``available``/``claimed``/``waiting_for_user`` assignments
-on open questions. Expiry is evaluated lazily HERE: an open question past ``expires_at`` is
-marked ``expired`` (``closed_at`` set, one ``expired`` event, guarded so concurrent readers write
-it once) and never returned. ``respond`` is re-checked at read time (an OpenFGA outage
+get_updates: the calling delegation's ``available``/``released``/``claimed``/``waiting_for_user``
+assignments on open questions whose requester can still view the profile (tier not ``none``).
+Expiry is evaluated lazily HERE: an open question past ``expires_at`` is marked ``expired``
+(``closed_at`` set, one ``expired`` event, guarded so concurrent readers write it once) and never
+returned; a lapsed lease goes back to ``available`` (``expire_stale_leases``, shared with the
+lease operations). ``respond`` is re-checked at read time (an OpenFGA outage
 is ``service_unavailable``, not an empty inbox), so a disconnected delegation
 or a changed ownership returns nothing. Each returned item gets a ``retrieved`` event.
 
@@ -118,6 +120,7 @@ REQUESTER_TIERS = frozenset({ViewerTier.connections, ViewerTier.trusted_circle})
 ROUTING_STEP_OWNER_AGENTS = 2
 INBOX_ASSIGNMENT_STATUSES = (
     AssignmentStatus.AVAILABLE.value,
+    AssignmentStatus.RELEASED.value,
     AssignmentStatus.CLAIMED.value,
     AssignmentStatus.WAITING_FOR_USER.value,
 )
@@ -352,6 +355,21 @@ async def respond_allowed(
     except Exception as exc:  # SDK errors carry object ids: keep only the class name
         logger.warning("respond check unavailable (%s)", type(exc).__name__)
         raise RespondCheckUnavailable() from None
+
+
+async def requester_can_view(
+    requester_user_id: UUID, profile_id: UUID, *, fga: FgaClient | None = None
+) -> bool:
+    """Whether the requester (as a user) still holds any tier on the profile. An OpenFGA
+    outage raises ``QuestionServiceUnavailable`` (never a silent hide or show)."""
+    requester = Principal(user_id=requester_user_id, agent_id=None, delegation_id=None, via="ui")
+    try:
+        tier = await resolve_viewer_tier(fga, requester, profile_id)
+    except AuthorizationDenied:
+        return False
+    except Exception as exc:
+        raise _authz_unavailable(exc) from None
+    return tier is not ViewerTier.none
 
 
 def acting_agent_label(name: str | None, client_id: str | None) -> str:
@@ -817,7 +835,9 @@ def _inbox_rows(session: Session, delegation_id: UUID) -> list[_InboxRow]:
     return [_InboxRow(*row) for row in rows]
 
 
-def _expire_questions(session: Session, question_ids: set[UUID], now: datetime) -> None:
+def _expire_questions(
+    session: Session, question_ids: set[UUID], now: datetime, *, detected_by: str = "get_updates"
+) -> None:
     """Mark open questions past their deadline expired, once each (guarded UPDATE)."""
     for question_id in sorted(question_ids):
         result = session.execute(
@@ -834,9 +854,88 @@ def _expire_questions(session: Session, question_ids: set[UUID], now: datetime) 
                 QuestionEvent(
                     question_id=question_id,
                     event_type=QuestionEventType.EXPIRED.value,
-                    details={"reason": "deadline_passed", "detected_by": "get_updates"},
+                    details={"reason": "deadline_passed", "detected_by": detected_by},
+                    occurred_at=now,
                 )
             )
+
+
+def expire_question_if_due(
+    session: Session, question_id: UUID, now: datetime, *, detected_by: str
+) -> None:
+    """Lazy question expiry for one question (no-op unless open and past ``expires_at``)."""
+    _expire_questions(session, {question_id}, now, detected_by=detected_by)
+
+
+HELD_LEASE_STATUSES = (
+    AssignmentStatus.CLAIMED.value,
+    AssignmentStatus.WAITING_FOR_USER.value,
+)
+
+
+def expire_stale_leases(
+    session: Session, question_id: UUID, now: datetime, *, detected_by: str
+) -> list[UUID]:
+    """Lazy lease expiry for one question: every ``claimed``/``waiting_for_user`` lease whose
+    ``lease_expires_at`` has passed goes back to ``available`` (``lease_version`` bumped, the
+    lease and human-contact flag cleared) with a ``lease_expired`` event recording the previous
+    status, but ONLY while the question is open and before its deadline. An expired question is
+    never revived: its leases are left as they are (every later operation is refused because the
+    question is not open). Each row is an optimistic ``UPDATE ... WHERE lease_version = :v`` so
+    concurrent callers record each expiry once. Returns the expired assignment ids. The caller
+    commits."""
+    question = session.execute(
+        select(Question.status, Question.expires_at).where(Question.id == question_id)
+    ).first()
+    if question is None or question.status != QuestionStatus.OPEN.value:
+        return []
+    if question.expires_at <= now:
+        return []
+    stale = session.execute(
+        select(Assignment.id, Assignment.lease_version, Assignment.status, Assignment.human_contact)
+        .where(
+            Assignment.question_id == question_id,
+            Assignment.status.in_(HELD_LEASE_STATUSES),
+            Assignment.lease_expires_at <= now,
+        )
+        .order_by(Assignment.id)
+    ).all()
+    expired: list[UUID] = []
+    for row in stale:
+        result = session.execute(
+            update(Assignment)
+            .where(
+                Assignment.id == row.id,
+                Assignment.lease_version == row.lease_version,
+                Assignment.status.in_(HELD_LEASE_STATUSES),
+            )
+            .values(
+                status=AssignmentStatus.AVAILABLE.value,
+                lease_version=row.lease_version + 1,
+                lease_expires_at=None,
+                claimed_at=None,
+                human_contact=False,
+            )
+        )
+        if result.rowcount == 1:
+            session.add(
+                QuestionEvent(
+                    question_id=question_id,
+                    assignment_id=row.id,
+                    event_type=QuestionEventType.LEASE_EXPIRED.value,
+                    lease_version=row.lease_version + 1,
+                    details={
+                        "previous_status": row.status,
+                        "status": AssignmentStatus.LEASE_EXPIRED.value,
+                        "human_contact": bool(row.human_contact),
+                        "detected_by": detected_by,
+                    },
+                    occurred_at=now,
+                )
+            )
+            expired.append(row.id)
+    session.flush()
+    return expired
 
 
 def _people(
@@ -875,9 +974,23 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
         def read_and_expire() -> list[_InboxRow]:
             rows = _inbox_rows(session, delegation_id)
             expired = {row.question_id for row in rows if row.expires_at <= now}
+            stale_leases = {
+                row.question_id
+                for row in rows
+                if row.expires_at > now
+                and row.status in HELD_LEASE_STATUSES
+                and row.lease_expires_at is not None
+                and row.lease_expires_at <= now
+            }
             if expired:
                 _expire_questions(session, expired, now)
+            for question_id in sorted(stale_leases):
+                expire_stale_leases(session, question_id, now, detected_by="get_updates")
+            if expired or stale_leases:
                 session.commit()
+                if stale_leases:  # statuses and lease versions changed: read them again
+                    rows = _inbox_rows(session, delegation_id)
+                    session.rollback()
             else:
                 session.rollback()
             return [row for row in rows if row.expires_at > now]
@@ -888,14 +1001,26 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
             session.rollback()
             raise
 
-    # Re-check respond at read time, outside any transaction.
+    # Re-check respond at read time, outside any transaction. Then hide items whose requester
+    # can no longer view the profile at all (tier none: revoked, blocked or never connected):
+    # a respondent should not spend effort, or contact its user, for an answer that could never
+    # be released. Checked as the requester USER (not the asking delegation), the subject
+    # ``can_release_answer`` ultimately needs a tier for; cached per (requester, profile).
     permitted: list[_InboxRow] = []
+    requester_visible: dict[tuple[UUID, UUID], bool] = {}
     for row in live:
         try:
             allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
         except RespondCheckUnavailable as exc:
             raise _authz_unavailable(exc) from None
-        if allowed:
+        if not allowed:
+            continue
+        key = (row.requester_user_id, row.profile_id)
+        if key not in requester_visible:
+            requester_visible[key] = await requester_can_view(
+                row.requester_user_id, row.profile_id, fga=deps.fga
+            )
+        if requester_visible[key]:
             permitted.append(row)
         if len(permitted) >= MAX_UPDATES:
             break
