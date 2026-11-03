@@ -27,6 +27,7 @@ from revel.services.question_leases import (
     MAX_RENEWALS,
     ClaimRequest,
     DeclineRequest,
+    HumanContactRequired,
     LeaseVersionRequest,
     OutreachCooldown,
     RenewalLimitReached,
@@ -193,7 +194,15 @@ async def test_outreach_cooldown_applies_to_the_same_assistant(
         await claim_assignment(d1, a1, ClaimRequest(human_contact=True), deps=deps(factory, clock))
     assert exc.value.retry_after_seconds == 23 * 3600  # from the first contact, not the re-report
     relet = await claim_assignment(d1, a1, ClaimRequest(), deps=deps(factory, clock))
-    with pytest.raises(OutreachCooldown):
+    with pytest.raises(OutreachCooldown):  # nor upgrade its plain claim
+        await claim_assignment(
+            d1,
+            a1,
+            ClaimRequest(human_contact=True, lease_version=relet.lease_version),
+            deps=deps(factory, clock),
+        )
+    assert assignment(factory, a1).human_contact is False
+    with pytest.raises(HumanContactRequired):
         await report_user_contact(
             d1,
             a1,

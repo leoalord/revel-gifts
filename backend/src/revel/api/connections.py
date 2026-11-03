@@ -83,7 +83,7 @@ def error_response(exc: Exception) -> JSONResponse:
     """
     for cls, (status, code) in ERRORS.items():
         if isinstance(exc, cls):
-            return JSONResponse(status_code=status, content={"detail": cls.message, "code": code})
+            return JSONResponse(status_code=status, content={"detail": exc.message, "code": code})
     logger.error("connections route failed (%s)", type(exc).__name__)
     return JSONResponse(
         status_code=503,

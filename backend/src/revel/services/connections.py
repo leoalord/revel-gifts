@@ -124,6 +124,7 @@ from revel.db.enums import (
 from revel.db.models import Agent, AgentDelegation, ConnectionRequest, Handle, Profile, User
 from revel.db.models.connections import AVATAR_URL_MAX_LENGTH, HANDLE_PATTERN
 from revel.services import profiles
+from revel.services.identity import agent_label
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,12 @@ class RequestNotFound(ConnectionsError):
 
 class InvalidState(ConnectionsError):
     message = "This connection request is not in a state that allows that action"
+
+
+class HandleRequired(InvalidState):
+    """The requester has no handle (409 ``invalid_state``, with its own detail)."""
+
+    message = "Set your handle before sending a connection request."
 
 
 class RateLimited(ConnectionsError):
@@ -667,8 +674,9 @@ async def lookup_and_request(
 ) -> RequestResult:
     """Exact-handle lookup, then create (or return the existing live) request to that person.
 
-    Raises ``RateLimited`` (checked before resolution), ``TargetNotFound`` (every hidden case,
-    including the caller's own handle and a target who blocked the caller) or
+    Raises ``RateLimited`` (checked before resolution), ``HandleRequired`` (the caller has no
+    handle; also before resolution, so it is the same for every target), ``TargetNotFound``
+    (every hidden case, including the caller's own handle and a target who blocked the caller) or
     ``ConnectionsUnavailable``. A duplicate returns the existing pending or approved row with
     ``created=False``; the requester never learns the granted tier.
     """
@@ -700,6 +708,9 @@ async def lookup_and_request(
             ).scalar_one()
             if recent >= REQUEST_LIMIT:
                 raise RateLimited()
+            # After the rate limits, before resolution: answers the same for every target.
+            if session.get(Handle, me) is None:
+                raise HandleRequired()
             target = _resolve_sync(session, me, normalized, allow_self=False)
             identity = PublicIdentity(
                 display_name=target.display_name,
@@ -744,7 +755,9 @@ async def lookup_and_request(
 def _person(row: Mapping[str, Any], *, with_assistant: bool) -> Person:
     assistant = None
     if with_assistant and row.get("client_id") is not None:
-        assistant = AssistantInfo(name=row.get("agent_name"), client_id=row["client_id"])
+        assistant = AssistantInfo(
+            name=agent_label(row.get("agent_name"), row["client_id"]), client_id=row["client_id"]
+        )
     return Person(
         display_name=row["display_name"],
         handle=row["handle"],
@@ -1286,6 +1299,7 @@ __all__ = [
     "ConnectionsError",
     "ConnectionsUnavailable",
     "HandleInfo",
+    "HandleRequired",
     "HandleUnavailable",
     "IncomingRequest",
     "InvalidAvatarUrl",

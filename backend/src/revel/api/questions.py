@@ -9,8 +9,8 @@
 Errors are ``{"detail": {"code": ..., "message": ...}}`` with the service's status code
 (422 invalid_request / unsafe_requested_information / invalid_evidence, 403 not_permitted,
 404 not_found, 409 stale_lease / lease_expired / lease_not_held / already_claimed /
-renewal_limit / human_contact_taken / outreach_cooldown (with ``Retry-After``) /
-question_expired / question_closed, 429 rate_limited with ``Retry-After``, 503
+renewal_limit / human_contact_taken / human_contact_required / outreach_cooldown (with
+``Retry-After``) / question_expired / question_closed, 429 rate_limited with ``Retry-After``, 503
 service_unavailable); request validation errors use FastAPI's 422.
 """
 
@@ -94,8 +94,9 @@ async def claim_assignment(
     request: Request,
     body: ClaimRequest | None = None,
 ) -> LeaseResponse:
-    """Claim an assignment (the lease). If the assistant can't answer from what it knows, it
-    should claim with human_contact=true and ask its user rather than decline."""
+    """Claim an assignment (the lease), or upgrade one's own claimed lease in place with
+    human_contact=true and the current lease_version. To ask the user: claim with
+    human_contact=true first (or upgrade), then ask, then report user contact."""
     try:
         return await question_leases.claim_assignment(
             principal, assignment_id, body or ClaimRequest(), deps=_deps(request)
@@ -132,7 +133,8 @@ async def release_assignment(
 async def report_user_contact(
     assignment_id: UUID, body: UserContactRequest, principal: CurrentPrincipal, request: Request
 ) -> LeaseResponse:
-    """Record outreach to the user (waiting_for_user). A repeat report while waiting only
+    """Record outreach to the user (waiting_for_user). Requires a human-contact claim
+    (409 human_contact_required otherwise). A repeat report while waiting only
     updates delivery_confirmed: no new window, counts against the renewal limit."""
     try:
         return await question_leases.report_user_contact(
