@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -41,6 +42,22 @@ def _invalid_token(runtime: AuthRuntime) -> HTTPException:
     )
 
 
+# OpenAPI documentation only: declares the ``bearerAuth`` security scheme and marks every
+# route using :data:`CurrentPrincipal`. ``auto_error=False`` means it never raises; the
+# token is still parsed by :func:`_bearer_token` so the 401/``WWW-Authenticate`` behaviour
+# is unchanged.
+bearer_auth = HTTPBearer(
+    auto_error=False,
+    scheme_name="bearerAuth",
+    bearerFormat="JWT",
+    description=(
+        "WorkOS AuthKit OAuth access token for audience https://api.revel.gifts/mcp, "
+        "obtained by connecting an MCP client (OAuth authorization code flow with PKCE). "
+        "An API-only token flow is not available in the MVP."
+    ),
+)
+
+
 def _bearer_token(request: Request) -> str | None:
     header = request.headers.get("authorization")
     if not header:
@@ -54,8 +71,12 @@ def _bearer_token(request: Request) -> str | None:
 async def current_principal(
     request: Request,
     runtime: Annotated[AuthRuntime, Depends(get_auth_runtime)],
+    _openapi_bearer: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_auth)],
 ) -> Principal:
-    """Authenticate the request's bearer token and resolve the principal (once per request)."""
+    """Authenticate the request's bearer token and resolve the principal (once per request).
+
+    ``_openapi_bearer`` exists only to document the security scheme; it is ignored.
+    """
     token = _bearer_token(request)
     if token is None:
         raise HTTPException(
