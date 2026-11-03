@@ -148,7 +148,11 @@ def test_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(
         Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     )
-    assert script.get_heads() == ["0004_delegation_reconnect"]
+    assert script.get_heads() == ["0005_connection_owner_confirmed"]
+    assert (
+        script.get_revision("0005_connection_owner_confirmed").down_revision
+        == "0004_delegation_reconnect"
+    )
     assert (
         script.get_revision("0004_delegation_reconnect").down_revision
         == "0003_connections_questions"
@@ -182,6 +186,7 @@ def test_constraint_and_index_names() -> None:
         "ck_connection_requests_granted_tier",
         "ck_connection_requests_granted_tier_matches_status",
         "ck_connection_requests_responded_at_matches_status",
+        "ck_connection_requests_owner_confirmed_at_matches_status",
         "uq_connection_requests_requester_user_id_target_user_id_live",
         "ix_connection_requests_target_user_id_status",
         "ix_connection_requests_requester_user_id_created_at",
@@ -341,6 +346,8 @@ def test_model_columns() -> None:
     assert requests.status.server_default.arg == "pending"
     assert requests.requester_delegation_id.nullable and requests.granted_tier.nullable
     assert requests.responded_at.nullable
+    assert requests.owner_confirmed_at.nullable and requests.owner_confirmed_at.type.timezone
+    assert requests.owner_confirmed_at.server_default is None
 
     questions = Question.__table__.c
     assert questions.private_purpose.server_default.arg.text == "'{}'::jsonb"

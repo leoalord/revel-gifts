@@ -235,6 +235,7 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
         "granted_tier",
         "responded_at",
         "responder_delegation_id",
+        "owner_confirmed_at",
         "created_at",
         "updated_at",
     }
@@ -342,6 +343,7 @@ def test_schema_after_upgrade(migrated_engine: Engine) -> None:
             "ck_connection_requests_granted_tier",
             "ck_connection_requests_granted_tier_matches_status",
             "ck_connection_requests_responded_at_matches_status",
+            "ck_connection_requests_owner_confirmed_at_matches_status",
         },
         "questions": {
             "ck_questions_requested_information_length",
@@ -1314,5 +1316,5 @@ def test_downgrade_to_profile_and_reupgrade(
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0004_delegation_reconnect"
+            == "0005_connection_owner_confirmed"
         )

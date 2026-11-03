@@ -275,5 +275,5 @@ def test_downgrade_and_reupgrade(migrated_engine: Engine, run_alembic: RunAlembi
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0004_delegation_reconnect"
+            == "0005_connection_owner_confirmed"
         )
