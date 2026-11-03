@@ -25,7 +25,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from revel.auth.authz import can_respond, delegation_tuples, public_tuples, question_object
 from revel.auth.identity import Principal
 from revel.db.enums import DelegationStatus
-from revel.db.models import AgentDelegation, Assignment, Question, QuestionEvent
+from revel.db.models import AgentDelegation, Assignment, Handle, Question, QuestionEvent
+from revel.services import connections
+from revel.services import questions as questions_service
 from revel.services.questions import (
     MAX_DEADLINE,
     RATE_LIMIT_MAX_QUESTIONS,
@@ -235,6 +237,57 @@ async def test_permission_denials_are_identical(
     assert fake.requests == []  # refused before any model call
     with factory() as s:
         assert s.scalars(select(Question)).all() == []
+
+
+@pytest.mark.parametrize("case", ["nonexistent", "malformed", "undiscoverable"])
+async def test_hidden_handles_fail_identically_before_authorization(
+    factory: sessionmaker[Session],
+    fga: Any,
+    world_builder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    # Handles resolve through F6's resolve_handle: every hidden case takes the same not-found
+    # path with no OpenFGA work, so response timing cannot reveal a hidden account.
+    world = await world_builder()
+    if case == "undiscoverable":
+        with factory() as s, s.begin():
+            s.execute(
+                update(Handle).where(Handle.user_id == world.owner.id).values(discoverable=False)
+            )
+    handle = {"nonexistent": "nobody-here", "malformed": "not a handle!", "undiscoverable": None}
+    req = request(handle=handle[case]) if handle[case] else request()
+    authz_calls: list[Any] = []
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        authz_calls.append(args)
+        raise AssertionError("visible_claims must not run for a hidden target")
+
+    monkeypatch.setattr(questions_service, "visible_claims", spy)
+    fake = FakeMuse(content=proposal("x", ["r1"]))
+    with pytest.raises(QuestionNotPermitted) as exc:
+        await submit_question(
+            agent_principal(world.stranger_d), req, deps=world.deps(factory, fake.client())
+        )
+    assert exc.value.message == QuestionNotPermitted().message
+    assert authz_calls == [] and fake.requests == []
+
+
+async def test_handle_lookup_quota_maps_to_rate_limited(
+    factory: sessionmaker[Session],
+    fga: Any,
+    world_builder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await world_builder()
+    monkeypatch.setattr(connections, "LOOKUP_LIMIT", 0)
+    with pytest.raises(QuestionRateLimited) as exc:
+        await submit_question(
+            agent_principal(world.stranger_d),
+            request(handle="nobody-here"),
+            deps=world.deps(factory, FakeMuse(content=proposal("x", ["r1"])).client()),
+        )
+    assert exc.value.code == "rate_limited"
 
 
 async def test_ui_principal_cannot_submit_or_read_inbox(
