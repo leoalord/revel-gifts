@@ -212,9 +212,10 @@ async def test_mcp_tools_flow_and_identical_hidden_errors(
     rid = req["request"]["id"]
 
     acting.principal = alex.agent
-    listed = _structured(await server.call_tool("list_connection_requests", {}))
-    assert [r["id"] for r in listed["requests"]] == [rid]
-    assert listed["requests"][0]["requester"]["assistant"]["client_id"] == "client_muse"
+    listed = _structured(await server.call_tool("list_connections", {"include": "requests"}))
+    assert set(listed) == {"incoming", "outgoing"}
+    assert [r["id"] for r in listed["incoming"]] == [rid]
+    assert listed["incoming"][0]["requester"]["assistant"]["client_id"] == "client_muse"
     approved = _structured(
         await server.call_tool(
             "respond_to_connection_request",
@@ -230,19 +231,211 @@ async def test_mcp_tools_flow_and_identical_hidden_errors(
     assert (
         await resolve_viewer_tier(fake_fga, sam.agent, alex.profile.id)
     ) is ViewerTier.trusted_circle
-    conns = _structured(await server.call_tool("list_connections", {}))
+    conns = _structured(await server.call_tool("list_connections", {"include": "connections"}))
+    assert set(conns) == {"connections"}
     assert conns["connections"][0]["tier"] == "trusted_circle"
-    _structured(
-        await server.call_tool("change_connection_tier", {"request_id": rid, "tier": "connections"})
+    changed = _structured(
+        await server.call_tool(
+            "respond_to_connection_request",
+            {"request_id": rid, "action": "change_tier", "tier": "connections"},
+        )
     )
-    _structured(await server.call_tool("revoke_connection", {"request_id": rid}))
+    assert changed["tier"] == "connections"
+    revoked = _structured(
+        await server.call_tool("end_connection", {"request_id": rid, "action": "revoke"})
+    )
+    assert revoked["status"] == "revoked"
     assert (await resolve_viewer_tier(fake_fga, sam.agent, alex.profile.id)) is ViewerTier.none
 
     acting.principal = sam.agent
-    out = _structured(await server.call_tool("list_connection_requests", {"direction": "outgoing"}))
-    assert out["requests"] == []
+    everything = _structured(await server.call_tool("list_connections", {}))
+    assert everything == {"connections": [], "incoming": [], "outgoing": []}
     with pytest.raises(ToolError, match="Connection request not found"):
-        await server.call_tool("revoke_connection", {"request_id": str(uuid4())})
+        await server.call_tool("end_connection", {"request_id": str(uuid4()), "action": "revoke"})
+
+
+async def _tool_error_text(server: Any, name: str, args: dict[str, Any]) -> str:
+    """The tool's own error message, without the SDK's ``Error executing tool <name>: `` prefix."""
+    try:
+        result = await server.call_tool(name, args)
+    except ToolError as exc:
+        text = str(exc)
+    else:
+        assert result.is_error, result
+        text = result.content[0].text
+    return text.removeprefix(f"Error executing tool {name}: ")
+
+
+@pytest.mark.anyio
+async def test_mcp_list_connections_include_variants(
+    mcp_server: tuple[Any, Acting], session: Session, fake_fga: FakeFga
+) -> None:
+    server, acting = mcp_server
+    sam, alex, kim = (add_person(session, n) for n in ("sam", "alex", "kim"))
+    seed_fga(fake_fga, sam, alex, kim)
+    # sam -> alex approved (alex's connection), kim -> alex pending (alex's incoming),
+    # alex -> kim pending (alex's outgoing).
+    acting.principal = sam.agent
+    approved = _structured(await server.call_tool("request_connection", {"handle": "alex_demo"}))
+    acting.principal = kim.agent
+    incoming = _structured(await server.call_tool("request_connection", {"handle": "alex_demo"}))
+    acting.principal = alex.agent
+    outgoing = _structured(await server.call_tool("request_connection", {"handle": "kim_demo"}))
+    await server.call_tool(
+        "respond_to_connection_request",
+        {
+            "request_id": approved["request"]["id"],
+            "action": "approve",
+            "tier": "connections",
+            "owner_confirmed": True,
+        },
+    )
+
+    full = _structured(await server.call_tool("list_connections", {}))
+    assert set(full) == {"connections", "incoming", "outgoing"}
+    assert [c["request_id"] for c in full["connections"]] == [approved["request"]["id"]]
+    assert [r["id"] for r in full["incoming"]] == [incoming["request"]["id"]]
+    assert [r["id"] for r in full["outgoing"]] == [outgoing["request"]["id"]]
+    assert _structured(await server.call_tool("list_connections", {"include": "all"})) == full
+
+    conns = _structured(await server.call_tool("list_connections", {"include": "connections"}))
+    assert conns == {"connections": full["connections"]}
+    reqs = _structured(await server.call_tool("list_connections", {"include": "requests"}))
+    assert reqs == {"incoming": full["incoming"], "outgoing": full["outgoing"]}
+
+    message = await _tool_error_text(server, "list_connections", {"include": "friends"})
+    assert message == (
+        "invalid_request: Unknown include 'friends' for list_connections; "
+        "expected one of: connections, requests, all."
+    )
+
+
+@pytest.mark.anyio
+async def test_mcp_end_connection_revoke_and_cancel(
+    mcp_server: tuple[Any, Acting], session: Session, fake_fga: FakeFga
+) -> None:
+    server, acting = mcp_server
+    sam, alex = add_person(session, "sam"), add_person(session, "alex")
+    seed_fga(fake_fga, sam, alex)
+
+    acting.principal = sam.agent
+    first = _structured(await server.call_tool("request_connection", {"handle": "alex_demo"}))
+    rid = first["request"]["id"]
+    cancelled = _structured(
+        await server.call_tool("end_connection", {"request_id": rid, "action": "cancel"})
+    )
+    assert cancelled["status"] == "cancelled"
+    assert _structured(await server.call_tool("list_connections", {"include": "requests"})) == {
+        "incoming": [],
+        "outgoing": [],
+    }
+
+    again = _structured(await server.call_tool("request_connection", {"handle": "alex_demo"}))
+    rid = again["request"]["id"]
+    acting.principal = alex.agent
+    await server.call_tool(
+        "respond_to_connection_request",
+        {"request_id": rid, "action": "approve", "tier": "connections", "owner_confirmed": True},
+    )
+    assert (
+        await resolve_viewer_tier(fake_fga, sam.agent, alex.profile.id)
+    ) is ViewerTier.connections
+    revoked = _structured(
+        await server.call_tool("end_connection", {"request_id": rid, "action": "revoke"})
+    )
+    assert revoked["status"] == "revoked"
+    assert (await resolve_viewer_tier(fake_fga, sam.agent, alex.profile.id)) is ViewerTier.none
+
+    message = await _tool_error_text(
+        server, "end_connection", {"request_id": rid, "action": "delete"}
+    )
+    assert message == (
+        "invalid_request: Unknown action 'delete' for end_connection; "
+        "expected one of: revoke, cancel."
+    )
+
+
+@pytest.mark.anyio
+async def test_mcp_respond_validates_per_action_params(
+    mcp_server: tuple[Any, Acting], session: Session, fake_fga: FakeFga
+) -> None:
+    server, acting = mcp_server
+    sam, alex = add_person(session, "sam"), add_person(session, "alex")
+    seed_fga(fake_fga, sam, alex)
+    acting.principal = sam.agent
+    req = _structured(await server.call_tool("request_connection", {"handle": "alex_demo"}))
+    rid = req["request"]["id"]
+    acting.principal = alex.agent
+    name = "respond_to_connection_request"
+
+    async def error(args: dict[str, Any]) -> str:
+        return await _tool_error_text(server, name, {"request_id": rid, **args})
+
+    assert await error({"action": "accept"}) == (
+        "invalid_request: Unknown action 'accept' for respond_to_connection_request; "
+        "expected one of: approve, decline, block, change_tier."
+    )
+    for action in ("approve", "change_tier"):
+        assert await error({"action": action, "owner_confirmed": True}) == (
+            f"invalid_request: Action '{action}' requires tier."
+        )
+    for action in ("decline", "block"):
+        assert await error({"action": action, "tier": "connections"}) == (
+            f"invalid_request: Action '{action}' does not accept tier."
+        )
+        assert await error({"action": action, "owner_confirmed": True}) == (
+            f"invalid_request: Action '{action}' does not accept owner_confirmed."
+        )
+    # Nothing above reached the service: the request is still pending and ungranted.
+    pending = _structured(await server.call_tool("list_connections", {"include": "requests"}))
+    assert [r["id"] for r in pending["incoming"]] == [rid]
+    assert (await resolve_viewer_tier(fake_fga, sam.agent, alex.profile.id)) is ViewerTier.none
+
+    declined = _structured(await server.call_tool(name, {"request_id": rid, "action": "decline"}))
+    assert declined["status"] == "declined"
+
+
+@pytest.mark.anyio
+async def test_mcp_connection_tool_set_and_annotations(mcp_server: tuple[Any, Acting]) -> None:
+    server, _ = mcp_server
+    tools = {t.name: t for t in await server.list_tools()}
+    for old in (
+        "list_connection_requests",
+        "change_connection_tier",
+        "revoke_connection",
+        "cancel_connection_request",
+    ):
+        assert old not in tools
+    for name in (
+        "set_handle",
+        "request_connection",
+        "list_connections",
+        "respond_to_connection_request",
+        "end_connection",
+    ):
+        assert name in tools
+
+    listing = tools["list_connections"]
+    assert listing.annotations.read_only_hint is True
+    assert listing.annotations.destructive_hint is None
+    include = listing.input_schema["properties"]["include"]
+    assert include["enum"] == ["connections", "requests", "all"]
+    assert include["default"] == "all"
+    assert listing.input_schema.get("required", []) == []
+
+    respond = tools["respond_to_connection_request"]
+    assert respond.annotations.read_only_hint is False
+    assert respond.annotations.destructive_hint is True
+    assert respond.annotations.idempotent_hint is False
+    props = respond.input_schema["properties"]
+    assert props["action"]["enum"] == ["approve", "decline", "block", "change_tier"]
+    assert set(respond.input_schema["required"]) == {"request_id", "action"}
+
+    end = tools["end_connection"]
+    assert end.annotations.read_only_hint is False
+    assert end.annotations.destructive_hint is True
+    assert end.input_schema["properties"]["action"]["enum"] == ["revoke", "cancel"]
+    assert set(end.input_schema["required"]) == {"request_id", "action"}
 
 
 # --- Real OpenFGA -----------------------------------------------------------------------------
