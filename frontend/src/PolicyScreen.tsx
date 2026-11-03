@@ -410,7 +410,7 @@ export function PolicyScreen() {
           </table>
         </fieldset>
 
-        <button type="submit" disabled={saving}>
+        <button type="submit" className="primary" disabled={saving}>
           {firstRun ? "Approve policy" : "Save policy"}
         </button>
       </form>

@@ -54,7 +54,7 @@ function PersonView({ person }: { person: PublicIdentity | Person }) {
   return (
     <span className="person">
       <strong>{personName(person)}</strong>
-      {person.display_name && person.handle && <span className="hint"> @{person.handle}</span>}
+      {person.display_name && person.handle && <span className="handle"> (@{person.handle})</span>}
       {assistant && (
         <span className="hint">
           {" "}
@@ -145,7 +145,7 @@ function HandleForm({ current, onSaved }: { current: HandleInfo | null; onSaved:
           {message}
         </p>
       )}
-      <button type="submit" disabled={busy}>
+      <button type="submit" className="primary" disabled={busy}>
         {current ? "Save handle" : "Set handle"}
       </button>
     </form>
@@ -198,7 +198,7 @@ function RequestForm({ onSent }: { onSent: (notice: string) => void }) {
         />
         <FieldError id="request-handle-error" message={handleError} />
       </div>
-      <button type="submit" disabled={busy || !handle.trim()}>
+      <button type="submit" className="primary" disabled={busy || !handle.trim()}>
         Send request
       </button>
       {message && (
@@ -234,19 +234,20 @@ function ApproveForm({
       <fieldset>
         <legend>Share my profile with {personName(request.requester)} as</legend>
         {TIERS.map((t) => (
-          <label key={t} className="radio">
+          <span key={t} className="radio">
             <input
+              id={`${name}-${t}`}
               type="radio"
               name={name}
               value={t}
               checked={tier === t}
               onChange={() => setTier(t)}
-            />{" "}
-            {tierLabel(t)}
-          </label>
+            />
+            <label htmlFor={`${name}-${t}`}>{tierLabel(t)}</label>
+          </span>
         ))}
       </fieldset>
-      <button type="submit" disabled={busy || !tier}>
+      <button type="submit" className="primary" disabled={busy || !tier}>
         Approve
       </button>
     </form>
@@ -384,10 +385,10 @@ export function ConnectionsScreen() {
         ) : (
           <ul className="rows">
             {data.incoming.map((r) => (
-              <li key={r.id} className="row">
-                <p>
-                  <PersonView person={r.requester} />{" "}
-                  <span className="hint">asked {formatTime(r.created_at)}</span>
+              <li key={r.id} className="row request-card">
+                <p className="request-title">
+                  <PersonView person={r.requester} /> wants to see your profile.{" "}
+                  <span className="hint">Asked {formatTime(r.created_at)}.</span>
                 </p>
                 <ApproveForm
                   request={r}
@@ -500,6 +501,17 @@ export function ConnectionsScreen() {
                       void act(
                         () => connectionsApi.revoke(c.request_id),
                         `Revoked ${personName(c.person)}.`,
+                      )
+                    }
+                  />
+                  <ConfirmButton
+                    label="Block"
+                    confirmLabel="Confirm block"
+                    disabled={busy}
+                    onConfirm={() =>
+                      void act(
+                        () => connectionsApi.block(c.request_id),
+                        `Blocked ${personName(c.person)}.`,
                       )
                     }
                   />
