@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,7 @@ from uuid import uuid4
 import pytest
 from mcp.server.auth.provider import AccessToken
 from sqlalchemy import Engine, create_engine, func, pool, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from revel.auth.identity import DelegationDisconnected, IdentityResolver
@@ -320,3 +322,168 @@ async def test_resolve_captures_name_without_touching_delegations_sql(sql_repo):
         row = session.get(AgentDelegation, principal.delegation_id)
         assert row.status == DelegationStatus.ACTIVE.value
         assert row.created_at == row.updated_at
+
+
+# --- reconnect after disconnect (RG-10) ------------------------------------------------------
+# Needs F3's reconnect migration: partial unique index
+# uq_agent_delegations_user_id_agent_id_active, agent_delegations.authorized_sid and the
+# agent_delegation_sessions table. Rows are read with plain SQL so these tests do not depend
+# on how F3 maps the new schema in revel.db.models.
+
+
+def _sid_token(sid: str | None, iat: int | None = None, sub: str = "user_alice") -> AccessToken:
+    claims: dict = {"iss": "x", "iat": int(time.time()) - 60 if iat is None else iat}
+    if sid is not None:
+        claims["sid"] = sid
+    return AccessToken(
+        token="opaque", client_id="client_muse", scopes=[], subject=sub, claims=claims
+    )
+
+
+def _later() -> int:
+    return int(time.time()) + 5
+
+
+def _full_row(sql_repo, delegation_id):
+    with sql_repo._session() as session:
+        return session.execute(
+            text(
+                "SELECT status, connected_at, disconnected_at, updated_at, created_at, "
+                "authorized_sid FROM agent_delegations WHERE id = :id"
+            ),
+            {"id": delegation_id},
+        ).one()
+
+
+def _recorded_sids(sql_repo, delegation_id) -> set[str]:
+    with sql_repo._session() as session:
+        return set(
+            session.execute(
+                text("SELECT sid FROM agent_delegation_sessions WHERE delegation_id = :id"),
+                {"id": delegation_id},
+            ).scalars()
+        )
+
+
+async def test_reconnect_creates_new_delegation_sql(sql_repo):
+    hooks = RecordingHooks()
+    resolver = IdentityResolver(sql_repo, hooks=hooks)
+    old = await resolver.resolve(_sid_token("app_consent_1"), via="mcp")
+    assert _full_row(sql_repo, old.delegation_id).authorized_sid == "app_consent_1"
+    assert await resolver.disconnect_delegation(
+        user_id=old.user_id, delegation_id=old.delegation_id
+    )
+    old_row = _full_row(sql_repo, old.delegation_id)
+
+    # Pre-disconnect token, refreshed old-session token, unseen pre-disconnect sid, no sid.
+    for token in (
+        _sid_token("app_consent_1"),
+        _sid_token("app_consent_1", _later()),
+        _sid_token("app_consent_unseen"),
+        _sid_token(None, _later()),
+    ):
+        with pytest.raises(DelegationDisconnected):
+            await resolver.resolve(token, via="mcp")
+
+    new = await resolver.resolve(_sid_token("app_consent_2", _later()), via="mcp")
+    assert new.delegation_id != old.delegation_id
+    assert (new.user_id, new.agent_id) == (old.user_id, old.agent_id)
+    assert [c["delegation_id"] for n, c in hooks.calls if n == "on_agent_delegated"] == [
+        old.delegation_id,
+        new.delegation_id,
+    ]
+    new_row = _full_row(sql_repo, new.delegation_id)
+    assert new_row.status == "active" and new_row.authorized_sid == "app_consent_2"
+    assert _recorded_sids(sql_repo, new.delegation_id) == set()  # stored on the row itself
+    # The old row is history, unchanged.
+    assert _full_row(sql_repo, old.delegation_id) == old_row
+    # The refreshed old-session token cannot act through the new delegation either.
+    with pytest.raises(DelegationDisconnected):
+        await resolver.resolve(_sid_token("app_consent_1", _later()), via="api")
+    again = await resolver.resolve(_sid_token("app_consent_2", _later()), via="api")
+    assert again.delegation_id == new.delegation_id
+
+    views = await sql_repo.list_delegations_for_user(old.user_id)
+    assert [(v.id, v.status) for v in views] == [
+        (new.delegation_id, "active"),
+        (old.delegation_id, "disconnected"),
+    ]
+
+    # The new delegation disconnects like any other; the old one stays as it was.
+    hooks.calls.clear()
+    assert await resolver.disconnect_delegation(
+        user_id=new.user_id, delegation_id=new.delegation_id
+    )
+    assert [n for n, _ in hooks.calls] == ["on_agent_disconnected"]
+    assert _full_row(sql_repo, new.delegation_id).status == "disconnected"
+    assert _full_row(sql_repo, old.delegation_id) == old_row
+    with pytest.raises(DelegationDisconnected):
+        await resolver.resolve(_sid_token("app_consent_2", _later()), via="mcp")
+
+
+async def test_concurrent_fresh_authorizations_one_active_sql(sql_repo):
+    hooks = RecordingHooks()
+    resolver = IdentityResolver(sql_repo, hooks=hooks)
+    old = await resolver.resolve(_sid_token("app_consent_1"), via="mcp")
+    assert await resolver.disconnect_delegation(
+        user_id=old.user_id, delegation_id=old.delegation_id
+    )
+    hooks.calls.clear()
+    principals = await asyncio.gather(
+        *(
+            resolver.resolve(_sid_token(f"app_consent_{2 + i % 2}", _later()), via="mcp")
+            for i in range(8)
+        )
+    )
+    ids = {p.delegation_id for p in principals}
+    assert len(ids) == 1 and old.delegation_id not in ids
+    (new_id,) = ids
+    with sql_repo._session() as session:
+        rows = session.execute(
+            text("SELECT id, status FROM agent_delegations WHERE user_id = :u"),
+            {"u": old.user_id},
+        ).all()
+    assert sorted((str(i), s) for i, s in rows) == sorted(
+        [(str(new_id), "active"), (str(old.delegation_id), "disconnected")]
+    )
+    assert [c["delegation_id"] for n, c in hooks.calls if n == "on_agent_delegated"] == [new_id]
+    row = _full_row(sql_repo, new_id)
+    assert {row.authorized_sid} | _recorded_sids(sql_repo, new_id) == {
+        "app_consent_2",
+        "app_consent_3",
+    }
+
+
+async def test_second_sid_recorded_and_refused_after_disconnect_sql(sql_repo):
+    resolver = IdentityResolver(sql_repo, hooks=RecordingHooks())
+    p = await resolver.resolve(_sid_token("app_consent_a"), via="mcp")
+    q = await resolver.resolve(_sid_token("app_consent_b"), via="mcp")
+    assert q.delegation_id == p.delegation_id
+    assert _recorded_sids(sql_repo, p.delegation_id) == {"app_consent_b"}
+    assert await resolver.disconnect_delegation(user_id=p.user_id, delegation_id=p.delegation_id)
+    for sid in ("app_consent_a", "app_consent_b"):
+        with pytest.raises(DelegationDisconnected):
+            await resolver.resolve(_sid_token(sid, _later()), via="mcp")
+
+
+async def test_one_active_delegation_per_pair_enforced_sql(sql_repo):
+    resolver = IdentityResolver(sql_repo, hooks=RecordingHooks())
+    p = await resolver.resolve(_sid_token("app_consent_1"), via="mcp")
+    with (
+        pytest.raises(IntegrityError, match="uq_agent_delegations_user_id_agent_id_active"),
+        sql_repo._session() as session,
+        session.begin(),
+    ):
+        session.execute(
+            text("INSERT INTO agent_delegations (user_id, agent_id) VALUES (:u, :a)"),
+            {"u": p.user_id, "a": p.agent_id},
+        )
+    # A disconnected row beside the active one is allowed (that is the history).
+    with sql_repo._session() as session, session.begin():
+        session.execute(
+            text(
+                "INSERT INTO agent_delegations (user_id, agent_id, status, disconnected_at) "
+                "VALUES (:u, :a, 'disconnected', now())"
+            ),
+            {"u": p.user_id, "a": p.agent_id},
+        )

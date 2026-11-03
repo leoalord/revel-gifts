@@ -3,7 +3,10 @@
 Identity comes only from a verified access token (``sub`` and client id); no
 client-supplied identity is ever consulted. Resolution upserts the user, the
 agent (one per OAuth client) and the user-agent delegation, but never updates
-an existing row: a disconnected delegation is rejected, never reactivated.
+an existing delegation: a disconnected delegation is never reactivated. After a
+disconnect, a fresh OAuth authorization (a new WorkOS ``sid`` issued after the
+disconnect) creates a NEW delegation; tokens of the old authorization stay rejected
+(see ``IdentityResolver._delegation_for``).
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -68,6 +72,22 @@ class DelegationDisconnected(IdentityError):
 
 class InvalidIdentityClaims(IdentityError):
     """The verified token lacks the claims needed to identify a user and client."""
+
+
+def _claim_str(access_token: AccessToken, name: str) -> str | None:
+    value = (access_token.claims or {}).get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def _claim_issued_at(access_token: AccessToken) -> datetime | None:
+    """The verified token's ``iat`` as an aware UTC datetime, or ``None`` if absent/invalid."""
+    value = (access_token.claims or {}).get("iat")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class IdentityResolver:
@@ -134,6 +154,59 @@ class IdentityResolver:
         )
         return user
 
+    async def _delegation_for(
+        self, user_id: UUID, agent_id: UUID, access_token: AccessToken
+    ) -> DelegationRecord:
+        """The active delegation this token may act through, creating one on (re)connect.
+
+        Reconnect rule (F2 decision): after a disconnect, only a fresh OAuth authorization
+        creates a new delegation; the disconnected row is never reactivated or modified. A
+        token is refused (``DelegationDisconnected``) when:
+
+        * its ``sid`` (the WorkOS session/consent it was minted under, which refreshes keep)
+          already acted through a disconnected delegation of this pair, or
+        * the pair has disconnected history and the token's ``sid`` is not yet associated with
+          the active delegation, unless it has a ``sid`` and was issued after the latest
+          disconnect. A missing ``sid`` or ``iat`` fails closed.
+
+        So tokens issued before a disconnect, and tokens refreshed from a pre-disconnect
+        authorization Revel has seen, never act again; a new ``sid`` issued after the
+        disconnect is a fresh authorization. The pair's first connection is unchanged (no
+        history: any verified token creates the delegation, as before).
+        """
+        sid = _claim_str(access_token, "sid")
+        state = await self.repository.get_delegation_state(user_id, agent_id, sid)
+        if state.sid_on_disconnected:
+            raise DelegationDisconnected("token belongs to a disconnected authorization")
+        known = state.active is not None and state.sid_on_active
+        last_disconnect = state.last_disconnected_at
+        if last_disconnect is not None and not known:
+            issued_at = _claim_issued_at(access_token)
+            if sid is None or issued_at is None or issued_at <= last_disconnect:
+                raise DelegationDisconnected("assistant delegation is disconnected")
+
+        delegation = state.active
+        recorded = known
+        if delegation is None:
+
+            async def delegation_created(record: DelegationRecord) -> None:
+                await self._hooks.on_agent_delegated(
+                    user_id=record.user_id, agent_id=record.agent_id, delegation_id=record.id
+                )
+
+            delegation, created = await self.repository.create_delegation(
+                user_id, agent_id, authorized_sid=sid, on_created=delegation_created
+            )
+            if delegation is None:
+                raise DelegationDisconnected("assistant delegation is disconnected")
+            recorded = created  # the inserted row carries ``sid`` as ``authorized_sid``
+        if sid is not None and not recorded:
+            # Remember every sid that acts through the delegation so a later disconnect also
+            # refuses its refreshed tokens. Separate transaction (F4: a transaction writing
+            # agent_delegations writes nothing else).
+            await self.repository.record_delegation_sid(delegation.id, sid)
+        return delegation
+
     async def resolve(self, access_token: AccessToken, via: Via) -> Principal:
         """Resolve an assistant bearer token (``mcp``/``api``) to a delegated principal."""
         workos_user_id = access_token.subject
@@ -143,17 +216,7 @@ class IdentityResolver:
 
         user = await self._ensure_user(workos_user_id)
         agent, _ = await self.repository.ensure_agent(client_id)
-
-        async def delegation_created(record: DelegationRecord) -> None:
-            await self._hooks.on_agent_delegated(
-                user_id=record.user_id, agent_id=record.agent_id, delegation_id=record.id
-            )
-
-        delegation, _ = await self.repository.ensure_delegation(
-            user.id, agent.id, on_created=delegation_created
-        )
-        if delegation.status != "active":
-            raise DelegationDisconnected("assistant delegation is disconnected")
+        delegation = await self._delegation_for(user.id, agent.id, access_token)
 
         if not agent.name:
             await self._capture_agent_name(agent)
@@ -180,7 +243,9 @@ class IdentityResolver:
         Calls the authz ``on_agent_disconnected`` hook inside the same transaction, only
         when a row actually changed; a hook failure rolls back and propagates. Returns
         ``False`` (no hook) when already disconnected, not owned by ``user_id`` or unknown.
-        Afterwards :meth:`resolve` rejects that assistant with ``DelegationDisconnected``.
+        Afterwards :meth:`resolve` rejects that authorization's tokens (including ones refreshed
+        from it) with ``DelegationDisconnected``; only a fresh authorization reconnects, as a
+        new delegation.
         """
 
         async def disconnected(record: DelegationRecord) -> None:

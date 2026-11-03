@@ -222,10 +222,15 @@ class WorkOSTokenVerifier(TokenVerifier):
 
         # Keep only the claims callers need; ``iss`` lets the SDK bind sessions to
         # the (client, issuer, subject) principal.
-        kept = {"iss": claims["iss"]}
+        # ``sid`` (the WorkOS session/consent the token was minted under) and ``iat`` let the
+        # identity resolver tell a fresh authorization from a pre-disconnect one.
+        kept: dict[str, Any] = {"iss": claims["iss"]}
         for name in ("sid", "org_id"):
             if isinstance(claims.get(name), str):
                 kept[name] = claims[name]
+        iat = claims["iat"]  # required above; PyJWT has checked it is numeric
+        if isinstance(iat, int | float) and not isinstance(iat, bool):
+            kept["iat"] = int(iat)
 
         return AccessToken(
             token=token,

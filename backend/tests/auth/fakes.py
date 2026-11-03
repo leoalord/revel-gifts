@@ -17,6 +17,7 @@ import anyio
 from revel.auth.repository import (
     AgentRecord,
     DelegationRecord,
+    DelegationState,
     DelegationView,
     OnCreated,
     OnDisconnected,
@@ -35,6 +36,9 @@ class InMemoryIdentityRepository:
         # ``connected_at`` directly to control list ordering.
         self.connected_at: dict[UUID, datetime] = {}
         self.disconnected_at: dict[UUID, datetime] = {}
+        # WorkOS ``sid`` values per delegation (``authorized_sid`` plus recorded ones).
+        self.sids: dict[UUID, set[str]] = {}
+        self.sid_writes = 0
         self._lock = anyio.Lock()
         self.agent_name_writes = 0
         self.fail_agent_name_write = False
@@ -116,19 +120,39 @@ class InMemoryIdentityRepository:
             self.agents[agent_id] = replace(existing, name=name)
             return True
 
-    async def ensure_delegation(
+    async def get_delegation_state(
+        self, user_id: UUID, agent_id: UUID, sid: str | None
+    ) -> DelegationState:
+        active = None
+        sid_on_active = sid_on_disconnected = False
+        last: datetime | None = None
+        for d in self.delegations.values():
+            if d.user_id != user_id or d.agent_id != agent_id:
+                continue
+            has_sid = sid is not None and sid in self.sids.get(d.id, set())
+            if d.status == "active":
+                active, sid_on_active = d, has_sid
+                continue
+            sid_on_disconnected = sid_on_disconnected or has_sid
+            at = self.disconnected_at.get(d.id)
+            if at is not None and (last is None or at > last):
+                last = at
+        return DelegationState(active, sid_on_active, sid_on_disconnected, last)
+
+    async def create_delegation(
         self,
         user_id: UUID,
         agent_id: UUID,
         *,
+        authorized_sid: str | None,
         on_created: OnCreated[DelegationRecord] | None = None,
-    ) -> tuple[DelegationRecord, bool]:
+    ) -> tuple[DelegationRecord | None, bool]:
         async with self._lock:
             existing = next(
                 (
                     d
                     for d in self.delegations.values()
-                    if d.user_id == user_id and d.agent_id == agent_id
+                    if d.user_id == user_id and d.agent_id == agent_id and d.status == "active"
                 ),
                 None,
             )
@@ -137,14 +161,23 @@ class InMemoryIdentityRepository:
             record = DelegationRecord(uuid4(), user_id, agent_id, "active")
             self.delegations[record.id] = record
             self.connected_at[record.id] = datetime.now(UTC)
+            if authorized_sid is not None:
+                self.sids[record.id] = {authorized_sid}
             try:
                 if on_created is not None:
                     await on_created(record)
             except BaseException:
                 del self.delegations[record.id]
                 del self.connected_at[record.id]
+                self.sids.pop(record.id, None)
                 raise
             return record, True
+
+    async def record_delegation_sid(self, delegation_id: UUID, sid: str) -> None:
+        if not sid:
+            raise ValueError("sid must be non-empty")
+        self.sid_writes += 1
+        self.sids.setdefault(delegation_id, set()).add(sid)
 
     async def disconnect_delegation(
         self,
