@@ -491,3 +491,4 @@ async def test_get_updates_overall_authz_deadline_is_unavailable(
     monkeypatch.setattr(questions_service, "GET_UPDATES_AUTHZ_DEADLINE_SECONDS", 0.05)
     with pytest.raises(QuestionServiceUnavailable):
         await get_updates(agent_principal(world.owner_d1), deps=world.deps(factory))
+    assert count(factory, QuestionEvent, QuestionEvent.event_type == "retrieved") == 0

@@ -375,16 +375,12 @@ def register(server: MCPServer, settings: Any) -> None:
         description=SUBMIT_ANSWER_DESCRIPTION,
         annotations=_annotations("Answer a question"),
     )
-    # May record lazy expiry of an overdue question and an answer_retrieved event; it never
-    # changes question or lease state.
+    # Not read-only: may record lazy expiry of an overdue question and an answer_retrieved
+    # event. Never changes lease state.
     server.add_tool(
         get_question_tool,
         name="get_question",
         title="Check a question and get its answer",
         description=GET_QUESTION_DESCRIPTION,
-        annotations=ToolAnnotations(
-            title="Check a question and get its answer",
-            readOnlyHint=True,
-            openWorldHint=False,
-        ),
+        annotations=_annotations("Check a question and get its answer", idempotent=True),
     )

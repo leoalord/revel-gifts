@@ -235,7 +235,13 @@ async def test_mcp_tools_listed(settings: Settings, monkeypatch: pytest.MonkeyPa
     ]
     assert tools["update_assignment"].output_schema is not None
     gq = tools["get_question"].annotations
-    assert gq is not None and gq.read_only_hint is True
+    assert gq is not None
+    assert (gq.read_only_hint, gq.destructive_hint, gq.idempotent_hint, gq.open_world_hint) == (
+        False,
+        False,
+        True,
+        False,
+    )
     assert tools["get_question"].output_schema is not None
     assert "private_purpose" in tools["submit_question"].input_schema["properties"]
     assert tools["get_updates"].input_schema.get("properties", {}) == {}
