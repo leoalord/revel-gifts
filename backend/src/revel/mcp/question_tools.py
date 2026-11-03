@@ -69,8 +69,10 @@ GET_UPDATES_DESCRIPTION = (
 CLAIM_DESCRIPTION = (
     "Claim a question assignment from get_updates before working on it. Returns your lease "
     "(lease_version, lease_expires_at, about 15 minutes; renew it while you work). If you "
-    "can't answer from what you already know, claim with human_contact=true and ask your user "
-    "instead of declining. Only one assistant per question may contact the user, and Revel "
+    "can't answer from what you already know, ask your user instead of declining. To ask your "
+    "user: claim with human_contact=true first (or upgrade your current claim by calling "
+    "claim_assignment again with human_contact=true and your lease_version), then ask, then "
+    "report_user_contact. Only one assistant per question may contact the user, and Revel "
     "refuses if the user was contacted about it recently (by any assistant, you included). "
     "prior_user_contacts says how often the user was already asked about this question."
 )
@@ -84,7 +86,10 @@ RELEASE_DESCRIPTION = (
     "assistant can take the human-contact lease). Quote the current lease_version."
 )
 REPORT_CONTACT_DESCRIPTION = (
-    "Report that you asked your user this question (after claiming it). Revel marks the "
+    "Report that you asked your user this question. To ask your user: claim with "
+    "human_contact=true first (or upgrade your current claim), then ask, then "
+    "report_user_contact; without a human-contact claim this is refused "
+    "(human_contact_required). Revel marks the "
     "assignment waiting_for_user and holds your human-contact lease for the response window "
     "(up to 24 hours, never past the question deadline). delivery_confirmed=true only if you "
     "know the user received it. Then submit_answer once the user replies. Reporting again "

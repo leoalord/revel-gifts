@@ -20,8 +20,10 @@ Rules every operation follows:
   that hold a lease must quote its current ``lease_version``.
 - Human contact: one ``human_contact`` lease (``claimed``/``waiting_for_user``) per question,
   enforced by F3's partial unique index (a violation maps to ``human_contact_taken``) after a
-  pre-check. Before any new outreach (a ``human_contact`` claim or ``report_user_contact``),
-  prior ``user_contact_reported`` events on the question are checked: if ANY assistant (this one
+  pre-check. The lease must be taken BEFORE the user is asked: a ``human_contact`` claim, or an
+  in-place upgrade of one's own ``claimed`` lease; ``report_user_contact`` without it is
+  ``human_contact_required`` and never acquires it. When the lease is taken, prior
+  ``user_contact_reported`` events on the question are checked: if ANY assistant (this one
   included) contacted the user within ``OUTREACH_COOLDOWN`` the operation is
   ``outreach_cooldown``. Re-confirming an existing contact is not new outreach (it never resets
   the window) but counts against ``MAX_RENEWALS``. The cooldown is derived from events (no
@@ -127,6 +129,15 @@ class AlreadyClaimed(LeaseConflict):
 
     def __init__(self) -> None:
         super().__init__("This assignment is already claimed. Use your lease or wait for it.")
+
+
+class HumanContactRequired(LeaseConflict):
+    code = "human_contact_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claim with human_contact=true (or upgrade your claim) before asking your user."
+        )
 
 
 class RenewalLimitReached(LeaseConflict):
@@ -479,9 +490,46 @@ async def claim_assignment(
 ) -> LeaseResponse:
     """Atomically claim an ``available``/``released`` assignment for ``LEASE_DURATION``
     (capped at the question deadline). ``human_contact`` also takes the exclusive
-    human-contact lease, after the outreach checks."""
+    human-contact lease, after the outreach checks.
+
+    In-place upgrade: ``human_contact=true`` with the current ``lease_version`` on this
+    delegation's own active ``claimed`` lease (without human contact) runs the same checks
+    under the per-question lock (respond re-check, ``human_contact_taken``, the outreach
+    cooldown including this assistant), sets ``human_contact``, bumps ``lease_version``, keeps
+    ``lease_expires_at`` and records ``claimed`` with ``upgrade: true``. A claim without
+    ``human_contact`` on a lease already held is ``already_claimed``."""
     await load_own_assignment(principal, assignment_id, deps)
     now = deps.now()
+
+    def _upgrade(session: Session, row: _Row) -> LeaseResponse:
+        check_outreach_allowed(session, row.question_id, row.id, now)
+        version = _versioned_update(
+            session, row, (AssignmentStatus.CLAIMED.value,), now, human_contact=True
+        )
+        session.flush()  # surfaces the human-contact unique index violation here
+        session.add(
+            _event(
+                principal,
+                row,
+                QuestionEventType.CLAIMED,
+                version,
+                now,
+                human_contact=True,
+                upgrade=True,
+            )
+        )
+        prior = _prior_contacts(session, row.question_id)
+        used = _renewals_since_claim(session, row)
+        session.commit()
+        return _response(
+            row,
+            status=AssignmentStatus.CLAIMED.value,
+            lease_version=version,
+            lease_expires_at=row.lease_expires_at,
+            human_contact=True,
+            renewals_remaining=MAX_RENEWALS - used,
+            prior_user_contacts=prior,
+        )
 
     def work(session: Session) -> LeaseResponse:
         row = _load(session, assignment_id)
@@ -498,6 +546,13 @@ async def claim_assignment(
         if request.lease_version is not None and request.lease_version != row.lease_version:
             raise StaleLease()
         if row.status not in CLAIMABLE_STATUSES:
+            if (
+                request.human_contact
+                and request.lease_version is not None
+                and row.status == AssignmentStatus.CLAIMED.value
+                and not row.human_contact
+            ):
+                return _upgrade(session, row)
             if row.status in HELD_LEASE_STATUSES:
                 raise AlreadyClaimed()
             raise QuestionClosed()
@@ -637,11 +692,12 @@ async def report_user_contact(
     *,
     deps: QuestionDeps,
 ) -> LeaseResponse:
-    """Record that this assistant asked its user: takes (or keeps) the exclusive human-contact
-    lease, moves to ``waiting_for_user`` for ``HUMAN_RESPONSE_WINDOW`` (capped at the question
-    deadline), records ``user_contacted_at``/``contact_delivery_confirmed`` and a
-    ``user_contact_reported`` event. New outreach is refused within the outreach cooldown of ANY
-    earlier contact on the question (this assistant's included).
+    """Record that this assistant asked its user. Requires the caller's lease to hold the
+    exclusive human-contact lease already (claimed or upgraded with ``human_contact=true``,
+    which is where the outreach checks run); otherwise ``human_contact_required``, and it never
+    acquires that lease itself. Moves to ``waiting_for_user`` for ``HUMAN_RESPONSE_WINDOW``
+    (capped at the question deadline) and records ``user_contacted_at``,
+    ``contact_delivery_confirmed`` and a ``user_contact_reported`` event.
 
     A repeat report while already ``waiting_for_user`` is a re-confirmation, not new outreach:
     it may update ``contact_delivery_confirmed`` but keeps ``user_contacted_at`` and
@@ -660,6 +716,8 @@ async def report_user_contact(
             session.commit()  # frees lapsed human-contact leases (possibly this one)
             _lock_outreach(session, row.question_id)
         row = held_lease(session, assignment_id, request.lease_version, now)
+        if not row.human_contact:
+            raise HumanContactRequired()
         prior = _prior_contacts(session, row.question_id)
         re_report = row.status == AssignmentStatus.WAITING_FOR_USER.value
         values: dict[str, object]
@@ -669,11 +727,11 @@ async def report_user_contact(
             expires = row.lease_expires_at
             values = {"contact_delivery_confirmed": request.delivery_confirmed}
         else:
-            check_outreach_allowed(session, row.question_id, row.id, now)
+            # The outreach checks ran when the human-contact lease was claimed (before the user
+            # was asked); this records what happened and never acquires the lease.
             expires = min(now + HUMAN_RESPONSE_WINDOW, deadline)
             values = {
                 "status": AssignmentStatus.WAITING_FOR_USER.value,
-                "human_contact": True,
                 "user_contacted_at": now,
                 "contact_delivery_confirmed": request.delivery_confirmed,
                 "lease_expires_at": expires,

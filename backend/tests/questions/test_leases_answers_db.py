@@ -48,6 +48,7 @@ from revel.services.question_leases import (
     AssignmentNotFound,
     ClaimRequest,
     DeclineRequest,
+    HumanContactRequired,
     HumanContactTaken,
     LeaseExpired,
     LeaseVersionRequest,
@@ -293,8 +294,8 @@ async def test_second_human_contact_lease_is_rejected(
     # d2 may still work the question without contacting the user...
     lease = await claim_assignment(d2, a2, ClaimRequest(), deps=deps(factory))
     assert lease.human_contact is False
-    # ...but cannot report contacting them while d1 holds the human-contact lease.
-    with pytest.raises(HumanContactTaken):
+    # ...but cannot report contacting them without a human-contact claim.
+    with pytest.raises(HumanContactRequired):
         await report_user_contact(
             d2,
             a2,
@@ -651,7 +652,14 @@ async def test_outreach_cooldown_is_respected(
         await claim_assignment(d2, a2, ClaimRequest(human_contact=True), deps=deps(factory, clock))
     assert exc.value.retry_after_seconds == 22 * 3600
     lease2 = await claim_assignment(d2, a2, ClaimRequest(), deps=deps(factory, clock))
-    with pytest.raises(OutreachCooldown):
+    with pytest.raises(OutreachCooldown):  # upgrading the plain claim is checked the same way
+        await claim_assignment(
+            d2,
+            a2,
+            ClaimRequest(human_contact=True, lease_version=lease2.lease_version),
+            deps=deps(factory, clock),
+        )
+    with pytest.raises(HumanContactRequired):
         await report_user_contact(
             d2,
             a2,
@@ -1086,3 +1094,107 @@ async def test_get_updates_hides_items_whose_requester_can_no_longer_view(
         [tier_tuple(world.profile.id, world.requester.id, ConnectionTier.CONNECTIONS)]
     )
     assert len((await get_updates(d1, deps=deps(factory))).items) == 1
+
+
+# --- Human contact requires a prior human-contact claim; in-place upgrade -----------------------
+
+
+async def test_report_without_human_contact_lease_is_refused_and_changes_nothing(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    question_id, by_delegation = await ask(factory, world)
+    d1, a1 = agent_principal(world.owner_d1), by_delegation[world.owner_d1.id]
+    lease = await claim_assignment(d1, a1, ClaimRequest(), deps=deps(factory))
+    before = event_types(factory, question_id)
+    with pytest.raises(HumanContactRequired) as exc:
+        await report_user_contact(
+            d1,
+            a1,
+            UserContactRequest(lease_version=lease.lease_version, delivery_confirmed=True),
+            deps=deps(factory),
+        )
+    assert (exc.value.status_code, exc.value.code) == (409, "human_contact_required")
+    row = assignment(factory, a1)
+    assert (row.status, row.lease_version, row.human_contact) == ("claimed", 1, False)
+    assert row.user_contacted_at is None and row.contact_delivery_confirmed is None
+    assert event_types(factory, question_id) == before
+
+
+async def test_upgrade_claim_to_human_contact_in_place(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    clock = Clock(T0)
+    question_id, by_delegation = await ask(factory, world)
+    d1, a1 = agent_principal(world.owner_d1), by_delegation[world.owner_d1.id]
+    lease = await claim_assignment(d1, a1, ClaimRequest(), deps=deps(factory, clock))
+    # Without human_contact a held lease stays already_claimed; a stale version is refused.
+    with pytest.raises(AlreadyClaimed):
+        await claim_assignment(
+            d1, a1, ClaimRequest(lease_version=lease.lease_version), deps=deps(factory, clock)
+        )
+    with pytest.raises(StaleLease):
+        await claim_assignment(
+            d1, a1, ClaimRequest(human_contact=True, lease_version=0), deps=deps(factory, clock)
+        )
+    assert assignment(factory, a1).human_contact is False
+
+    clock.advance(timedelta(minutes=5))
+    upgraded = await claim_assignment(
+        d1,
+        a1,
+        ClaimRequest(human_contact=True, lease_version=lease.lease_version),
+        deps=deps(factory, clock),
+    )
+    assert (upgraded.status, upgraded.human_contact) == ("claimed", True)
+    assert upgraded.lease_version == lease.lease_version + 1
+    assert upgraded.lease_expires_at == lease.lease_expires_at  # kept, not extended
+    row = assignment(factory, a1)
+    assert (row.human_contact, row.lease_expires_at, row.claimed_at) == (
+        True,
+        lease.lease_expires_at,
+        T0,
+    )
+    with factory() as s:
+        claimed = s.scalars(
+            select(QuestionEvent)
+            .where(QuestionEvent.question_id == question_id, QuestionEvent.event_type == "claimed")
+            .order_by(QuestionEvent.lease_version)
+        ).all()
+    assert [e.details for e in claimed] == [
+        {"via": "mcp", "human_contact": False},
+        {"via": "mcp", "human_contact": True, "upgrade": True},
+    ]
+    # Now the user may be asked and the contact reported, then answered.
+    waiting = await report_user_contact(
+        d1,
+        a1,
+        UserContactRequest(lease_version=upgraded.lease_version, delivery_confirmed=True),
+        deps=deps(factory, clock),
+    )
+    assert waiting.status == "waiting_for_user"
+    result = await submit_answer(
+        d1, a1, answer_request(waiting.lease_version, inline()), deps=deps(factory, clock)
+    )
+    assert result.question_status == "answered"
+
+
+async def test_upgrade_blocked_by_another_agents_human_contact_lease(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    _, by_delegation = await ask(factory, world)
+    d1, d2 = agent_principal(world.owner_d1), agent_principal(world.owner_d2)
+    a1, a2 = by_delegation[world.owner_d1.id], by_delegation[world.owner_d2.id]
+    await claim_assignment(d1, a1, ClaimRequest(human_contact=True), deps=deps(factory))
+    lease2 = await claim_assignment(d2, a2, ClaimRequest(), deps=deps(factory))
+    with pytest.raises(HumanContactTaken):
+        await claim_assignment(
+            d2,
+            a2,
+            ClaimRequest(human_contact=True, lease_version=lease2.lease_version),
+            deps=deps(factory),
+        )
+    row = assignment(factory, a2)
+    assert (row.human_contact, row.lease_version) == (False, lease2.lease_version)
