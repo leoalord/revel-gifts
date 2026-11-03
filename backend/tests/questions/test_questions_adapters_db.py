@@ -207,7 +207,18 @@ def mcp_server(settings: Settings, monkeypatch: pytest.MonkeyPatch, principal: A
 async def test_mcp_tools_listed(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     server = mcp_server(settings, monkeypatch, None)
     tools = {t.name: t for t in await server.list_tools()}
-    assert set(tools) == {"submit_question", "get_updates"}
+    assert set(tools) == {
+        "submit_question",
+        "get_updates",
+        "claim_assignment",
+        "renew_assignment",
+        "release_assignment",
+        "report_user_contact",
+        "decline_assignment",
+        "submit_answer",
+        "get_question_status",
+        "get_answer",
+    }
     assert "private_purpose" in tools["submit_question"].input_schema["properties"]
     assert tools["get_updates"].input_schema.get("properties", {}) == {}
     assert tools["submit_question"].output_schema is not None
