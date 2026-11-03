@@ -254,7 +254,7 @@ async def test_shared_reads_follow_tier_policy_and_revocation_on_real_openfga(
         session,
         alex.ui,
         [
-            fact("interest", "Collects stamps", audience="public"),
+            fact("interest", "Collects stamps"),
             fact("favorite_brand", "Likes Muji", audience="connections"),
             fact("size", "Shoe size 42", details={"item": "shoes", "size": "42"}),
             fact("owned_item", "Owns a secret diary", audience="only_me"),
@@ -413,11 +413,12 @@ async def test_shared_reads_follow_tier_policy_and_revocation_on_real_openfga(
 async def test_adapters_take_only_a_handle(readers: Readers) -> None:
     tools = {t.name: t for t in await readers.mcp.list_tools()}
     tool = tools["get_profile"]
+    # RG-59: the handle is optional (omitted = the owner's own read); it is the only input.
     assert set(tool.input_schema["properties"]) == {"handle"}
-    assert tool.input_schema["required"] == ["handle"]
+    assert not tool.input_schema.get("required")
     assert tool.annotations.read_only_hint is True
-    f5_tools = ("get_contribution_policy", "add_facts", "get_my_profile", "set_fact_audience")
-    for name in (*f5_tools, "remove_fact", "get_profile"):
+    f5_tools = ("add_facts", "update_fact", "set_contribution_policy", "remove_fact")
+    for name in (*f5_tools, "get_profile"):
         assert "profile_id" not in tools[name].input_schema.get("properties", {}), name
 
     # F5's routers as composed into the app (FastAPI keeps included routers nested).
@@ -440,6 +441,82 @@ async def test_adapters_take_only_a_handle(readers: Readers) -> None:
     browser_deps = {d.call for d in routes["/api/ui/profiles/{handle}"].dependant.dependencies}
     assert current_principal in bearer_deps and current_ui_principal not in bearer_deps
     assert current_ui_principal in browser_deps and current_principal not in browser_deps
+
+
+async def test_get_profile_owner_and_shared_paths_stay_separate(
+    session: Session, fga: FakeFga, readers: Readers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RG-59: ``get_profile()`` is the owner read (get_my_profile + get_policy, owner_claims)
+    and never resolves a handle; ``get_profile(handle)`` is the shared read (resolve_handle +
+    read_shared_profile, visible_claims) and never touches the owner read, even for the
+    caller's own handle. Unknown, hidden and sharing-nothing handles look the same."""
+    people = add_people(session, "alex", "sam", "hidden", hidden=frozenset({"hidden"}))
+    alex, sam = people["alex"], people["sam"]
+    for person in people.values():
+        fga.tuples |= set(delegation_tuples(person.user.id, person.delegation.id))
+    await profiles.set_policy(session, alex.ui, PolicyUpdate(public_opt_in=True))
+    await profiles.add_facts(
+        session,
+        alex.ui,
+        [
+            fact("interest", "Collects stamps"),
+            fact("interest", "Secret hobby", audience="only_me"),
+        ],
+    )
+
+    calls: list[str] = []
+    for module, names in (
+        (profiles, ("get_my_profile", "get_policy", "read_shared_profile")),
+        (connections, ("resolve_handle",)),
+    ):
+        for name in names:
+            original = getattr(module, name)
+
+            def spy(*a: Any, _name: str = name, _orig: Any = original, **k: Any) -> Any:
+                calls.append(_name)
+                return _orig(*a, **k)
+
+            monkeypatch.setattr(module, name, spy)
+
+    readers.acting.principal = alex.agent
+    owner = (await readers.mcp.call_tool("get_profile", {})).structured_content
+    assert calls == ["get_my_profile", "get_policy"]
+    assert set(owner) == {"profile_id", "policy_version", "facts", "summary", "policy"}
+    assert {f["statement"] for f in owner["facts"]} == {"Collects stamps", "Secret hobby"}
+    assert owner["policy_version"] == 1
+    assert owner["policy"]["policy"]["version"] == 1
+    assert owner["policy"]["policy"]["public_opt_in"] is True
+    assert {"categories", "audiences", "provisional_caveat", "defaults"} <= set(owner["policy"])
+    assert owner["policy"] == (await readers.http.get("/api/v1/profile/policy")).json()
+    direct = (await readers.http.get("/api/v1/profile")).json()
+    assert owner["facts"] == direct["facts"]
+    # The summary window ("since") is relative to each call's clock; the rest is identical.
+    assert {**owner["summary"], "since": None} == {**direct["summary"], "since": None}
+    assert (direct["policy"], direct["defaults"]) == (
+        owner["policy"]["policy"],
+        owner["policy"]["defaults"],
+    )
+
+    calls.clear()
+    own_shared = (
+        await readers.mcp.call_tool("get_profile", {"handle": alex.handle})
+    ).structured_content
+    assert calls == ["resolve_handle", "read_shared_profile"]
+    assert set(own_shared) == PROFILE_KEYS
+
+    calls.clear()
+    status, body = await read(readers, sam.agent, alex.handle)
+    assert status == 200 and statements(body) == {"Collects stamps"}
+    assert "get_my_profile" not in calls and "get_policy" not in calls
+
+    # Non-revealing: the same tool error for unknown, hidden and sharing-nothing handles.
+    messages = set()
+    for handle in ("nobody_here", "hidden_demo", sam.handle):
+        status, (_, message) = await read(readers, alex.agent, handle)
+        assert status == 404
+        messages.add(message)
+    (message,) = messages
+    assert message.endswith("No Revel profile is available to you under that handle")
 
 
 async def test_errors_are_generic_and_rate_limits_map(
