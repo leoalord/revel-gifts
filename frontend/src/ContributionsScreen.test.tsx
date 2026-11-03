@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ContributionsScreen } from "./ContributionsScreen";
-import type { Fact } from "./profileApi";
+import type { Fact, RecentEvent } from "./profileApi";
 import {
   CATEGORIES,
   POLICY_V3,
@@ -499,5 +499,125 @@ describe("ContributionsScreen", () => {
     const li = item("Enjoys bouldering");
     expect(within(li).getByText("My Connections", { selector: "dd" })).toBeInTheDocument();
     expect(within(li).getByRole("option", { name: "Only Me" })).toBeInTheDocument();
+  });
+});
+
+describe("ContributionsScreen readability (RG-58)", () => {
+  function event(i: number, overrides: Partial<RecentEvent> = {}): RecentEvent {
+    return {
+      claim_id: `f-${i}`,
+      action: "auto_accepted",
+      category: "interest",
+      audience: null,
+      acceptance: "automatic",
+      actor: "Muse",
+      occurred_at: `2026-10-${String(10 + i).padStart(2, "0")}T12:00:00Z`,
+      ...overrides,
+    };
+  }
+
+  function withRecent(recent: RecentEvent[]) {
+    const base = profile(facts);
+    return mockRoutes({
+      "GET /api/ui/profile": () =>
+        jsonResponse(200, { ...base, summary: { ...base.summary, recent } }),
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3)),
+    });
+  }
+
+  it("orders the page: at a glance, then facts, then recent activity", async () => {
+    routes();
+    render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings).toEqual(["At a glance", "Facts", "Recent activity"]);
+  });
+
+  it("shows the latest six events and expands to the full fetched list with Show all", async () => {
+    const recent = Array.from({ length: 9 }, (_, i) => event(i));
+    const { calls } = withRecent(recent);
+    render(<ContributionsScreen />);
+    const table = await screen.findByRole("table");
+    expect(within(table).getAllByRole("row")).toHaveLength(1 + 6);
+
+    const toggle = screen.getByRole("button", { name: "Show all (9)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const before = calls.length;
+    await userEvent.click(toggle);
+    expect(within(table).getAllByRole("row")).toHaveLength(1 + 9);
+    expect(screen.getByRole("button", { name: "Show fewer" })).toHaveAttribute("aria-expanded", "true");
+    // Display-only: expanding re-requests nothing.
+    expect(calls.length).toBe(before);
+
+    await userEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+    expect(within(table).getAllByRole("row")).toHaveLength(1 + 6);
+  });
+
+  it("offers no Show all when every event already fits", async () => {
+    withRecent([event(1), event(2)]);
+    render(<ContributionsScreen />);
+    const table = await screen.findByRole("table");
+    expect(within(table).getAllByRole("row")).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: /^Show all/ })).toBeNull();
+  });
+
+  it("hides activity columns that carry no information and shows the action as a badge", async () => {
+    withRecent([event(1), event(2, { acceptance: null, action: "created" })]);
+    render(<ContributionsScreen />);
+    const table = await screen.findByRole("table");
+    const headers = within(table)
+      .getAllByRole("columnheader")
+      .map((h) => h.textContent);
+    expect(headers).toEqual(["When", "Action", "Category", "Who", "Acceptance"]);
+    expect(within(table).getByText("Created")).toHaveClass("badge");
+  });
+
+  it("marks agent names as registered app names (O1) but not the owner's own entries", async () => {
+    facts = [ACTIVE, fact({ id: "f-20", statement: "Owner note", contributor: "you", contributed_via: "ui" })];
+    withRecent([event(1), event(2, { actor: "you", acceptance: "explicit", action: "approved" })]);
+    render(<ContributionsScreen />);
+
+    await screen.findByText("Enjoys bouldering");
+    const agentFact = item("Enjoys bouldering");
+    const qualifier = within(agentFact).getByText("(registered app name)");
+    expect(qualifier).toHaveAttribute("title", expect.stringContaining("not a verified identity"));
+    expect(within(agentFact).getByText("Muse")).toBeInTheDocument();
+    expect(within(item("Owner note")).queryByText("(registered app name)")).toBeNull();
+
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(within(rows[0]!).getByText("(registered app name)")).toBeInTheDocument();
+    expect(within(rows[1]!).getByText("you")).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText("(registered app name)")).toBeNull();
+  });
+
+  it("omits an unknown observed date and keeps the provisional caveat", async () => {
+    facts = [fact({ observed_at: null, observed_precision: "unknown", status: "provisional", provisional: true })];
+    routes();
+    render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    const li = item("Enjoys bouldering");
+    expect(within(li).queryByText("Date unknown")).toBeNull();
+    expect(within(li).queryByText("Observed")).toBeNull();
+    expect(within(li).getByText("Provisional")).toHaveClass("badge");
+    expect(within(li).getByText(/Shared with a caveat/)).toBeInTheDocument();
+  });
+
+  it("keeps the pending callout prominent only when facts wait for review", async () => {
+    routes();
+    const { container, unmount } = render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    expect(container.querySelector(".glance-pending.has-pending")).not.toBeNull();
+    unmount();
+
+    const base = profile(facts);
+    mockRoutes({
+      "GET /api/ui/profile": () =>
+        jsonResponse(200, { ...base, summary: { ...base.summary, pending_review: 0 } }),
+      "GET /api/ui/profile/policy": () => jsonResponse(200, policyResponse(POLICY_V3)),
+    });
+    const second = render(<ContributionsScreen />);
+    await screen.findByText("Enjoys bouldering");
+    expect(second.container.querySelector(".glance-pending.has-pending")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review pending facts" })).toBeNull();
   });
 });

@@ -27,3 +27,30 @@ export function formatTime(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
+
+/**
+ * Compact local time for scannable lists, e.g. "Nov 2, 7:18 PM" (the year is added when it is
+ * not the current one). Use `formatTime` for the full value, e.g. in a `title`.
+ */
+export function formatShortTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const options: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = "numeric";
+  return date.toLocaleString(undefined, options);
+}
+
+/**
+ * F5 labels actors "you", "someone else" or "Your assistant" (no registered name); any other
+ * actor/contributor string is the agent app's self-registered name, not a verified identity.
+ */
+const UNNAMED_ACTORS = new Set(["you", "someone else", "Your assistant"]);
+
+export function isRegisteredAppName(name: string): boolean {
+  return !UNNAMED_ACTORS.has(name);
+}

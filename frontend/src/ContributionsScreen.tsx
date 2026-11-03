@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { UnauthorizedError } from "./api";
+import { ActorName } from "./ActorName";
 import { FactItem } from "./FactItem";
 import type { FactActions, FactOutcome } from "./FactItem";
-import { audienceLabeler, formatTime, humanize } from "./format";
+import { audienceLabeler, formatShortTime, formatTime, humanize } from "./format";
 import type { AudienceLabel } from "./format";
 import {
   CLAIM_STATUSES,
@@ -24,6 +25,22 @@ const ACTIONS: FactActions = {
   reject: rejectFact,
 };
 
+/** How many recent events show before "Show all" (display only; the server sends the list). */
+const RECENT_VISIBLE = 6;
+
+const ACTION_TONES: Record<string, string> = {
+  created: "info",
+  auto_accepted: "ok",
+  approved: "ok",
+  restored: "ok",
+  rejected: "danger",
+  removed: "danger",
+  audience_changed: "info",
+  updated: "info",
+  status_changed: "neutral",
+  superseded: "neutral",
+};
+
 function Counts({
   title,
   counts,
@@ -35,10 +52,10 @@ function Counts({
 }) {
   const entries = Object.entries(counts);
   return (
-    <div>
+    <div className="glance-counts">
       <h4>{title}</h4>
       {entries.length === 0 ? (
-        <p>None</p>
+        <p className="hint">None</p>
       ) : (
         <dl className="counts">
           {entries.map(([key, value]) => (
@@ -55,24 +72,23 @@ function Counts({
 
 function SummaryView({
   summary,
-  labels,
   audienceLabel,
   onShowPending,
 }: {
   summary: Summary;
-  labels: Map<string, string>;
   audienceLabel: AudienceLabel;
   onShowPending: () => void;
 }) {
+  const pending = summary.pending_review > 0;
   return (
     <section aria-labelledby="summary-heading" className="summary">
       <h3 id="summary-heading">At a glance</h3>
       <div className="glance">
-        <div className="glance-pending">
+        <div className={pending ? "glance-pending has-pending" : "glance-pending"}>
           <p>
             <span className="big-number">{summary.pending_review}</span> waiting for your review.
           </p>
-          {summary.pending_review > 0 && (
+          {pending && (
             <button type="button" className="primary" onClick={onShowPending}>
               Review pending facts
             </button>
@@ -85,37 +101,105 @@ function SummaryView({
         />
         <Counts title="By status" counts={summary.counts.by_status} />
       </div>
-      <p className="hint">Activity since {formatTime(summary.since)}.</p>
-      <h4>Recent activity</h4>
-      {summary.recent.length === 0 ? (
-        <p>No recent activity.</p>
+    </section>
+  );
+}
+
+function RecentActivity({
+  summary,
+  labels,
+  audienceLabel,
+}: {
+  summary: Summary;
+  labels: Map<string, string>;
+  audienceLabel: AudienceLabel;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const recent = summary.recent;
+  // Presentation only: collapse the already-fetched list; the server decides what is in it.
+  const shown = expanded ? recent : recent.slice(0, RECENT_VISIBLE);
+  // Columns that carry no information for any event are left out.
+  const hasCategory = recent.some((e) => e.category);
+  const hasAudience = recent.some((e) => e.audience);
+  const hasAcceptance = recent.some((e) => e.acceptance);
+  return (
+    <section aria-labelledby="activity-heading" className="activity">
+      <h3 id="activity-heading">Recent activity</h3>
+      <p className="hint">Since {formatShortTime(summary.since)}.</p>
+      {recent.length === 0 ? (
+        <p className="hint">No recent activity.</p>
       ) : (
-        <table className="recent">
-          <thead>
-            <tr>
-              <th scope="col">When</th>
-              <th scope="col">Who</th>
-              <th scope="col">Action</th>
-              <th scope="col">Category</th>
-              <th scope="col">Audience</th>
-              <th scope="col">Acceptance</th>
-            </tr>
-          </thead>
-          <tbody>
-            {summary.recent.map((event, i) => (
-              <tr key={`${event.claim_id}-${event.occurred_at}-${i}`}>
-                <td>{formatTime(event.occurred_at)}</td>
-                <td>{event.actor}</td>
-                <td>{humanize(event.action)}</td>
-                <td>
-                  {event.category ? (labels.get(event.category) ?? humanize(event.category)) : "—"}
-                </td>
-                <td>{event.audience ? audienceLabel(event.audience) : "—"}</td>
-                <td>{event.acceptance ? humanize(event.acceptance) : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <div className="table-scroll">
+            <table className="recent" id="recent-activity">
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Action</th>
+                  {hasCategory && <th scope="col">Category</th>}
+                  <th scope="col">Who</th>
+                  {hasAudience && <th scope="col">Audience</th>}
+                  {hasAcceptance && <th scope="col">Acceptance</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((event, i) => (
+                  <tr key={`${event.claim_id}-${event.occurred_at}-${i}`}>
+                    <td className="when" title={formatTime(event.occurred_at)}>
+                      {formatShortTime(event.occurred_at)}
+                    </td>
+                    <td>
+                      <span className={`badge badge-sm tone-${ACTION_TONES[event.action] ?? "neutral"}`}>
+                        {humanize(event.action)}
+                      </span>
+                    </td>
+                    {hasCategory && (
+                      <td>
+                        {event.category ? (
+                          (labels.get(event.category) ?? humanize(event.category))
+                        ) : (
+                          <span className="empty">—</span>
+                        )}
+                      </td>
+                    )}
+                    <td className="who">
+                      <ActorName name={event.actor} />
+                    </td>
+                    {hasAudience && (
+                      <td>
+                        {event.audience ? (
+                          audienceLabel(event.audience)
+                        ) : (
+                          <span className="empty">—</span>
+                        )}
+                      </td>
+                    )}
+                    {hasAcceptance && (
+                      <td className="secondary">
+                        {event.acceptance ? (
+                          humanize(event.acceptance)
+                        ) : (
+                          <span className="empty">—</span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {recent.length > RECENT_VISIBLE && (
+            <button
+              type="button"
+              className="link-button"
+              aria-expanded={expanded}
+              aria-controls="recent-activity"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "Show fewer" : `Show all (${recent.length})`}
+            </button>
+          )}
+        </>
       )}
     </section>
   );
@@ -203,7 +287,6 @@ export function ContributionsScreen() {
 
       <SummaryView
         summary={profile.summary}
-        labels={labels}
         audienceLabel={audienceLabel}
         onShowPending={() => {
           // Presentation only: the server filters via ?status=.
@@ -212,25 +295,27 @@ export function ContributionsScreen() {
         }}
       />
 
-      <section aria-labelledby="facts-heading">
-        <h3 id="facts-heading">Facts</h3>
-        <div className="field">
-          <label htmlFor="status-filter">Show</label>
-          <select
-            id="status-filter"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value as ClaimStatus | "")}
-          >
-            <option value="">Live and pending review</option>
-            {CLAIM_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {humanize(s)}
-              </option>
-            ))}
-          </select>
+      <section aria-labelledby="facts-heading" className="facts-section">
+        <div className="section-head">
+          <h3 id="facts-heading">Facts</h3>
+          <div className="field inline-field">
+            <label htmlFor="status-filter">Show</label>
+            <select
+              id="status-filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value as ClaimStatus | "")}
+            >
+              <option value="">Live and pending review</option>
+              {CLAIM_STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {humanize(s)}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         {profile.facts.length === 0 ? (
-          <p>No facts to show.</p>
+          <p className="hint">No facts to show.</p>
         ) : (
           <ul className="facts">
             {profile.facts.map((fact) => (
@@ -247,6 +332,8 @@ export function ContributionsScreen() {
           </ul>
         )}
       </section>
+
+      <RecentActivity summary={profile.summary} labels={labels} audienceLabel={audienceLabel} />
     </section>
   );
 }
