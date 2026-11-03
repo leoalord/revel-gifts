@@ -327,6 +327,23 @@ async def test_only_the_assignments_own_delegation_may_act(
     assert assignment(factory, a1).status == "available"
 
 
+async def test_made_available_events_use_the_service_clock(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    # All question events share one clock, so the event log orders correctly against later
+    # lease events (and the outreach cooldown that reads occurred_at) under clock skew.
+    world = await world_builder()
+    question_id, _ = await ask(factory, world)
+    with factory() as s:
+        stamps = s.scalars(
+            select(QuestionEvent.occurred_at).where(
+                QuestionEvent.question_id == question_id,
+                QuestionEvent.event_type == "made_available",
+            )
+        ).all()
+    assert stamps and set(stamps) == {T0}
+
+
 # --- The human-contact path (MVP acceptance) ----------------------------------------------------
 
 
