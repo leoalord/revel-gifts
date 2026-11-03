@@ -471,3 +471,23 @@ async def test_respond_check_timeout_is_unavailable(
             deps=world.deps(factory, fga=SlowRespond(fga)),
         )
     assert count(factory, Question) == 0
+
+
+async def test_get_updates_overall_authz_deadline_is_unavailable(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from revel.services import questions as questions_service
+
+    world = await world_builder()
+    await submit_question(
+        agent_principal(world.requester_d), demo_request(), deps=world.deps(factory)
+    )
+
+    async def slow_respond(*args: Any, **kwargs: Any) -> bool:
+        await anyio.sleep(1)
+        return True
+
+    monkeypatch.setattr(questions_service, "respond_allowed", slow_respond)
+    monkeypatch.setattr(questions_service, "GET_UPDATES_AUTHZ_DEADLINE_SECONDS", 0.05)
+    with pytest.raises(QuestionServiceUnavailable):
+        await get_updates(agent_principal(world.owner_d1), deps=world.deps(factory))

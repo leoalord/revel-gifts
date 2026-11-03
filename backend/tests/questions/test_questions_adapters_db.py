@@ -210,18 +210,84 @@ async def test_mcp_tools_listed(settings: Settings, monkeypatch: pytest.MonkeyPa
     assert set(tools) == {
         "submit_question",
         "get_updates",
+        "update_assignment",
+        "submit_answer",
+        "get_question",
+    }
+    for old in (
         "claim_assignment",
         "renew_assignment",
         "release_assignment",
         "report_user_contact",
         "decline_assignment",
-        "submit_answer",
         "get_question_status",
         "get_answer",
-    }
+    ):
+        assert old not in tools
+    ann = tools["update_assignment"].annotations
+    assert ann is not None and ann.read_only_hint is False and ann.destructive_hint is False
+    assert tools["update_assignment"].input_schema["properties"]["action"]["enum"] == [
+        "claim",
+        "renew",
+        "release",
+        "decline",
+        "report_user_contact",
+    ]
+    assert tools["update_assignment"].output_schema is not None
+    gq = tools["get_question"].annotations
+    assert gq is not None and gq.read_only_hint is True
+    assert tools["get_question"].output_schema is not None
     assert "private_purpose" in tools["submit_question"].input_schema["properties"]
     assert tools["get_updates"].input_schema.get("properties", {}) == {}
     assert tools["submit_question"].output_schema is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            {"action": "bogus"},
+            "Unknown action 'bogus' for update_assignment; expected one of: claim, renew, "
+            "release, decline, report_user_contact.",
+        ),
+        ({"action": "renew"}, "Action 'renew' requires lease_version."),
+        ({"action": "release"}, "Action 'release' requires lease_version."),
+        (
+            {"action": "renew", "lease_version": 1, "human_contact": True},
+            "Action 'renew' does not accept human_contact.",
+        ),
+        (
+            {"action": "claim", "delivery_confirmed": True},
+            "Action 'claim' does not accept delivery_confirmed.",
+        ),
+        ({"action": "claim", "reason": "other"}, "Action 'claim' does not accept reason."),
+        (
+            {"action": "report_user_contact", "lease_version": 1},
+            "Action 'report_user_contact' requires delivery_confirmed.",
+        ),
+        (
+            {"action": "report_user_contact", "delivery_confirmed": False},
+            "Action 'report_user_contact' requires lease_version.",
+        ),
+        (
+            {"action": "decline", "human_contact": False},
+            "Action 'decline' does not accept human_contact.",
+        ),
+        (
+            {"action": "decline", "delivery_confirmed": True},
+            "Action 'decline' does not accept delivery_confirmed.",
+        ),
+    ],
+)
+async def test_mcp_update_assignment_validation(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, args: dict[str, Any], message: str
+) -> None:
+    server = mcp_server(settings, monkeypatch, None)
+    payload = {"assignment_id": "00000000-0000-0000-0000-000000000001", **args}
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool("update_assignment", payload)
+    assert str(exc.value).endswith(f"invalid_request: {message}")
 
 
 @pytest.mark.anyio
