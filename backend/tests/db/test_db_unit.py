@@ -104,8 +104,9 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0004_delegation_reconnect"]
+    assert script.get_heads() == ["0005_connection_owner_confirmed"]
     assert [rev.revision for rev in script.walk_revisions()] == [
+        "0005_connection_owner_confirmed",
         "0004_delegation_reconnect",
         "0003_connections_questions",
         "0002_profile",

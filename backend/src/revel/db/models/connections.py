@@ -60,7 +60,8 @@ class ConnectionRequest(TimestampMixin, Base):
     a duplicate request returns the existing row and a block persists. ``responded_at`` is set
     whenever the request leaves ``pending``. ``(requester_user_id, created_at)`` supports rate
     limits. ``responder_delegation_id`` records the target's agent when the target responded
-    through it (NULL for UI responses).
+    through it (NULL for UI responses). ``owner_confirmed_at`` records when the owner confirmed an
+    agent's approval or tier upgrade (only on approved/revoked rows; NULL on pre-policy rows).
     """
 
     __tablename__ = "connection_requests"
@@ -74,6 +75,10 @@ class ConnectionRequest(TimestampMixin, Base):
         ),
         CheckConstraint(
             "(status = 'pending') = (responded_at IS NULL)", name="responded_at_matches_status"
+        ),
+        CheckConstraint(
+            "owner_confirmed_at IS NULL OR status IN ('approved', 'revoked')",
+            name="owner_confirmed_at_matches_status",
         ),
         # The requesting delegation must belong to the requester (MATCH SIMPLE: NULL allowed).
         ForeignKeyConstraint(
@@ -120,3 +125,5 @@ class ConnectionRequest(TimestampMixin, Base):
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Audit: the target's delegation that responded, when the target responded via an agent.
     responder_delegation_id: Mapped[uuid.UUID | None] = mapped_column()
+    # When the owner confirmed an agent's approval or tier upgrade (NULL: UI or pre-policy).
+    owner_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

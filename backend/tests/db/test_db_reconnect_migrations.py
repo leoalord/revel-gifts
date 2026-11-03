@@ -25,6 +25,7 @@ RunAlembic = Callable[..., None]
 SESSIONS = "agent_delegation_sessions"
 UQ_ACTIVE = "uq_agent_delegations_user_id_agent_id_active"
 OLD_UQ = "uq_agent_delegations_user_id_agent_id"
+HEAD = "0005_connection_owner_confirmed"
 
 
 @pytest.fixture
@@ -257,7 +258,7 @@ def test_downgrade_to_0003_round_trip(migrated_engine: Engine, run_alembic: RunA
     assert SESSIONS in inspector.get_table_names()
     assert UQ_ACTIVE in {ix["name"] for ix in inspector.get_indexes("agent_delegations")}
     assert OLD_UQ not in {u["name"] for u in inspector.get_unique_constraints("agent_delegations")}
-    assert _revision(migrated_engine) == "0004_delegation_reconnect"
+    assert _revision(migrated_engine) == HEAD
 
 
 def test_upgrade_keeps_existing_delegations(
@@ -302,8 +303,8 @@ def test_downgrade_refuses_reconnect_history(
     try:
         with pytest.raises(DBAPIError, match="Cannot downgrade 0004_delegation_reconnect"):
             run_alembic(command.downgrade, "0003_connections_questions")
-        # Nothing changed: still at 0004 with both rows and the sessions table.
-        assert _revision(migrated_engine) == "0004_delegation_reconnect"
+        # Nothing changed (one transaction): still at head with both rows and the sessions table.
+        assert _revision(migrated_engine) == HEAD
         assert SESSIONS in inspect(migrated_engine).get_table_names()
         with migrated_engine.connect() as connection:
             rows = connection.execute(
@@ -330,7 +331,7 @@ def test_downgrade_refuses_reconnect_history(
             connection.execute(delete(AgentDelegation).where(AgentDelegation.user_id == user_id))
             connection.execute(delete(User).where(User.id == user_id))
             connection.execute(delete(Agent).where(Agent.id == agent_id))
-    assert _revision(migrated_engine) == "0004_delegation_reconnect"
+    assert _revision(migrated_engine) == HEAD
 
 
 def test_upgrade_fails_fast_on_lock_timeout(
@@ -348,7 +349,7 @@ def test_upgrade_fails_fast_on_lock_timeout(
         assert _revision(migrated_engine) == "0003_connections_questions"
     finally:
         run_alembic(command.upgrade, "head")
-    assert _revision(migrated_engine) == "0004_delegation_reconnect"
+    assert _revision(migrated_engine) == HEAD
 
 
 def test_offline_sql_sets_lock_timeout_and_guard(
