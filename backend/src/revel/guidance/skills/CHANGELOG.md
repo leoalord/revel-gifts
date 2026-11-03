@@ -1,11 +1,22 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.5.3
+version: 0.5.4
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.5.4 (2026-11-03)
+
+- Connections owner confirmation (F6, RG-27 follow-up): `revel-connect-and-read` gains a
+  "Getting the owner's yes" section. Approving a request and upgrading a connection to
+  `trusted_circle` need `owner_confirmed` true, using the same two-step flow as owner controls:
+  call without the flag, quote Revel's `owner_confirmation_required` change list word for word,
+  and repeat the identical call with the flag only after the owner's clear yes. Declining,
+  blocking, downgrading, revoking and cancelling need no flag. Examples show both steps.
+- Index: the widening sentence, the connections error note and the route catalog rows for
+  `respond_to_connection_request` and `change_connection_tier` mention the confirmation.
 
 ## 0.5.3 (2026-11-03)
 
