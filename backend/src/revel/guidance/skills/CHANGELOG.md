@@ -1,18 +1,27 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.4.1
+version: 0.4.2
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.4.2 (2026-11-02)
+
+- F7's human-contact change is merged: nothing is PROVISIONAL any more.
+- `revel-answer-question`: upgrade a plain claim you hold by calling `claim_assignment` with
+  `human_contact` true and your current `lease_version` (new `lease_version`, same expiry);
+  a plain claim again is still `already_claimed`. `report_user_contact` without a
+  human-contact lease fails with `human_contact_required`. The upgrade example and these codes
+  are checked against F7's code, with a database test of the upgrade path.
 
 ## 0.4.1 (2026-11-02)
 
 - `revel-answer-question`: never contact your user unless a claim with `human_contact` true has
   succeeded and you hold that lease. Decide before claiming; a second claim on your own lease
   is `already_claimed`, which is never permission to contact your user. Upgrading a held claim
-  in place and the `human_contact_required` error are marked PROVISIONAL until F7's pending <!-- PROVISIONAL: F7 pending PR (human_contact upgrade and human_contact_required) -->
+  in place and the `human_contact_required` error are marked PROVISIONAL until F7's pending
   change merges. Adds the `duplicate claim` evidence reason.
 - `revel-connect-and-read`: the `get_profile` not-found error means not available or no shared
   facts; an empty `facts` list and Public facts for unconnected viewers are explained;

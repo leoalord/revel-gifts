@@ -33,7 +33,8 @@ GIVER = "revel-giver-workflow"
 ANSWER = "revel-answer-question"
 SKILLS = (CONNECT, GIVER, ANSWER)
 
-FENCE = re.compile(r"^```json ([a-z_]+)([^\n]*)\n(.*?)\n```$", re.M | re.S)
+# Fences may be indented inside a list item.
+FENCE = re.compile(r"^ *```json ([a-z_]+)([^\n]*)\n(.*?)\n *```$", re.M | re.S)
 BACKTICK = re.compile(r"`([^`\n]+)`")
 NEGATION = re.compile(r"\b(never|not|no|without)\b", re.I)
 
@@ -289,6 +290,7 @@ ANSWER_CODES = {
     "already_claimed",
     "renewal_limit",
     "human_contact_taken",
+    "human_contact_required",
     "outreach_cooldown",
     "question_expired",
     "question_closed",
@@ -327,6 +329,18 @@ def test_answer_never_contacts_user_without_human_contact_lease() -> None:
     assert "Only after that claim succeeds, ask your user" in flat
     assert "never treat this as permission to contact your user" in flat
     assert "release_assignment` first" not in flat  # F7: no release-and-reclaim advice
+    assert "only the human-contact upgrade with your current `lease_version` succeeds" in flat
+
+
+def test_answer_upgrade_example_is_a_claim_request() -> None:
+    upgrades = [d for tool, _, d in examples(ANSWER) if tool == "claim_assignment"]
+    assert upgrades, "no claim_assignment upgrade example"
+    for data in upgrades:
+        request = question_leases.ClaimRequest.model_validate(
+            {k: v for k, v in data.items() if k != "assignment_id"}
+        )
+        # F7 upgrades in place only with human_contact and the current lease_version.
+        assert request.human_contact is True and request.lease_version is not None
 
 
 def test_answer_limits_match_f7() -> None:

@@ -154,22 +154,12 @@ def test_no_forbidden_content(name: str) -> None:
         assert match.group(1).startswith(("<access", "error=")), f"{name}: {match.group(0)}"
 
 
-# Only F7's pending human-contact change (0.4.1) may still be provisional; remove it, its
-# markers and this allowance once F7's PR merges and tests bind to the real code.
-PENDING_F7 = frozenset({"human_contact_required"})
-MARKED_DOCS = frozenset({"revel-answer-question", "CHANGELOG"})
-
-
-def test_only_pending_f7_change_is_provisional() -> None:
-    assert set(PROVISIONAL_OPERATIONS) == PENDING_F7
+def test_no_provisional_markers_remain() -> None:
+    # 0.4.2: F5 #9/#28, F6 #15 and F7 #19/#20/#36 are merged, so nothing is provisional.
+    assert PROVISIONAL_OPERATIONS == {}
     for name in DOC_NAMES:
-        body = documents()[name].body
-        assert "live today" not in body, name
-        if name not in MARKED_DOCS:
-            assert PROVISIONAL_MARKER not in body, name
-        for line in body.split("\n"):
-            if PROVISIONAL_MARKER in line:
-                assert "F7 pending PR" in line, f"{name}: {line}"
+        assert PROVISIONAL_MARKER not in documents()[name].body, name
+        assert "live today" not in documents()[name].body, name
 
 
 def test_implemented_http_routes_exist_in_openapi(client: TestClient) -> None:
