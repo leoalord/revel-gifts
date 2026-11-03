@@ -17,6 +17,28 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "get_my_profile",
         "set_fact_audience",
         "remove_fact",
+        # F5 #28, merged (PR #34): docs/contracts/f5-profiles.md "Shared profile reads"
+        "get_profile",
+        # F6 #15, merged: revel/mcp/connection_tools.py
+        "set_handle",
+        "request_connection",
+        "list_connection_requests",
+        "respond_to_connection_request",
+        "list_connections",
+        "change_connection_tier",
+        "revoke_connection",
+        "cancel_connection_request",
+        # F7 #19/#20, merged (PR #33): revel/mcp/question_tools.py
+        "submit_question",
+        "get_updates",
+        "claim_assignment",
+        "renew_assignment",
+        "release_assignment",
+        "report_user_contact",
+        "decline_assignment",
+        "submit_answer",
+        "get_question_status",
+        "get_answer",
     }
 )
 IMPLEMENTED_HTTP = frozenset(
@@ -30,31 +52,24 @@ IMPLEMENTED_HTTP = frozenset(
         "POST /api/v1/profile/facts",
         "GET /api/v1/profile",
         "GET /api/v1/profile/summary",
-        "PATCH /api/v1/profile/facts/{id}/audience",
-        "DELETE /api/v1/profile/facts/{id}",
+        "PATCH /api/v1/profile/facts/{fact_id}/audience",
+        "DELETE /api/v1/profile/facts/{fact_id}",
+        # F5 #28, merged
+        "GET /api/v1/profiles/{handle}",
+        # F7 #19/#20, merged (bearer; revel/api/questions.py)
+        "POST /api/questions",
+        "GET /api/updates",
+        "POST /api/assignments/{assignment_id}/claim",
+        "POST /api/assignments/{assignment_id}/renew",
+        "POST /api/assignments/{assignment_id}/release",
+        "POST /api/assignments/{assignment_id}/user-contact",
+        "POST /api/assignments/{assignment_id}/decline",
+        "POST /api/assignments/{assignment_id}/answer",
+        "GET /api/questions/{question_id}",
+        "GET /api/questions/{question_id}/answer",
     }
 )
 
-# Operation -> owning feature. None of these are merged yet.
-PROVISIONAL_OPERATIONS: dict[str, str] = {
-    # F5 follow-up (get_profile) and F6 #15 (PR #23 @ 93da408, in review)
-    "get_profile": "F5/F6",
-    "set_handle": "F6",
-    "request_connection": "F6",
-    "list_connection_requests": "F6",
-    "respond_to_connection_request": "F6",
-    "list_connections": "F6",
-    "change_connection_tier": "F6",
-    "revoke_connection": "F6",
-    "cancel_connection_request": "F6",
-    # F7 #19/#20 (no contract published yet; names agreed with the F7 orchestrator, may change)
-    "submit_question": "F7",
-    "get_answer": "F7",
-    "get_updates": "F7",
-    "claim_assignment": "F7",
-    "renew_assignment": "F7",
-    "release_assignment": "F7",
-    "decline_assignment": "F7",
-    "report_user_contact": "F7",
-    "submit_answer": "F7",
-}
+# Operation -> owning feature, for operations guidance may mention before they are merged.
+# Empty since 0.4.0: every operation the guidance names is merged (F5 #9/#28, F6 #15, F7 #19/#20).
+PROVISIONAL_OPERATIONS: dict[str, str] = {}

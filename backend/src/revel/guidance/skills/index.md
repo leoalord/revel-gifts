@@ -1,8 +1,8 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.3.0
-status: draft
+version: 0.4.0
+status: active
 ---
 
 # Revel Gifts agent guidance
@@ -14,16 +14,25 @@ and can ask surprise-safe questions.
 ## What works today
 
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
-- MCP tools: `ping` (connectivity check) and `whoami` (which Revel user and assistant you are
-  connected as).
+- `ping` (connectivity check) and `whoami` (which Revel user and assistant you are connected
+  as).
 - Your user's own profile: `get_contribution_policy`, `add_facts`, `get_my_profile`,
   `set_fact_audience` and `remove_fact` (see `revel-profile-discovery`).
+- Connections and shared profiles: `set_handle`, `request_connection`,
+  `list_connection_requests`, `respond_to_connection_request`, `list_connections`,
+  `change_connection_tier`, `revoke_connection`, `cancel_connection_request` and `get_profile`
+  (see `revel-connect-and-read`).
+- Questions, as the asker: `submit_question`, `get_question_status` and `get_answer` (see
+  `revel-giver-workflow`).
+- Questions, as your user's assistant: `get_updates`, `claim_assignment`, `renew_assignment`,
+  `release_assignment`, `report_user_contact`, `decline_assignment` and `submit_answer` (see
+  `revel-answer-question`).
 - This guidance: as MCP prompts and resources (`revel://guidance/<name>`) and as Markdown at
   `https://api.revel.gifts/guidance`.
 - API reference: `https://api.revel.gifts/openapi.json`.
 
-Connections, reading other people's profiles and questions are **planned, not yet available**.
-Do not tell your user a request or question was sent. Use only the tools in your tool list.
+Use only the tools in your tool list. Never tell your user a request, question or answer was
+sent unless Revel confirmed it.
 
 ## Connecting (MCP OAuth)
 
@@ -59,7 +68,7 @@ the same name. Changes are listed in `https://api.revel.gifts/guidance/CHANGELOG
 
 ## Route catalog
 
-Live now (your user's own profile; MCP tool and HTTP route):
+MCP tools and the matching HTTP routes (bearer token):
 
 | Purpose | MCP tool | HTTP |
 | --- | --- | --- |
@@ -67,30 +76,42 @@ Live now (your user's own profile; MCP tool and HTTP route):
 | Contribute facts (and corrections with `supersedes_id`) | `add_facts` | `POST /api/v1/profile/facts` |
 | Read your user's own profile and summary | `get_my_profile` | `GET /api/v1/profile` |
 | Contribution summary | (in `get_my_profile`) | `GET /api/v1/profile/summary` |
-| Narrow a fact's audience | `set_fact_audience` | `PATCH /api/v1/profile/facts/{id}/audience` |
-| Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{id}` |
+| Narrow a fact's audience | `set_fact_audience` | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
+| Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{fact_id}` |
+| Read a person's shared profile by exact handle | `get_profile` | `GET /api/v1/profiles/{handle}` |
+| Set your user's handle and discoverability | `set_handle` | MCP only |
+| Request a connection by exact handle | `request_connection` | MCP only |
+| List incoming or outgoing requests | `list_connection_requests` | MCP only |
+| Approve (with tier), decline or block a request | `respond_to_connection_request` | MCP only |
+| List people your user approved | `list_connections` | MCP only |
+| Change a tier, revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` | MCP only |
+| Ask a question | `submit_question` | `POST /api/questions` |
+| Check a question you asked | `get_question_status` | `GET /api/questions/{question_id}` |
+| Get the answer to a question you asked | `get_answer` | `GET /api/questions/{question_id}/answer` |
+| Get assigned work | `get_updates` | `GET /api/updates` |
+| Claim an assignment | `claim_assignment` | `POST /api/assignments/{assignment_id}/claim` |
+| Renew a lease | `renew_assignment` | `POST /api/assignments/{assignment_id}/renew` |
+| Release a lease | `release_assignment` | `POST /api/assignments/{assignment_id}/release` |
+| Report that you asked your user | `report_user_contact` | `POST /api/assignments/{assignment_id}/user-contact` |
+| Decline an assignment | `decline_assignment` | `POST /api/assignments/{assignment_id}/decline` |
+| Answer a question | `submit_answer` | `POST /api/assignments/{assignment_id}/answer` |
 
 The HTTP routes take a bearer token, but how assistants obtain one for the HTTP API is not
-decided yet; use MCP. HTTP returns `422` for structural problems and `400` for semantic field
-errors.
+decided yet; use MCP. Connections have no bearer HTTP API; the Revel website's own connection
+routes are not for assistants.
 
-Planned, not yet available. Names and paths may change before release.
+Errors differ by area:
 
-| Purpose | MCP tool | HTTP (bearer) |
-| --- | --- | --- |
-| Set your user's handle and discoverability | `set_handle` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| Request a connection by exact handle | `request_connection` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| List incoming or outgoing requests | `list_connection_requests` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| Approve (with tier), decline or block a request | `respond_to_connection_request` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| List people your user approved | `list_connections` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| Change a tier, revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` <!-- PROVISIONAL: validate against merged F6 contract --> | to be published <!-- PROVISIONAL --> |
-| Read a connection's shared profile | `get_profile` <!-- PROVISIONAL: validate against merged F5/F6 contract --> | to be published <!-- PROVISIONAL --> |
-| Ask a question | `submit_question` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Get the answer to a question you asked | `get_answer` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Get assigned work | `get_updates` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Claim, renew, release or decline an assignment | `claim_assignment`, `renew_assignment`, `release_assignment`, `decline_assignment` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Report that you asked your user | `report_user_contact` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
-| Answer a question | `submit_answer` <!-- PROVISIONAL: validate against merged F7 contract --> | to be published <!-- PROVISIONAL --> |
+- Profile: `POST /api/v1/profile/facts` returns `200` with one outcome per item, including
+  `rejected` items with their `reason_code`; `400` means the request as a whole was invalid,
+  and `422` is a structural problem (a wrong type or enum value, a missing or unknown field).
+  MCP tool errors are fixed messages.
+- Shared profiles: `404` (MCP: "No Revel profile is available to you under that handle") means
+  not available, for every reason.
+- Connections: MCP tool errors are fixed, generic messages (see `revel-connect-and-read`).
+- Questions: MCP errors read `<code>: <message>`; HTTP errors are
+  `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
+  `outreach_cooldown`.
 
 Agents can never change the owner's contribution policy, widen an audience or approve
 pending items; owners do that in the Revel website.

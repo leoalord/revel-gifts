@@ -1,8 +1,10 @@
 """Content lint for canonical guidance: live vs provisional operations, forbidden content."""
 
 import re
+from collections.abc import Iterable
 
 import pytest
+from fastapi.testclient import TestClient
 
 from revel.guidance import documents, render_markdown
 from revel.guidance.operations import (
@@ -13,88 +15,28 @@ from revel.guidance.operations import (
 )
 
 from .test_discovery_f5 import F5_VOCABULARY
+from .test_skills_f6_f7 import F6_F7_VOCABULARY
 
 DOC_NAMES = list(documents())
 BACKTICK = re.compile(r"`([^`\n]+)`")
 HTTP_ROUTE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE) (/\S*)$")
 IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# Backticked lowercase identifiers that are field names or enum values, not operations.
-FIELDS_AND_VALUES = frozenset(
-    {
-        # F5 categories and fields/enums (provisional contract)
-        "interest",
-        "dislike",
-        "owned_item",
-        "size",
-        "birthday",
-        "location",
-        "category",
-        "statement",
-        "details",
-        "evidence_type",
-        "explicit",
-        "observed",
-        "inferred",
-        "confidence",
-        "low",
-        "medium",
-        "high",
-        "unknown",
-        "observed_at",
-        "observed_precision",
-        "day",
-        "month",
-        "year",
-        "audience",
-        "trusted_circle",
-        "supersedes_id",
-        "accepted",
-        "pending_review",
-        "rejected",
-        "reason_code",
-        "forbidden_category",
-        "resource",
-        "authorization_servers",
-        # F7 fields/states (Questions page)
-        "question",
-        "private_purpose",
-        "deadline",
-        "escalation",
-        "type",
-        "evidence",
-        "waiting_for_user",
-        # F5 additions at 935dfde / announced by F5 (provisional)
-        "sensitive",
-        "only_me",
-        "sensitive_not_explicit",
-        "involves_others",
-        # F6 parameters and values at PR #23 @ 93da408 (provisional)
-        "handle",
-        "direction",
-        "incoming",
-        "outgoing",
-        "request_id",
-        "action",
-        "approve",
-        "decline",
-        "block",
-        "tier",
-        "connections",
-        "true",
-        "invalid_field",
-        "invalid_details",
-        "enrichment_disabled",
-    }
-)
+# Backticked lowercase identifiers that are not derived from F5/F6/F7 code (see
+# ``F5_VOCABULARY`` and ``F6_F7_VOCABULARY``): OAuth metadata fields and a JSON literal.
+FIELDS_AND_VALUES = frozenset({"resource", "authorization_servers", "true"})
 ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS)
 DOC_NAME_TOKENS = frozenset(DOC_NAMES)
 
 
 API_PATH = re.compile(r"/api/[^\s`|]*")
-PROVISIONAL_PATTERNS = {
-    op: re.compile(rf"(?<![\w/]){re.escape(op)}(?![\w/])") for op in PROVISIONAL_OPERATIONS
-}
+
+
+def provisional_patterns(operations: Iterable[str]) -> dict[str, re.Pattern[str]]:
+    return {op: re.compile(rf"(?<![\w/]){re.escape(op)}(?![\w/])") for op in operations}
+
+
+PROVISIONAL_PATTERNS = provisional_patterns(PROVISIONAL_OPERATIONS)
 
 
 def unknown_tokens(text: str) -> list[str]:
@@ -106,18 +48,25 @@ def unknown_tokens(text: str) -> list[str]:
                 if token not in IMPLEMENTED_HTTP and token not in PROVISIONAL_OPERATIONS:
                     found.append(f"{number}: route {token!r}")
             elif IDENT.match(token) and token not in (
-                ALL_OPERATIONS | FIELDS_AND_VALUES | DOC_NAME_TOKENS | F5_VOCABULARY
+                ALL_OPERATIONS
+                | FIELDS_AND_VALUES
+                | DOC_NAME_TOKENS
+                | F5_VOCABULARY
+                | F6_F7_VOCABULARY
             ):
                 found.append(f"{number}: {token!r}")
     return found
 
 
-def unmarked_provisional(text: str) -> list[str]:
+def unmarked_provisional(
+    text: str, patterns: dict[str, re.Pattern[str]] | None = None
+) -> list[str]:
     """Lines mentioning a provisional operation, or an /api/ path that is not implemented,
     without the marker."""
+    patterns = PROVISIONAL_PATTERNS if patterns is None else patterns
     found = []
     for number, line in enumerate(text.split("\n"), start=1):
-        mentioned = [op for op, p in PROVISIONAL_PATTERNS.items() if p.search(line)]
+        mentioned = [op for op, p in patterns.items() if p.search(line)]
         unlisted_api = [
             path
             for path in API_PATH.findall(line)
@@ -142,8 +91,10 @@ def test_provisional_operations_are_marked(name: str) -> None:
 
 
 def test_lint_catches_violations() -> None:
-    assert unmarked_provisional("Call `get_updates` now.") == ["1: ['get_updates']"]
-    assert unmarked_provisional("Call `get_updates`. <!-- PROVISIONAL: x -->") == []
+    future = provisional_patterns({"future_tool"})  # no operation is provisional since 0.4.0
+    assert unmarked_provisional("Call `future_tool` now.", future) == ["1: ['future_tool']"]
+    assert unmarked_provisional("Call `future_tool`. <!-- PROVISIONAL: x -->", future) == []
+    assert unmarked_provisional("Call `get_updates` now.") == []
     assert unmarked_provisional("Use `GET /api/v1/x`.") == ["1: ['/api/v1/x']"]
     assert unmarked_provisional("Use `GET /api/v1/profile/policy`.") == []
     assert unmarked_provisional("Call `add_facts`.") == []
@@ -203,10 +154,40 @@ def test_no_forbidden_content(name: str) -> None:
         assert match.group(1).startswith(("<access", "error=")), f"{name}: {match.group(0)}"
 
 
-def test_no_stale_f5_markers() -> None:
-    # F5 #9 is merged: its operations are live and must not be marked provisional any more.
+def test_no_provisional_markers_remain() -> None:
+    # 0.4.0: F5 #9/#28, F6 #15 and F7 #19/#20 are merged, so nothing is provisional.
+    assert PROVISIONAL_OPERATIONS == {}
     for name in DOC_NAMES:
-        assert "validate against merged F5 contract" not in documents()[name].body, name
+        assert PROVISIONAL_MARKER not in documents()[name].body, name
+        assert "live today" not in documents()[name].body, name
+
+
+def test_implemented_http_routes_exist_in_openapi(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+    published = {f"{method.upper()} {path}" for path, ops in paths.items() for method in ops}
+    # FastAPI's own schema and the OAuth metadata routes are served outside the schema (the
+    # metadata answers 503 here because the test settings configure no WorkOS domain).
+    for route in sorted(IMPLEMENTED_HTTP - published):
+        method, path = route.split(" ", 1)
+        assert method == "GET" and client.get(path).status_code in {200, 503}, route
+
+
+def test_index_lists_every_registered_tool_and_bearer_route(client: TestClient) -> None:
+    from revel.mcp.server import create_mcp_server
+    from revel.settings import Settings
+
+    settings = Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    server = create_mcp_server(settings)
+    registered = {t.name for t in server._tool_manager.list_tools()}
+    assert registered == IMPLEMENTED_MCP_TOOLS  # no unlisted (or missing) tool
+    index = documents()["index"].body
+    for tool in registered:
+        assert f"`{tool}`" in index, tool
+    paths = client.get("/openapi.json").json()["paths"]
+    for path, ops in paths.items():
+        if path.startswith(("/api/v1/", "/api/questions", "/api/updates", "/api/assignments")):
+            for method in ops:
+                assert f"`{method.upper()} {path}`" in index, f"{method.upper()} {path}"
 
 
 @pytest.mark.anyio
