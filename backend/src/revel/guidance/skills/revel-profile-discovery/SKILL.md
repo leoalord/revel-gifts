@@ -1,7 +1,7 @@
 ---
 name: revel-profile-discovery
 description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.5.2
+version: 0.5.3
 status: active
 ---
 

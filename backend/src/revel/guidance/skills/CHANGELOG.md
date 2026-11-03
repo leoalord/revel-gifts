@@ -1,11 +1,16 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.5.2
+version: 0.5.3
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.5.3 (2026-11-03)
+
+- Index: the own-profile tools in "What works today" now include `set_contribution_policy`
+  and `review_pending_fact`, matching the route catalog (F5 review O2).
 
 ## 0.5.2 (2026-11-03)
 

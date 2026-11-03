@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.5.2
+version: 0.5.3
 status: active
 ---
 
@@ -16,8 +16,9 @@ and can ask surprise-safe questions.
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
 - `ping` (connectivity check) and `whoami` (which Revel user and assistant you are connected
   as).
-- Your user's own profile: `get_contribution_policy`, `add_facts`, `get_my_profile`,
-  `set_fact_audience` and `remove_fact` (see `revel-profile-discovery`).
+- Your user's own profile: `get_contribution_policy`, `set_contribution_policy`, `add_facts`,
+  `get_my_profile`, `set_fact_audience`, `review_pending_fact` and `remove_fact` (see
+  `revel-profile-discovery`).
 - Connections and shared profiles: `set_handle`, `request_connection`,
   `list_connection_requests`, `respond_to_connection_request`, `list_connections`,
   `change_connection_tier`, `revoke_connection`, `cancel_connection_request` and `get_profile`
