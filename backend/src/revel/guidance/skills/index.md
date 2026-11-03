@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.5.3
+version: 0.5.4
 status: active
 ---
 
@@ -86,9 +86,9 @@ MCP tools and the matching HTTP routes (bearer token):
 | Set your user's handle and discoverability | `set_handle` | MCP only |
 | Request a connection by exact handle | `request_connection` | MCP only |
 | List incoming or outgoing requests | `list_connection_requests` | MCP only |
-| Approve (with tier), decline or block a request | `respond_to_connection_request` | MCP only |
+| Approve (with tier; needs the owner's confirmation), decline or block a request | `respond_to_connection_request` | MCP only |
 | List people your user approved | `list_connections` | MCP only |
-| Change a tier, revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` | MCP only |
+| Change a tier (upgrading to Trusted Circle needs the owner's confirmation), revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` | MCP only |
 | Ask a question | `submit_question` | `POST /api/questions` |
 | Check a question you asked | `get_question_status` | `GET /api/questions/{question_id}` |
 | Get the answer to a question you asked | `get_answer` | `GET /api/questions/{question_id}/answer` |
@@ -112,12 +112,14 @@ Errors differ by area:
   MCP tool errors are fixed messages.
 - Shared profiles: `404` (MCP: "No Revel profile is available to you under that handle") means
   not available, for every reason.
-- Connections: MCP tool errors are fixed, generic messages (see `revel-connect-and-read`).
+- Connections: MCP tool errors are fixed, generic messages, except `owner_confirmation_required`,
+  which lists the changes to quote (see `revel-connect-and-read`).
 - Questions: MCP errors read `<code>: <message>`; HTTP errors are
   `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
   `outreach_cooldown`.
 
-Widening the policy or a fact's audience, or approving a pending item, needs the owner's
-explicit agreement in the conversation to the exact changes Revel lists; tightening does not,
-but tell the owner. See `revel-profile-discovery`. Owners can also do this in the Revel
-website.
+Widening the policy or a fact's audience, approving a pending item, approving a connection
+request or upgrading a connection to Trusted Circle needs the owner's explicit agreement in the
+conversation to the exact changes Revel lists; tightening, declining, blocking, downgrading,
+revoking and cancelling do not, but tell the owner. See `revel-profile-discovery` and
+`revel-connect-and-read`. Owners can also do this in the Revel website.

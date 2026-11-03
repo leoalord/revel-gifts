@@ -352,7 +352,9 @@ async def test_approval_creates_the_approvers_profile_and_grants(
     seed_fga(fake_fga, sam, alex)
     req = await svc.lookup_and_request(sam.ui, handle="alex_demo", sessions=sessions)
     assert profile_of(session, alex) is None
-    await svc.approve(alex.agent, req.request.id, tier="connections", sessions=sessions)
+    await svc.approve(
+        alex.agent, req.request.id, tier="connections", owner_confirmed=True, sessions=sessions
+    )
     pid = profile_of(session, alex)
     assert pid is not None
     assert owner_tuple(alex.user.id, pid) in fake_fga.tuples  # F5/F4's on_profile_created
