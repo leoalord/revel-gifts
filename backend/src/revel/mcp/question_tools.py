@@ -1,7 +1,6 @@
-"""MCP question tools (F7): ``submit_question``, ``get_updates``, the lease tools
-(``claim_assignment``, ``renew_assignment``, ``release_assignment``, ``report_user_contact``,
-``decline_assignment``), ``submit_answer`` and the requester's ``get_question_status`` /
-``get_answer``.
+"""MCP question tools (F7): ``submit_question``, ``get_updates``, ``update_assignment`` (the
+lease actions claim, renew, release, decline and report_user_contact), ``submit_answer`` and the
+requester's ``get_question`` (status plus the answer when available).
 
 Thin adapters over ``revel.services.questions``. Each resolves the caller first with
 ``principal_from_mcp_context(runtime_for(settings))`` (rejects disconnected delegations) and maps
@@ -12,7 +11,7 @@ error text or private purpose values.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from mcp.server.mcpserver import MCPServer
@@ -24,8 +23,8 @@ from revel.auth.deps import principal_from_mcp_context
 from revel.auth.runtime import runtime_for
 from revel.services import answers, question_leases, questions
 from revel.services.answers import (
+    AnswerOut,
     EvidenceIn,
-    GetAnswerResponse,
     QuestionStatusResponse,
     SubmitAnswerRequest,
     SubmitAnswerResponse,
@@ -66,42 +65,34 @@ GET_UPDATES_DESCRIPTION = (
 )
 
 
-CLAIM_DESCRIPTION = (
-    "Claim a question assignment from get_updates before working on it. Returns your lease "
-    "(lease_version, lease_expires_at, about 15 minutes; renew it while you work). If you "
-    "can't answer from what you already know, ask your user instead of declining. To ask your "
-    "user: claim with human_contact=true first (or upgrade your current claim by calling "
-    "claim_assignment again with human_contact=true and your lease_version), then ask, then "
-    "report_user_contact. Only one assistant per question may contact the user, and Revel "
-    "refuses if the user was contacted about it recently (by any assistant, you included). "
-    "prior_user_contacts says how often the user was already asked about this question."
-)
-RENEW_DESCRIPTION = (
-    "Extend your lease on a claimed assignment. Quote the current lease_version; a stale or "
-    "expired lease is refused (claim again if the assignment is available). Renewals per "
-    "claim are limited."
-)
-RELEASE_DESCRIPTION = (
-    "Give up your lease so the assignment can be claimed again (by you later, or another "
-    "assistant can take the human-contact lease). Quote the current lease_version."
-)
-REPORT_CONTACT_DESCRIPTION = (
-    "Report that you asked your user this question. To ask your user: claim with "
-    "human_contact=true first (or upgrade your current claim), then ask, then "
-    "report_user_contact; without a human-contact claim this is refused "
-    "(human_contact_required). Revel marks the "
-    "assignment waiting_for_user and holds your human-contact lease for the response window "
-    "(up to 24 hours, never past the question deadline). delivery_confirmed=true only if you "
-    "know the user received it. Then submit_answer once the user replies. Reporting again "
-    "while waiting only updates delivery_confirmed: it does not extend the window and counts "
-    "against the renewal limit. Do not message the user again within the cooldown."
-)
-DECLINE_DESCRIPTION = (
-    "Decline an assignment you will not answer (reason: cannot_answer, insufficient_context, "
-    "not_appropriate or other). Declining is final for you on this question, and the question "
-    "closes once every assistant declines. If you can't answer from what you know, prefer "
-    "claim_assignment with human_contact=true and ask your user. Quote lease_version if you "
-    "hold a lease."
+UPDATE_ASSIGNMENT_DESCRIPTION = (
+    "Work on a question assignment from get_updates. Always pass assignment_id and action; "
+    "each action takes only its own parameters (others are refused with invalid_request) and "
+    "returns your lease (assignment_id, status, lease_version, lease_expires_at, "
+    "human_contact, renewals_remaining). Actions: "
+    "claim [optional human_contact (bool, default false), optional lease_version]: claim "
+    "before working on it; the lease lasts about 15 minutes. If you can't answer from what you "
+    "know, ask your user instead of declining: claim with human_contact=true first (or "
+    "upgrade your current claim by claiming again with human_contact=true and your "
+    "lease_version), then ask, then action report_user_contact. Only one assistant per "
+    "question may contact the user, and Revel refuses if the user was contacted about it "
+    "recently (by any assistant, you included). "
+    "renew [required lease_version]: extend your lease; a stale or expired lease is refused "
+    "(claim again if the assignment is available) and renewals per claim are limited. "
+    "release [required lease_version]: give up your lease so the assignment can be claimed "
+    "again (by you later, or another assistant can take the human-contact lease). "
+    "decline [optional reason: cannot_answer (default), insufficient_context, "
+    "not_appropriate or other; optional lease_version, required if you hold a lease]: you "
+    "will not answer; this is final for you on this question, and the question closes once "
+    "every assistant declines. Prefer claim with human_contact=true and asking your user. "
+    "report_user_contact [required lease_version, required delivery_confirmed (bool, true "
+    "only if you know the user received it)]: report that you asked your user; requires a "
+    "human-contact claim (else human_contact_required). Revel marks the assignment "
+    "waiting_for_user and holds your human-contact lease for the response window (up to 24 "
+    "hours, never past the question deadline). Then submit_answer once the user replies. "
+    "Reporting again while waiting only updates delivery_confirmed: it does not extend the "
+    "window and counts against the renewal limit. Do not message the user again within the "
+    "cooldown."
 )
 SUBMIT_ANSWER_DESCRIPTION = (
     "Answer a claimed assignment. Quote your lease_version. body: the answer only, in a short "
@@ -113,15 +104,58 @@ SUBMIT_ANSWER_DESCRIPTION = (
     "a new durable fact on the profile, add it with add_facts first and cite its claim_id. "
     "Late answers (past the question deadline) are refused."
 )
-GET_QUESTION_STATUS_DESCRIPTION = (
-    "Check the status of a question you asked (open, answered, expired, declined, ...)."
+GET_QUESTION_DESCRIPTION = (
+    "Check a question you asked and retrieve its answer when there is one. Returns the status "
+    "(open, answered, expired, declined, ...) with expires_at, created_at, closed_at and "
+    "answer_available, plus result: 'answer' (the answer is included), 'no_shareable_answer' "
+    "(it cannot be shared with you now) or 'not_answered' (no answer yet). Revel re-checks "
+    "your current access and the facts the answer relies on every time."
 )
-GET_ANSWER_DESCRIPTION = (
-    "Retrieve the answer to a question you asked. Revel re-checks your current access and the "
-    "facts the answer relies on every time: result 'answer' includes it, "
-    "'no_shareable_answer' means it cannot be shared with you now, 'not_answered' means there "
-    "is no answer yet."
-)
+
+
+class GetQuestionResponse(QuestionStatusResponse):
+    """``get_question_status`` fields plus the ``get_answer`` outcome, both unchanged."""
+
+    result: Literal["answer", "no_shareable_answer", "not_answered"]
+    answer: AnswerOut | None = None
+
+
+# Shared helpers for per-action validation (same wording in the F5/F6 action tools). Codes use
+# the existing ``invalid_request``; parameters are checked in signature order.
+def _unknown_action(tool: str, action: str, actions: Any) -> ToolError:
+    return ToolError(
+        f"invalid_request: Unknown action '{action}' for {tool}; "
+        f"expected one of: {', '.join(actions)}."
+    )
+
+
+def _check_action_params(
+    action: str,
+    given: dict[str, Any],
+    required: frozenset[str],
+    allowed: frozenset[str],
+    signature_order: tuple[str, ...],
+) -> None:
+    """Raise for the first parameter (signature order) that is missing or not accepted."""
+    for name in signature_order:
+        if name in required and given.get(name) is None:
+            raise ToolError(f"invalid_request: Action '{action}' requires {name}.")
+        if given.get(name) is not None and name not in allowed:
+            raise ToolError(f"invalid_request: Action '{action}' does not accept {name}.")
+
+
+# action -> (required, allowed) parameters beyond assignment_id and action.
+_ACTION_PARAMS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "claim": (frozenset(), frozenset({"human_contact", "lease_version"})),
+    "renew": (frozenset({"lease_version"}), frozenset({"lease_version"})),
+    "release": (frozenset({"lease_version"}), frozenset({"lease_version"})),
+    "decline": (frozenset(), frozenset({"lease_version", "reason"})),
+    "report_user_contact": (
+        frozenset({"lease_version", "delivery_confirmed"}),
+        frozenset({"lease_version", "delivery_confirmed"}),
+    ),
+}
+_ACTION_SIGNATURE = ("lease_version", "human_contact", "delivery_confirmed", "reason")
 
 
 def _tool_error(exc: QuestionError) -> ToolError:
@@ -236,44 +270,68 @@ def register(server: MCPServer, settings: Any) -> None:
         except ValidationError as exc:
             raise _invalid(exc) from None
 
-    async def claim_assignment_tool(
+    async def update_assignment_tool(
         assignment_id: UUID,
-        human_contact: Annotated[
-            bool, Field(description="True only if you will ask your user directly.")
-        ] = False,
+        action: Annotated[
+            str,
+            Field(
+                description="claim, renew, release, decline or report_user_contact.",
+                json_schema_extra={"enum": list(_ACTION_PARAMS)},
+            ),
+        ],
         lease_version: Annotated[
-            int | None, Field(description="Optional: the lease_version from get_updates.")
+            int | None,
+            Field(description="Required for renew, release and report_user_contact."),
+        ] = None,
+        human_contact: Annotated[
+            bool | None, Field(description="claim only: true if you will ask your user.")
+        ] = None,
+        delivery_confirmed: Annotated[
+            bool | None,
+            Field(description="report_user_contact only (required): true if user received it."),
+        ] = None,
+        reason: Annotated[
+            DeclineReason | None, Field(description="decline only; default cannot_answer.")
         ] = None,
     ) -> LeaseResponse:
-        request = _model(ClaimRequest, human_contact=human_contact, lease_version=lease_version)
-        return await _call(question_leases.claim_assignment, assignment_id, request)
-
-    async def renew_assignment_tool(assignment_id: UUID, lease_version: int) -> LeaseResponse:
-        request = _model(LeaseVersionRequest, lease_version=lease_version)
-        return await _call(question_leases.renew_assignment, assignment_id, request)
-
-    async def release_assignment_tool(assignment_id: UUID, lease_version: int) -> LeaseResponse:
-        request = _model(LeaseVersionRequest, lease_version=lease_version)
-        return await _call(question_leases.release_assignment, assignment_id, request)
-
-    async def report_user_contact_tool(
-        assignment_id: UUID,
-        lease_version: int,
-        delivery_confirmed: Annotated[
-            bool, Field(description="True only if the user is known to have received it.")
-        ],
-    ) -> LeaseResponse:
-        request = _model(
-            UserContactRequest, lease_version=lease_version, delivery_confirmed=delivery_confirmed
+        if action not in _ACTION_PARAMS:
+            raise _unknown_action("update_assignment", action, _ACTION_PARAMS)
+        required, allowed = _ACTION_PARAMS[action]
+        _check_action_params(
+            action,
+            {
+                "lease_version": lease_version,
+                "human_contact": human_contact,
+                "delivery_confirmed": delivery_confirmed,
+                "reason": reason,
+            },
+            required,
+            allowed,
+            _ACTION_SIGNATURE,
         )
-        return await _call(question_leases.report_user_contact, assignment_id, request)
-
-    async def decline_assignment_tool(
-        assignment_id: UUID,
-        reason: DeclineReason = "cannot_answer",
-        lease_version: int | None = None,
-    ) -> LeaseResponse:
-        request = _model(DeclineRequest, lease_version=lease_version, reason=reason)
+        if action == "claim":
+            request = _model(
+                ClaimRequest, human_contact=bool(human_contact), lease_version=lease_version
+            )
+            return await _call(question_leases.claim_assignment, assignment_id, request)
+        if action in ("renew", "release"):
+            request = _model(LeaseVersionRequest, lease_version=lease_version)
+            op = (
+                question_leases.renew_assignment
+                if action == "renew"
+                else question_leases.release_assignment
+            )
+            return await _call(op, assignment_id, request)
+        if action == "report_user_contact":
+            request = _model(
+                UserContactRequest,
+                lease_version=lease_version,
+                delivery_confirmed=delivery_confirmed,
+            )
+            return await _call(question_leases.report_user_contact, assignment_id, request)
+        request = _model(
+            DeclineRequest, lease_version=lease_version, reason=reason or "cannot_answer"
+        )
         return await _call(question_leases.decline_assignment, assignment_id, request)
 
     async def submit_answer_tool(
@@ -290,77 +348,39 @@ def register(server: MCPServer, settings: Any) -> None:
         )
         return await _call(answers.submit_answer, assignment_id, request)
 
-    async def get_question_status_tool(question_id: UUID) -> QuestionStatusResponse:
-        return await _call(answers.get_question_status, question_id)
-
-    async def get_answer_tool(question_id: UUID) -> GetAnswerResponse:
-        return await _call(answers.get_answer, question_id)
-
-    tools = (
-        (
-            claim_assignment_tool,
-            "claim_assignment",
-            "Claim a question assignment",
-            CLAIM_DESCRIPTION,
-            False,
-        ),
-        (
-            renew_assignment_tool,
-            "renew_assignment",
-            "Renew an assignment lease",
-            RENEW_DESCRIPTION,
-            False,
-        ),
-        (
-            release_assignment_tool,
-            "release_assignment",
-            "Release an assignment lease",
-            RELEASE_DESCRIPTION,
-            False,
-        ),
-        (
-            report_user_contact_tool,
-            "report_user_contact",
-            "Report asking your user",
-            REPORT_CONTACT_DESCRIPTION,
-            False,
-        ),
-        (
-            decline_assignment_tool,
-            "decline_assignment",
-            "Decline a question assignment",
-            DECLINE_DESCRIPTION,
-            False,
-        ),
-        (
-            submit_answer_tool,
-            "submit_answer",
-            "Answer a question",
-            SUBMIT_ANSWER_DESCRIPTION,
-            False,
-        ),
-        # May record lazy expiry of an overdue question.
-        (
-            get_question_status_tool,
-            "get_question_status",
-            "Check a question's status",
-            GET_QUESTION_STATUS_DESCRIPTION,
-            True,
-        ),
-        # Records an answer_retrieved event; never changes question or lease state.
-        (
-            get_answer_tool,
-            "get_answer",
-            "Get the answer to your question",
-            GET_ANSWER_DESCRIPTION,
-            True,
-        ),
-    )
-    for fn, name, title, description, idempotent in tools:
-        server.add_tool(
-            fn,
-            name=name,
-            title=title,
-            description=description,
-            annotations=_annotations(title, idempotent=idempotent),
+    async def get_question_tool(question_id: UUID) -> GetQuestionResponse:
+        status = await _call(answers.get_question_status, question_id)
+        # get_answer keeps its re-check and no_shareable_answer semantics; it records an
+        # answer_retrieved event only when it releases an answer.
+        outcome = await _call(answers.get_answer, question_id)
+        return GetQuestionResponse(
+            **status.model_dump(), result=outcome.result, answer=outcome.answer
         )
+
+    # Not read-only (it changes lease state). Not destructive in MCP's sense: decline and
+    # release only end the caller's OWN work item on one assignment; they delete no data, the
+    # assignment stays recorded, and release lets it be claimed again. Nothing owned by
+    # another party is changed.
+    server.add_tool(
+        update_assignment_tool,
+        name="update_assignment",
+        title="Update a question assignment",
+        description=UPDATE_ASSIGNMENT_DESCRIPTION,
+        annotations=_annotations("Update a question assignment"),
+    )
+    server.add_tool(
+        submit_answer_tool,
+        name="submit_answer",
+        title="Answer a question",
+        description=SUBMIT_ANSWER_DESCRIPTION,
+        annotations=_annotations("Answer a question"),
+    )
+    # Not read-only: may record lazy expiry of an overdue question and an answer_retrieved
+    # event. Never changes lease state.
+    server.add_tool(
+        get_question_tool,
+        name="get_question",
+        title="Check a question and get its answer",
+        description=GET_QUESTION_DESCRIPTION,
+        annotations=_annotations("Check a question and get its answer", idempotent=True),
+    )
