@@ -9,10 +9,10 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.applications import Starlette
+from starlette.types import ASGIApp
 
 from revel import guidance
-from revel.mcp import connection_tools, identity_tools, profile_tools, question_tools
+from revel.mcp import audit, connection_tools, identity_tools, profile_tools, question_tools
 from revel.settings import Settings
 
 
@@ -33,8 +33,11 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     return server
 
 
-def build_mcp_asgi_app(server: MCPServer, settings: Settings) -> Starlette:
+def build_mcp_asgi_app(server: MCPServer, settings: Settings) -> ASGIApp:
     """Return the Streamable HTTP ASGI app serving exactly ``settings.normalized_mcp_path``.
+
+    The SDK app is wrapped in ``revel.mcp.audit.McpAuditMiddleware`` (privacy-safe method
+    logging; see that module for what is and is not logged).
 
     Stateless mode: each request gets a fresh transport, so any Cloud Run replica can serve any
     request without instance affinity. The returned app's own lifespan is NOT run when mounted;
@@ -45,9 +48,11 @@ def build_mcp_asgi_app(server: MCPServer, settings: Settings) -> Starlette:
         allowed_hosts=settings.mcp_allowed_hosts(),
         allowed_origins=settings.mcp_allowed_origins(),
     )
-    return server.streamable_http_app(
+    sdk_app = server.streamable_http_app(
         streamable_http_path=settings.normalized_mcp_path,
         stateless_http=True,
         json_response=True,
         transport_security=security,
     )
+    audit.configure_audit_logger()
+    return audit.McpAuditMiddleware(sdk_app, settings.normalized_mcp_path)

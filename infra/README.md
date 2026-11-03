@@ -333,6 +333,16 @@ terraform plan -out=rg7.tfplan && terraform apply rg7.tfplan
 
 Prefer the Terraform variable over `gcloud run services update --update-env-vars`, which the next apply would revert.
 
+## MCP method audit log
+
+For the onboarding client matrix, `revel.mcp.audit` (wired in `build_mcp_asgi_app`) writes one JSON line to stdout per JSON-RPC message sent to `/mcp`, so Cloud Run stores it as `jsonPayload` with `severity` INFO, e.g. `{"severity":"INFO","logger":"revel.mcp.audit","event":"mcp_request","method":"tools/call","target":"ping","client_id":"client_…","status":200,"batch_size":1,"http_method":"POST"}`. Fields: `method` (`"unparsed"` for malformed or over-1 MiB bodies; `null` for GET/DELETE and JSON-RPC responses), `target` (tool name for `tools/call`, prompt name for `prompts/get`, resource URI without query, fragment, userinfo or port for `resources/read`; otherwise `null`), `client_id` (OAuth client from the verified bearer token; `null` when unauthenticated, e.g. a 401), the HTTP response `status` and `batch_size`. It never logs params, arguments, request or response bodies, results, tokens, subjects, emails, scopes, IPs or user agents (uvicorn's own access log still records the peer address). Query it with:
+
+```sh
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="revel-app" AND jsonPayload.event="mcp_request"' \
+  --freshness 1d --limit 200 \
+  --format 'table(timestamp, jsonPayload.client_id, jsonPayload.method, jsonPayload.target, jsonPayload.status)'
+```
+
 ## Verifying OpenFGA is not public
 
 ```sh
