@@ -325,10 +325,10 @@ async def test_resolve_captures_name_without_touching_delegations_sql(sql_repo):
 
 
 # --- reconnect after disconnect (RG-10) ------------------------------------------------------
-# Needs F3's reconnect migration: partial unique index
+# Uses F3's migration 0004_delegation_reconnect: partial unique index
 # uq_agent_delegations_user_id_agent_id_active, agent_delegations.authorized_sid and the
-# agent_delegation_sessions table. Rows are read with plain SQL so these tests do not depend
-# on how F3 maps the new schema in revel.db.models.
+# agent_delegation_sessions table. Rows are read with plain SQL so the assertions check the
+# stored schema, independent of the ORM mapping the repository uses.
 
 
 def _sid_token(sid: str | None, iat: int | None = None, sub: str = "user_alice") -> AccessToken:

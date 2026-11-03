@@ -15,9 +15,9 @@ assistant over time, at most one ``active`` (partial unique index on ``(user_id,
 WHERE status = 'active'``). Disconnected rows are history and are never modified again. Each
 delegation remembers the WorkOS ``sid`` values its tokens carried (``authorized_sid`` on the
 row, set by the inserting statement, plus ``agent_delegation_sessions`` rows recorded later),
-so the resolver can refuse tokens of a disconnected authorization. Those schema objects are
-specified for F3 (RG-10 reconnect); until F3's models include them this module addresses them
-through lightweight Core ``table()`` constructs that are not part of ``Base.metadata``.
+so the resolver can refuse tokens of a disconnected authorization. F3's migration
+``0004_delegation_reconnect`` and models (``AgentDelegation.authorized_sid``,
+``AgentDelegationSession``) define that schema.
 """
 
 from __future__ import annotations
@@ -31,12 +31,12 @@ from uuid import UUID
 import anyio
 import anyio.from_thread
 import anyio.to_thread
-from sqlalchemy import column, func, or_, select, table, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.db.enums import DelegationStatus
-from revel.db.models import Agent, AgentDelegation, User
+from revel.db.models import Agent, AgentDelegation, AgentDelegationSession, User
 
 DelegationStatusValue = Literal["active", "disconnected"]
 
@@ -180,18 +180,7 @@ def _delegation_view(row: AgentDelegation, agent: Agent) -> DelegationView:
     )
 
 
-# Schema specified for F3 (RG-10 reconnect) and not yet in ``revel.db.models``: Core-only
-# constructs, deliberately outside ``Base.metadata`` so they cause no Alembic drift.
-_delegations = table(
-    "agent_delegations",
-    column("id"),
-    column("user_id"),
-    column("agent_id"),
-    column("status"),
-    column("disconnected_at"),
-    column("authorized_sid"),
-)
-_delegation_sessions = table("agent_delegation_sessions", column("delegation_id"), column("sid"))
+# Predicate of F3's partial unique index ``uq_agent_delegations_user_id_agent_id_active``.
 _ACTIVE_WHERE = text("status = 'active'")
 
 
@@ -260,19 +249,19 @@ class SqlAlchemyIdentityRepository:
         with self._session() as session:
             rows = session.execute(
                 select(
-                    _delegations.c.id,
-                    _delegations.c.status,
-                    _delegations.c.disconnected_at,
-                    _delegations.c.authorized_sid,
-                ).where(_delegations.c.user_id == user_id, _delegations.c.agent_id == agent_id)
+                    AgentDelegation.id,
+                    AgentDelegation.status,
+                    AgentDelegation.disconnected_at,
+                    AgentDelegation.authorized_sid,
+                ).where(AgentDelegation.user_id == user_id, AgentDelegation.agent_id == agent_id)
             ).all()
             sid_rows: set[UUID] = set()
             if sid is not None and rows:
                 sid_rows = set(
                     session.execute(
-                        select(_delegation_sessions.c.delegation_id).where(
-                            _delegation_sessions.c.sid == sid,
-                            _delegation_sessions.c.delegation_id.in_([r.id for r in rows]),
+                        select(AgentDelegationSession.delegation_id).where(
+                            AgentDelegationSession.sid == sid,
+                            AgentDelegationSession.delegation_id.in_([r.id for r in rows]),
                         )
                     ).scalars()
                 )
@@ -397,7 +386,7 @@ class SqlAlchemyIdentityRepository:
             # loses on the partial unique index (one active delegation per user and assistant),
             # waits for the winner to commit, then reads the winner's row.
             stmt = (
-                insert(_delegations)
+                insert(AgentDelegation)
                 .values(
                     user_id=user_id,
                     agent_id=agent_id,
@@ -405,16 +394,17 @@ class SqlAlchemyIdentityRepository:
                     authorized_sid=authorized_sid,
                 )
                 .on_conflict_do_nothing(
-                    index_elements=["user_id", "agent_id"], index_where=_ACTIVE_WHERE
+                    index_elements=[AgentDelegation.user_id, AgentDelegation.agent_id],
+                    index_where=_ACTIVE_WHERE,
                 )
-                .returning(_delegations.c.id)
+                .returning(AgentDelegation.id)
             )
             created = session.execute(stmt).scalar_one_or_none() is not None
             row_id = session.execute(
-                select(_delegations.c.id).where(
-                    _delegations.c.user_id == user_id,
-                    _delegations.c.agent_id == agent_id,
-                    _delegations.c.status == DelegationStatus.ACTIVE.value,
+                select(AgentDelegation.id).where(
+                    AgentDelegation.user_id == user_id,
+                    AgentDelegation.agent_id == agent_id,
+                    AgentDelegation.status == DelegationStatus.ACTIVE.value,
                 )
             ).scalar_one_or_none()
             if row_id is None:
@@ -430,9 +420,14 @@ class SqlAlchemyIdentityRepository:
         # a delegation write). Idempotent.
         with self._session() as session, session.begin():
             session.execute(
-                insert(_delegation_sessions)
+                insert(AgentDelegationSession)
                 .values(delegation_id=delegation_id, sid=sid)
-                .on_conflict_do_nothing(index_elements=["delegation_id", "sid"])
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        AgentDelegationSession.delegation_id,
+                        AgentDelegationSession.sid,
+                    ]
+                )
             )
 
     def _disconnect_delegation(
