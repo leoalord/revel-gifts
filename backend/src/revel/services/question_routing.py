@@ -299,7 +299,8 @@ _DATE = re.compile(
 # authenticated principal, so neither the requester nor the model may write it. A bare
 # "assistant" is not a claim ("Does Alex use a voice assistant?").
 _IDENTITY_CLAIM = re.compile(
-    r"\b(?:asks|asking|on behalf of|requester|requesting|this is|i am|i'm|my name|anonymous|"
+    r"\b(?:asks|asking|asked|asked by|question from|on behalf of|requester|requesting|this is|"
+    r"i am|i'm|my name|anonymous|"
     r"wants to know|would like to know|wondering|wonders|"
     r"(?:through|via|from|by) (?:his|her|their|my|our) (?:assistant|agent|ai))\b"
     r"|'s (?:assistant|agent|ai)\b"
@@ -353,6 +354,54 @@ def significant_tokens(text: str) -> set[str]:
             len(token) >= MIN_SIGNIFICANT_TOKEN_LENGTH
             and raw not in STOPWORDS
             and token not in STOPWORDS
+        ):
+            out.add(token)
+    return out
+
+
+# Short function words that never identify a candidate idea (longer ones are in STOPWORDS).
+SHORT_STOPWORDS = frozenset(
+    {
+        "and",
+        "are",
+        "but",
+        "can",
+        "did",
+        "for",
+        "had",
+        "has",
+        "her",
+        "him",
+        "his",
+        "its",
+        "nor",
+        "not",
+        "one",
+        "our",
+        "she",
+        "the",
+        "too",
+        "two",
+        "was",
+        "who",
+        "why",
+        "yet",
+        "you",
+    }
+)
+MIN_IDEA_TOKEN_LENGTH = 3
+
+
+def idea_tokens(text: str) -> set[str]:
+    """Stemmed tokens of a candidate idea that count as a leak: numbers, and words of at least
+    ``MIN_IDEA_TOKEN_LENGTH`` letters that are not stopwords ("mug", "tea", "hat")."""
+    out: set[str] = set()
+    for raw in _TOKEN.findall(_fold(text)):
+        token = _stem(raw)
+        if token.isdigit() or (
+            len(token) >= MIN_IDEA_TOKEN_LENGTH
+            and not ({raw, token} & STOPWORDS)
+            and not ({raw, token} & SHORT_STOPWORDS)
         ):
             out.add(token)
     return out
@@ -430,17 +479,16 @@ def find_spoilers(
         found.add(SpoilerCategory.PRIVATE_PURPOSE)
 
     # Candidate ideas: only the parts the requester explicitly asked about.
+    # Ideas are short ("mug", "tea set", "red hat"), so their tokens count from 3 letters.
     def requester_wrote(phrase: str) -> bool:
-        significant = significant_tokens(phrase)
-        return _contains_phrase(requested_key, phrase) or bool(
-            significant and significant <= allowed
-        )
+        words = idea_tokens(phrase)
+        return _contains_phrase(requested_key, phrase) or bool(words and words <= allowed)
 
     for idea in purpose.candidate_ideas:
         for phrase in [idea, *_word_pairs(idea)]:
             if _contains_phrase(key, phrase) and not requester_wrote(phrase):
                 found.add(SpoilerCategory.PRIVATE_PURPOSE)
-        if text_tokens & (significant_tokens(idea) - allowed):
+        if text_tokens & (idea_tokens(idea) - allowed):
             found.add(SpoilerCategory.PRIVATE_PURPOSE)
 
     if model_output and notes and text_tokens & (significant_tokens(notes[0]) - allowed):

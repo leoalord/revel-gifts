@@ -131,6 +131,27 @@ async def test_demo_fake_model_adding_terms_falls_back(
     assert reasons == {"unsafe_question"}
 
 
+@pytest.mark.parametrize(
+    "model_text",
+    ["Does Alex like mugs?", "What tea does Alex drink?", "Does Alex wear hats?"],
+)
+async def test_short_idea_terms_from_model_fall_back(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any, model_text: str
+) -> None:
+    world = await world_builder()
+    fake = FakeMuse(content=proposal(model_text, ["r1"]))
+    result = await submit_question(
+        agent_principal(world.requester_d),
+        demo_request(
+            requested_information="What drinks does Alex like?",
+            private_purpose={"candidate_ideas": ["mug", "tea set", "red hat"]},
+        ),
+        deps=world.deps(factory, fake.client()),
+    )
+    assert result.routing.minimizer == "fallback"
+    assert result.minimized_question == "What drinks does Alex like?"
+
+
 async def test_demo_requested_information_with_birthday_rejected(
     factory: sessionmaker[Session], fga: Any, world_builder: Any
 ) -> None:
@@ -156,6 +177,8 @@ async def test_demo_requested_information_with_birthday_rejected(
         "Does Chelsea like hiking? Leo Example wants to check.",  # requester's display name
         "Does Chelsea like hiking? From leo",  # requester's handle
         "Does Chelsea like hiking? Sent by Muse.",  # acting assistant's name
+        "Chelsea's mother asked: does Chelsea like hiking?",
+        "Question from Chelsea's boss: does Chelsea like hiking?",
     ],
 )
 async def test_identity_claims_in_requested_information_rejected(

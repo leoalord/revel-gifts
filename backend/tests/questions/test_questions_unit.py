@@ -162,6 +162,45 @@ def test_demo_model_output_adding_terms_is_unsafe(model_text: str) -> None:
     assert published(model_text)
 
 
+SHORT_IDEAS = PrivatePurpose(candidate_ideas=["mug", "tea set", "red hat"])
+
+
+@pytest.mark.parametrize(
+    "model_text",
+    [
+        "Does Alex like mugs?",
+        "What tea does Alex drink?",
+        "Does Alex wear hats?",
+        "Does Alex like red?",
+        "Does Alex own a tea set?",
+    ],
+)
+def test_short_candidate_idea_tokens_forbidden(model_text: str) -> None:
+    assert publishable_question_problems(
+        model_text,
+        requested_information="What drinks does Alex like?",
+        purpose=SHORT_IDEAS,
+        identity_terms=(),
+    ) == {SpoilerCategory.PRIVATE_PURPOSE}
+
+
+def test_short_candidate_idea_allowed_when_requester_asked() -> None:
+    asked = "Does Alex already have a mug he likes?"
+    assert validate_requested_information(asked, SHORT_IDEAS) == asked
+    assert not publishable_question_problems(
+        "Does Alex already own a favourite mug?",
+        requested_information=asked,
+        purpose=SHORT_IDEAS,
+        identity_terms=(),
+    )
+    assert publishable_question_problems(
+        "Does Alex already own a mug or a tea set?",
+        requested_information=asked,
+        purpose=SHORT_IDEAS,
+        identity_terms=(),
+    )
+
+
 def test_requester_wrote_whole_idea_allows_it() -> None:
     asked = "Does Alex own compact binoculars?"
     assert not published("Does Alex already have compact binoculars?", requested=asked)
@@ -210,6 +249,9 @@ def test_notes_phrases_always_and_tokens_in_model_output() -> None:
         "Sam's assistant wants to know if Alex likes hiking.",
         "Does Alex like hiking? (anonymous)",
         "Does Alex like hiking? Sam would like to know.",
+        "Alex's mother asked: does Alex like hiking?",
+        "Asked by a coworker: does Alex like hiking?",
+        "Question from Alex's boss: does Alex like hiking?",
     ],
 )
 def test_identity_claims_rejected_in_requested_information(text: str) -> None:
