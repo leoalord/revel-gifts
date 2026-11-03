@@ -1,5 +1,6 @@
 """Profiles and contributions (F5, RG-18 / Build Tasks #9): contribution policy, ``add_facts``,
-owner reads with a contribution summary, corrections, audience changes, removal and review.
+owner reads with a contribution summary, corrections, audience changes, removal and review;
+shared reads of other people's profiles (``read_shared_profile``, RG-56 / #28).
 
 Contract: ``docs/contracts/f5-profiles.md``. Product policy lives in Notion (main page "Profile
 fact data model"; Privacy "Contribution policy").
@@ -48,7 +49,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from revel.auth import authz
 from revel.auth.authz import AuthorizationDenied, PrincipalLike
 from revel.auth.fga import FgaConfigurationError
-from revel.auth.visibility import on_profile_created, owner_claims
+from revel.auth.visibility import (
+    SharedClaim,
+    VisibleClaim,
+    on_profile_created,
+    owner_claims,
+    visible_claims,
+)
 from revel.db.enums import (
     LIVE_CLAIM_STATUSES,
     AcceptanceMode,
@@ -58,7 +65,16 @@ from revel.db.enums import (
     EvidenceType,
     ObservedPrecision,
 )
-from revel.db.models import Agent, AgentDelegation, Claim, ClaimEvent, ContributionPolicy, Profile
+from revel.db.models import (
+    Agent,
+    AgentDelegation,
+    Claim,
+    ClaimEvent,
+    ContributionPolicy,
+    Handle,
+    Profile,
+    User,
+)
 from revel.db.models.profile import STATEMENT_MAX_LENGTH
 from revel.db.session import get_sessionmaker
 from revel.services import claim_writes
@@ -88,10 +104,13 @@ __all__ = [
     "NotAllowed",
     "PolicyInvalid",
     "PolicyVersionConflict",
+    "SharedProfileNotFound",
+    "SharedProfileOut",
     "UnknownCategory",
     "add_facts",
     "effective_max_audience",
     "ensure_profile",
+    "read_shared_profile",
     "validate_category",
 ]
 
@@ -143,6 +162,13 @@ class PolicyInvalid(ProfileServiceError):
     def __init__(self, errors: list[dict[str, Any]]) -> None:
         super().__init__("invalid policy")
         self.errors = errors
+
+
+class SharedProfileNotFound(ProfileServiceError):
+    """404: no profile this viewer may see. One error for every hidden case of a shared read
+    (the target has no profile yet, or the viewer's tier is ``none``: unconnected without a
+    Public opt-in, blocked, revoked, disconnected agent), so adapters answer them identically
+    to F6's ``TargetNotFound``."""
 
 
 class InvalidRequest(ProfileServiceError):
@@ -558,6 +584,10 @@ def _validate_policy_update(update: PolicyUpdate, old: PolicyView) -> PolicyView
                 errors.append({"loc": loc, "msg": "unknown category"})
                 continue
             value: dict[str, Any] = {}
+            if setting.audience is Audience.PUBLIC and spec.public_eligible and not public_opt_in:
+                # Normalized, not an error: without the opt-in an eligible category's Public
+                # audience falls back to the category default (the setting is dropped).
+                setting = setting.model_copy(update={"audience": None})
             if setting.audience is not None:
                 allowed = spec.allowed_audiences(public_opt_in=public_opt_in)
                 if setting.audience not in allowed:
@@ -595,6 +625,20 @@ def _validate_policy_update(update: PolicyUpdate, old: PolicyView) -> PolicyView
         # F7-owned fields are carried forward unchanged.
         questions_enabled=old.questions_enabled,
         question_settings=old.question_settings,
+    )
+
+
+def _same_policy(old: PolicyView, new: PolicyView) -> bool:
+    """Whether ``new`` has the same effective content as ``old`` (version and approval time
+    aside). An unchanged write creates no version."""
+    return (
+        old.public_opt_in == new.public_opt_in
+        and old.share_provisional == new.share_provisional
+        and old.require_review_all == new.require_review_all
+        and old.enrichment_enabled == new.enrichment_enabled
+        and old.category_settings == new.category_settings
+        and old.questions_enabled == new.questions_enabled
+        and old.question_settings == new.question_settings
     )
 
 
@@ -701,12 +745,14 @@ async def set_policy(
     await _authz_call(authz.require_contribute(None, principal, profile_id))
     actor = _actor(principal)
 
-    def write() -> tuple[PolicyView, PolicyView] | PolicyResponse:
+    def write() -> tuple[PolicyView, PolicyView] | PolicyResponse | None:
         _lock_profile(session, profile_id, exclusive=True)
         old = _policy_view(_current_policy_row(session, profile_id))
         if old.version != update.expected_version:
             return _policy_response(old)
         new = _validate_policy_update(update, old)
+        if old.approved and _same_policy(old, new):
+            return None  # nothing changed: no new version
         version = (old.version or 0) + 1
         session.add(
             ContributionPolicy(
@@ -741,6 +787,9 @@ async def set_policy(
         result = await _in_thread(write)
         if isinstance(result, PolicyResponse):
             raise PolicyVersionConflict(result)
+        if result is None:
+            await _in_thread(session.rollback)
+            return await _in_thread(lambda: _read_policy_response(session, profile_id))
         old, new = result
         if old.public_opt_in and not new.public_opt_in:
             # Revoke-class: after the INSERT, before commit; a failure rolls the version back.
@@ -1166,6 +1215,110 @@ async def get_summary(
     if profile_id is None:
         return _empty_summary(since)
     return await _summary(session, principal, profile_id, since)
+
+
+# --- Shared reads (other people's profiles) --------------------------------------------------
+
+SHARED_PROVISIONAL_CAVEAT = (
+    "Facts marked provisional were inferred or have low confidence and are not yet confirmed "
+    "by this person; treat them as hints, not certainties."
+)
+
+
+class SharedFactOut(BaseModel):
+    """One fact as a viewer sees it: F4's ``SharedClaim`` projection. Never contributor,
+    provenance, status, policy version or edit history."""
+
+    id: UUID
+    category: str
+    statement: str
+    details: dict[str, Any] | None
+    audience: Audience
+    evidence_type: EvidenceType
+    confidence: Confidence
+    observed_at: date | None
+    observed_precision: ObservedPrecision
+    provisional: bool
+
+
+class SharedProfileOut(BaseModel):
+    """A profile as the viewer may see it: minimal identity plus permitted facts."""
+
+    handle: str | None
+    display_name: str | None
+    avatar_url: str | None
+    facts: list[SharedFactOut]
+    # Set only when a returned fact is provisional.
+    provisional_caveat: str | None
+
+
+def _shared_fact(item: SharedClaim | VisibleClaim) -> SharedFactOut:
+    """The shared projection. The owner tier yields ``VisibleClaim`` (the ORM row); only the
+    same columns as ``SharedClaim`` are copied, so the shape never depends on the viewer."""
+    source: Any = item.claim if isinstance(item, VisibleClaim) else item
+    return SharedFactOut(
+        id=source.id,
+        category=source.category,
+        statement=source.statement,
+        details=source.details,
+        audience=Audience(source.audience),
+        evidence_type=EvidenceType(source.evidence_type),
+        confidence=Confidence(source.confidence),
+        observed_at=source.observed_at,
+        observed_precision=ObservedPrecision(source.observed_precision),
+        provisional=item.provisional,
+    )
+
+
+async def read_shared_profile(
+    session: Session, principal: PrincipalLike, *, profile_id: UUID | None
+) -> SharedProfileOut:
+    """Another person's profile as ``principal`` may see it. INTERNAL: call it only with the
+    ``profile_id`` from F6's ``resolve_handle`` for the same principal (never a caller-supplied
+    id), so hidden and blocking targets stay hidden before any tuple exists.
+
+    Facts come only from F4's ``visible_claims`` (tier, live statuses, audience, current
+    ``share_provisional`` and ``public_opt_in``); nothing is filtered here. Raises
+    ``SharedProfileNotFound`` when the target has no profile or the viewer's tier is ``none``,
+    and ``AuthorizationUnavailable`` when OpenFGA fails. Read-only; never creates a profile.
+
+    The owner (or the owner's agent) reading their own handle gets the same shape, with every
+    live fact of their own (including Only Me); ``get_my_profile`` is the management read.
+    """
+    if profile_id is None:
+        raise SharedProfileNotFound()
+    try:
+        visible = await _authz_call(visible_claims(session, principal, profile_id))
+    except AuthorizationDenied:
+        await _in_thread(session.rollback)
+        raise SharedProfileNotFound() from None
+    except BaseException:
+        await _in_thread(session.rollback)
+        raise
+    # Project before the rollback below expires any ORM rows (owner tier).
+    facts = [_shared_fact(item) for item in visible.claims]
+
+    def identity() -> tuple[str | None, str | None, str | None]:
+        try:
+            row = session.execute(
+                select(Handle.handle, User.display_name, Handle.avatar_url)
+                .select_from(Profile)
+                .join(User, User.id == Profile.user_id)
+                .outerjoin(Handle, Handle.user_id == Profile.user_id)
+                .where(Profile.id == profile_id)
+            ).one()
+            return row[0], row[1], row[2]
+        finally:
+            session.rollback()  # end the read transaction; nothing was written
+
+    handle, display_name, avatar_url = await _in_thread(identity)
+    return SharedProfileOut(
+        handle=handle,
+        display_name=display_name,
+        avatar_url=avatar_url,
+        facts=facts,
+        provisional_caveat=SHARED_PROVISIONAL_CAVEAT if visible.has_provisional else None,
+    )
 
 
 # --- Fact changes -----------------------------------------------------------------------------

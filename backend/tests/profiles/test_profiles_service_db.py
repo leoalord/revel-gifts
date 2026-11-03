@@ -12,7 +12,7 @@ import anyio
 import pytest
 from authz_fakes import FakeFga
 from conftest import World
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from revel.auth import authz
@@ -170,7 +170,6 @@ async def test_policy_preserves_f7_question_settings(
     "settings",
     [
         {"size": CategorySetting(audience=Audience.CONNECTIONS)},  # wider than its default
-        {"interest": CategorySetting(audience=Audience.PUBLIC)},  # Public without the opt-in
         {"dislike": CategorySetting(audience=Audience.PUBLIC)},
         {"sensitive": CategorySetting(audience=Audience.TRUSTED_CIRCLE)},
         {"health": CategorySetting(audience=Audience.ONLY_ME)},
@@ -577,7 +576,7 @@ async def test_claim_events_record_actor_policy_and_acceptance(
     factory: sessionmaker[Session], session: Session, world: World
 ) -> None:
     await approve_policy(session, world)
-    await approve_policy(session, world, expected=1)
+    await approve_policy(session, world, expected=1, share_provisional=False)  # version 2
     (auto,) = await add(session, world.alex.mcp, fact())
     (mine,) = await add(session, world.alex.ui, fact("wish", "Kayak"))
     (held,) = await add(session, world.alex.mcp, fact("sensitive", "Volunteered"))
@@ -898,3 +897,139 @@ async def test_concurrent_batches_superseding_in_opposite_order_do_not_deadlock(
         tg.start_soon(batch, a, b)
         tg.start_soon(batch, b, a)
     assert sorted(outcomes) == [["accepted", "accepted"], ["rejected", "rejected"]]
+
+
+# --- RG-56 (#28) follow-ups -------------------------------------------------------------------
+
+
+async def test_public_category_audience_without_opt_in_is_normalized(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    """Without the opt-in, an eligible category's explicit Public audience falls back to the
+    category default (the setting is dropped) instead of a 400; other keys are kept."""
+    response = await approve_policy(
+        session,
+        world,
+        category_settings={
+            "interest": CategorySetting(audience=Audience.PUBLIC, require_review=True),
+            "wish": CategorySetting(audience=Audience.PUBLIC),
+            "style": CategorySetting(audience=Audience.TRUSTED_CIRCLE),
+        },
+    )
+    assert response.policy is not None and response.policy.public_opt_in is False
+    assert response.policy.category_settings == {
+        "interest": CategorySetting(require_review=True),
+        "style": CategorySetting(audience=Audience.TRUSTED_CIRCLE),
+    }
+    by_id = {c.id: c for c in response.categories}
+    assert by_id["interest"].effective_audience is Audience.CONNECTIONS
+    assert by_id["wish"].effective_audience is Audience.CONNECTIONS
+    # Withdrawing the opt-in while re-sending Public settings is accepted the same way.
+    await approve_policy(session, world, expected=1, public_opt_in=True)
+    withdrawn = await approve_policy(
+        session,
+        world,
+        expected=2,
+        public_opt_in=False,
+        category_settings={"interest": CategorySetting(audience=Audience.PUBLIC)},
+    )
+    assert withdrawn.policy is not None and withdrawn.policy.category_settings == {}
+    # Never-eligible categories are still rejected (Public is never valid there).
+    with pytest.raises(PolicyInvalid):
+        await approve_policy(
+            session,
+            world,
+            expected=3,
+            category_settings={"dislike": CategorySetting(audience=Audience.PUBLIC)},
+        )
+
+
+async def test_unchanged_policy_write_creates_no_version(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    def versions() -> list[int]:
+        with factory() as s:
+            return list(
+                s.execute(
+                    select(ContributionPolicy.version).order_by(ContributionPolicy.version)
+                ).scalars()
+            )
+
+    first = await approve_policy(
+        session, world, category_settings={"size": CategorySetting(audience=Audience.ONLY_ME)}
+    )
+    assert first.policy is not None and versions() == [1]
+    # Same content (omitted fields carried forward, or re-sent explicitly): no new version.
+    same = await approve_policy(session, world, expected=1)
+    again = await approve_policy(
+        session,
+        world,
+        expected=1,
+        public_opt_in=False,
+        share_provisional=True,
+        category_settings={"size": CategorySetting(audience=Audience.ONLY_ME)},
+    )
+    assert versions() == [1]
+    assert same == first and again == first
+    # A stale expected_version is still a conflict, even for an unchanged write.
+    with pytest.raises(PolicyVersionConflict):
+        await approve_policy(session, world, expected=None)
+    # A real change appends version 2.
+    changed = await approve_policy(session, world, expected=1, require_review_all=True)
+    assert changed.policy is not None and changed.policy.version == 2
+    assert versions() == [1, 2]
+
+
+async def test_approve_locks_replacement_and_target_in_id_order(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    """approve(P) for a replacement P of target T locks {P, T} in id order, the order add_facts
+    uses. So when a batch already holds T (the lower id) and next needs P, approve waits on T
+    WITHOUT holding P, and the batch gets P: no deadlock. (Before RG-56 approve locked P first,
+    then T: the two would deadlock.)"""
+    await approve_policy(session, world)
+    for _ in range(20):  # ids are random: find a pair with T < P
+        (t,) = await add(session, world.alex.ui, fact(statement="Target"))
+        (p,) = await add(
+            session,
+            world.alex.mcp,
+            fact(statement="Replacement", supersedes_id=str(t.claim_id), involves_others=True),
+        )
+        assert p.outcome == "pending_review"
+        if t.claim_id < p.claim_id:
+            break
+    else:  # pragma: no cover - probability 2**-20
+        pytest.fail("no T < P pair")
+
+    batch = factory()  # stands in for a batch that locked T first (lock_claims, id order)
+    try:
+        batch.execute(text("SET LOCAL lock_timeout = '5s'"))
+        batch.execute(select(Claim.id).where(Claim.id == t.claim_id).with_for_update()).scalar_one()
+        approved: list[Any] = []
+
+        async def approve() -> None:
+            with factory() as s:
+                approved.append(await profiles.approve_fact(s, world.alex.ui, p.claim_id))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(approve)
+            # Wait until approve is blocked on a row lock.
+            for _ in range(100):
+                with factory() as probe:
+                    waiting = probe.execute(
+                        text("SELECT count(*) FROM pg_locks WHERE NOT granted")
+                    ).scalar_one()
+                if waiting:
+                    break
+                await anyio.sleep(0.05)
+            assert waiting, "approve never waited for the target lock"
+            # The batch can still take P: approve does not hold it while waiting for T.
+            batch.execute(
+                text("SELECT id FROM claims WHERE id = :id FOR UPDATE NOWAIT"),
+                {"id": p.claim_id},
+            ).one()
+            batch.rollback()
+    finally:
+        batch.close()
+    assert approved and approved[0].status is ClaimStatus.ACTIVE
+    assert claim_row(factory, t.claim_id).status == ClaimStatus.SUPERSEDED.value

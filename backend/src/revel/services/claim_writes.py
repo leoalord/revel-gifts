@@ -336,7 +336,18 @@ def approve(
 ) -> Claim:
     """Owner approves a pending fact: it becomes ``active`` (explicitly accepted) and, for a
     replacement, retires its target in the same transaction (409 if the target is no longer
-    live). ``check`` runs on the locked row (e.g. Public still allowed) and may raise."""
+    live). ``check`` runs on the locked row (e.g. Public still allowed) and may raise.
+
+    Lock order: a replacement and its target are locked together in id order (``lock_claims``)
+    BEFORE either is locked singly, the same global order ``add_facts`` uses, so an approval
+    never holds the replacement while waiting for a target that a concurrent batch (which
+    locked the target first) holds while waiting for the replacement."""
+    # ``supersedes_id`` is fixed at insert, so this unlocked read names the right pair.
+    supersedes_id = session.execute(
+        select(Claim.supersedes_id).where(Claim.id == claim_id, Claim.profile_id == profile_id)
+    ).scalar_one_or_none()
+    if supersedes_id is not None:
+        lock_claims(session, profile_id, {claim_id, supersedes_id})
     claim = lock_claim(session, profile_id, claim_id)
     if claim.status != ClaimStatus.PENDING_REVIEW.value:
         raise ClaimStateConflict(claim, "fact_not_pending")
