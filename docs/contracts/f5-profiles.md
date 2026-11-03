@@ -162,15 +162,59 @@ the fact), `PolicyVersionConflict` (409), `PolicyInvalid` / `InvalidRequest` (40
 
 | Operation | MCP tool (agent) | HTTP bearer (agent API) | HTTP browser (F8; writes same-origin) |
 | --- | --- | --- | --- |
-| Categories + current policy | `get_contribution_policy` | `GET /api/v1/profile/policy` | `GET /api/ui/profile/policy` |
+| Categories + current policy | `get_profile()` → `policy` | `GET /api/v1/profile/policy` | `GET /api/ui/profile/policy` |
 | Approve/change policy | `set_contribution_policy` (widening needs `owner_confirmed`) | `PUT /api/v1/profile/policy` (same) | `PUT /api/ui/profile/policy` |
 | Contribute facts | `add_facts` | `POST /api/v1/profile/facts` | `POST /api/ui/profile/facts` |
-| Owner read (facts + summary) | `get_my_profile` | `GET /api/v1/profile` | `GET /api/ui/profile` |
-| Contribution summary | in `get_my_profile` | `GET /api/v1/profile/summary?since=` | `GET /api/ui/profile/summary?since=` |
+| Owner read (facts + summary) | `get_profile()` (no handle) | `GET /api/v1/profile` | `GET /api/ui/profile` |
+| Contribution summary | in `get_profile()` | `GET /api/v1/profile/summary?since=` | `GET /api/ui/profile/summary?since=` |
 | Correct (new statement/details) | `add_facts` with `supersedes_id` | same | `PATCH /api/ui/profile/facts/{id}` |
-| Change audience | `set_fact_audience` (widening needs `owner_confirmed`) | `PATCH /api/v1/profile/facts/{id}/audience` (same) | `PATCH /api/ui/profile/facts/{id}` |
-| Remove (undo) | `remove_fact` | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
-| Approve/reject pending | `review_pending_fact(fact_id, decision)` (approve needs `owner_confirmed`) | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
+| Change audience | `update_fact(action="set_audience", audience)` (widening needs `owner_confirmed`) | `PATCH /api/v1/profile/facts/{id}/audience` (same) | `PATCH /api/ui/profile/facts/{id}` |
+| Remove (undo) | `remove_fact` (a pending fact is rejected instead, below) | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
+| Approve/reject pending | `update_fact(action="approve")` (needs `owner_confirmed`); reject: `remove_fact` | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
+
+### MCP tools (RG-59, #31)
+
+Five F5 tools. Read-only, write and destructive operations are never mixed in one tool, so the
+annotations stay accurate. Every tool also has `openWorldHint: false`.
+
+| Tool | Arguments | Returns | Annotations |
+| --- | --- | --- | --- |
+| `get_profile` | `handle?: str` | no handle: owner view; handle: shared view | `readOnlyHint`, `idempotentHint` |
+| `add_facts` | `facts: [FactInput]` (1-20) | `{"results": [...]}` | write, not destructive, not idempotent |
+| `set_contribution_policy` | `expected_version` (required, nullable), policy fields, `owner_confirmed=false` | the policy response | write, not destructive, not idempotent |
+| `update_fact` | `fact_id`, `action: "set_audience" \| "approve"`, `audience?`, `owner_confirmed=false` | the fact | write, not destructive, not idempotent |
+| `remove_fact` | `fact_id`, `owner_confirmed=false` | the fact (`status: removed`) | `destructiveHint`, not idempotent |
+
+- `get_profile()` (no handle) is the owner read: `get_my_profile` (F4 `owner_claims`) plus
+  `get_policy`, as `{"profile_id", "policy_version", "facts", "summary", "policy"}`, where
+  `policy` is exactly the `GET .../profile/policy` body (`policy`, `defaults`, `audiences`,
+  `provisional_caveat`, `categories`). `policy.policy` / `policy.defaults` are what the owner
+  read returns as `policy` / `defaults`. Default facts (live and pending) and the default
+  7-day summary; the MCP tool has no status or `since` filter. `get_profile(handle)` is the
+  shared read below (`resolve_handle` → `read_shared_profile`, F4 `visible_claims`),
+  unchanged, with the same non-revealing error. The two paths share no service call.
+- `update_fact`: `set_audience` requires `audience` (`public`, `connections`,
+  `trusted_circle`, `only_me`) and is `set_fact_audience`; `approve` takes no `audience` and is
+  `approve_fact`. `owner_confirmed` works as before (widening and every approval).
+- `remove_fact`: a fact pending review is rejected through `reject_fact` (audit event
+  `rejected`; `owner_confirmed=true`, meant only for when the owner explicitly asked to reject
+  it, records acceptance `explicit`, else `automatic`). Any other fact goes through
+  `remove_fact` as before (`owner_confirmed` ignored). The adapter calls `reject_fact` first;
+  only its `fact_not_pending` refusal (rolled back, no event) falls back to `remove_fact`. Both
+  decide under the fact's row lock, so there is no stale status read. A fact already removed or
+  replaced is the usual conflict error.
+- Per-action validation happens before any service call. Errors are `ToolError`s with the
+  `invalid_request` code shared with the F6/F7 tools:
+  `invalid_request: Unknown action '<x>' for update_fact; expected one of: set_audience, approve.`,
+  `invalid_request: Action 'set_audience' requires audience.`,
+  `invalid_request: Action 'set_audience' requires audience to be one of: public, connections, trusted_circle, only_me.`,
+  `invalid_request: Action 'approve' does not accept audience.` (the SDK prefixes tool errors
+  with `Error executing tool <name>: `).
+- `get_profile` output has no fixed `outputSchema` (a plain object), because the owner and
+  shared views differ and a union would wrap the shared view in `{"result": ...}`.
+
+Removed in RG-59, not aliased: `get_my_profile`, `get_contribution_policy`,
+`set_fact_audience`, `review_pending_fact`. The HTTP routes are unchanged.
 
 ### Owner confirmation (agent-first owner controls, #29)
 
@@ -278,8 +322,9 @@ eligibility and the opt-in, and `sensitive` facts are always Only Me.
 the same body plus `"owner_confirmed": false` (default); the MCP `set_contribution_policy`
 takes the same fields as arguments (`expected_version` required, nullable) and returns the
 same shape. `POST /api/v1/profile/facts/{id}/approve` and `/reject` take an optional body
-`{"owner_confirmed": false}` → the fact; MCP `review_pending_fact(fact_id, decision:
-"approve"|"reject", owner_confirmed=false)` → the fact. 409 `{"detail": "policy_version_conflict", "policy": {...}, "categories": [...], "provisional_caveat": "..."}` (the current `GET .../policy` shape plus `detail`).
+`{"owner_confirmed": false}` → the fact; MCP `update_fact(fact_id, action="approve",
+owner_confirmed=false)` and `remove_fact(fact_id, owner_confirmed=false)` on a pending fact
+→ the fact. 409 `{"detail": "policy_version_conflict", "policy": {...}, "categories": [...], "provisional_caveat": "..."}` (the current `GET .../policy` shape plus `detail`).
 
 `POST .../facts` body `{"facts": [FactInput, ...]}` →
 `{"results": [{"index": 0, "outcome": "accepted", "claim_id": "...", "status": "active",
@@ -311,7 +356,7 @@ changes create a replacement; audience-only changes update in place. Fact-level 
 `{"detail": "<reason>", "fact": {...current fact...}}` (reasons: `fact_not_editable`,
 `fact_not_removable`, `fact_not_pending`, `fact_not_live`, `superseded_fact_not_live`,
 `audience_not_allowed`). `PATCH /api/v1/profile/facts/{id}/audience` body `{"audience": ..., "owner_confirmed"?: false}`
-(MCP `set_fact_audience(fact_id, audience, owner_confirmed=false)`).
+(MCP `update_fact(fact_id, action="set_audience", audience, owner_confirmed=false)`).
 PATCH field errors are 400 with field-level locations, e.g.
 `{"detail": [{"loc": ["body", "statement"], "msg": "..."}]}` (also `["body", "details"]`,
 `["body", "observed_at"]`, `["body", "audience"]`); the audience message names the actual rule
@@ -339,8 +384,11 @@ fails, e.g. another user's agent, a cross-origin UI write, an agent correction v
 caller's** (never reveals existence); 409 policy version conflict or a fact that changed state;
 503 authorization/identity service unavailable (generic text, no SDK detail).
 MCP tools return the same outcomes as tool results or `ToolError` with generic text, except
-`owner_confirmation_required` (lists the changes) and policy field errors from
-`set_contribution_policy` (`Invalid request: <field path>: <message>; ...`).
+`owner_confirmation_required` (lists the changes), policy field errors from
+`set_contribution_policy` (`Invalid request: <field path>: <message>; ...`) and the
+`invalid_request: ...` per-action errors of `update_fact` (RG-59). The policy version
+conflict text is `The policy changed; read it again with get_profile and retry with its
+version`.
 
 ## Shared profile reads (#28, RG-56)
 
@@ -377,7 +425,8 @@ Connections viewers see Connections and Public facts, Trusted Circle also Truste
 an unconnected viewer Public facts only while the owner is opted in. Only Me, pending,
 superseded and removed facts are never returned to anyone else. A user's agents see what the
 user sees. The owner (or the owner's agent) reading their own handle gets the same shape with
-all of their own live facts (including Only Me); `get_my_profile` remains the management read.
+all of their own live facts (including Only Me); `get_profile()` without a handle remains the
+management read.
 
 Errors (fixed text; never service or SDK detail):
 
@@ -397,3 +446,12 @@ Errors (fixed text; never service or SDK detail):
 Python: `read_shared_profile(session, principal, *, profile_id: UUID | None) ->
 SharedProfileOut` (raises `SharedProfileNotFound` for `None` or tier `none`,
 `AuthorizationUnavailable` on OpenFGA failure); `SharedProfileOut`, `SharedFactOut`.
+
+## Changelog
+
+- 2026-11-02, RG-59 (#31): MCP tools consolidated. `get_profile(handle?)` replaces
+  `get_my_profile`, `get_profile(handle)` and `get_contribution_policy` (owner view now carries
+  the full policy response as `policy`); `update_fact(action=set_audience|approve)` replaces
+  `set_fact_audience` and `review_pending_fact`'s approve; `remove_fact` now also rejects a
+  pending fact (audit `rejected`) and takes `owner_confirmed`. Old names removed. Services and
+  HTTP routes unchanged.

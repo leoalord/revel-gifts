@@ -60,6 +60,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
+import anyio
 import anyio.to_thread
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select, update
@@ -126,6 +127,8 @@ INBOX_ASSIGNMENT_STATUSES = (
     AssignmentStatus.WAITING_FOR_USER.value,
 )
 MAX_UPDATES = 50
+# Overall cap on get_updates' per-assignment authorization checks (fails closed as 503).
+GET_UPDATES_AUTHZ_DEADLINE_SECONDS = 10.0
 _RATE_LOCK_PREFIX = "revel.questions.rate:"
 
 
@@ -1024,22 +1027,27 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
     # ``can_release_answer`` ultimately needs a tier for; cached per (requester, profile).
     permitted: list[_InboxRow] = []
     requester_visible: dict[tuple[UUID, UUID], bool] = {}
-    for row in live:
-        try:
-            allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
-        except RespondCheckUnavailable as exc:
-            raise _authz_unavailable(exc) from None
-        if not allowed:
-            continue
-        key = (row.requester_user_id, row.profile_id)
-        if key not in requester_visible:
-            requester_visible[key] = await requester_can_view(
-                row.requester_user_id, row.profile_id, fga=deps.fga
-            )
-        if requester_visible[key]:
-            permitted.append(row)
-        if len(permitted) >= MAX_UPDATES:
-            break
+    try:
+        # One overall deadline across all per-assignment checks (each has its own timeout).
+        with anyio.fail_after(GET_UPDATES_AUTHZ_DEADLINE_SECONDS):
+            for row in live:
+                try:
+                    allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
+                except RespondCheckUnavailable as exc:
+                    raise _authz_unavailable(exc) from None
+                if not allowed:
+                    continue
+                key = (row.requester_user_id, row.profile_id)
+                if key not in requester_visible:
+                    requester_visible[key] = await requester_can_view(
+                        row.requester_user_id, row.profile_id, fga=deps.fga
+                    )
+                if requester_visible[key]:
+                    permitted.append(row)
+                if len(permitted) >= MAX_UPDATES:
+                    break
+    except TimeoutError as exc:
+        raise _authz_unavailable(exc) from None
     if not permitted:
         return UpdatesResponse(items=[])
 

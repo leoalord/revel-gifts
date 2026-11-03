@@ -16,6 +16,7 @@ from typing import Any, get_args
 from uuid import uuid4
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel
 
 from revel.api import connections as connections_api
@@ -23,7 +24,7 @@ from revel.db.enums import AssignmentStatus, ConnectionRequestStatus, Connection
 from revel.db.models.connections import HANDLE_PATTERN
 from revel.guidance import documents
 from revel.guidance.operations import IMPLEMENTED_MCP_TOOLS
-from revel.mcp import connection_tools, profile_tools
+from revel.mcp import connection_tools, profile_tools, question_tools
 from revel.mcp.server import create_mcp_server
 from revel.services import answers, connections, profiles, question_leases, question_routing
 from revel.services import questions as questions_svc
@@ -54,13 +55,18 @@ TOOLS = _tools()
 SERVICE_MODELS: dict[str, tuple[type[BaseModel], frozenset[str]]] = {
     "submit_question": (questions_svc.SubmitQuestionRequest, frozenset()),
     "submit_answer": (answers.SubmitAnswerRequest, frozenset({"assignment_id"})),
-    "claim_assignment": (question_leases.ClaimRequest, frozenset({"assignment_id"})),
-    "renew_assignment": (question_leases.LeaseVersionRequest, frozenset({"assignment_id"})),
-    "release_assignment": (question_leases.LeaseVersionRequest, frozenset({"assignment_id"})),
-    "report_user_contact": (question_leases.UserContactRequest, frozenset({"assignment_id"})),
-    "decline_assignment": (question_leases.DeclineRequest, frozenset({"assignment_id"})),
     "request_connection": (connections_api.RequestBody, frozenset()),
 }
+# update_assignment action -> the strict service request model that action builds (the same
+# model its HTTP route takes); assignment_id and action are not part of it.
+ACTION_MODELS: dict[str, type[BaseModel]] = {
+    "claim": question_leases.ClaimRequest,
+    "renew": question_leases.LeaseVersionRequest,
+    "release": question_leases.LeaseVersionRequest,
+    "report_user_contact": question_leases.UserContactRequest,
+    "decline": question_leases.DeclineRequest,
+}
+ACTION_OUTSIDE = frozenset({"assignment_id", "action"})
 
 
 # --- Vocabulary derived from code ---------------------------------------------------------------
@@ -122,12 +128,17 @@ RESULT_MODELS: tuple[type[BaseModel], ...] = (
     answers.AnswerOut,
     answers.GetAnswerResponse,
     answers.QuestionStatusResponse,
+    question_tools.GetQuestionResponse,
     question_leases.LeaseResponse,
 )
 GET_ANSWER_RESULTS = frozenset(
     get_args(answers.GetAnswerResponse.model_fields["result"].annotation)
 )
 DECLINE_REASONS = frozenset(get_args(question_leases.DeclineReason))
+# list_connections returns a plain dict; its keys, read from F6's adapter.
+LIST_CONNECTIONS_KEYS = frozenset(
+    re.findall(r'result\["([a-z_]+)"\]', inspect.getsource(connection_tools))
+)
 F6_F7_VOCABULARY = frozenset(
     {term for tool in TOOLS.values() for term in _schema_terms(tool.parameters)}
     | {term for model in RESULT_MODELS for term in _schema_terms(model.model_json_schema())}
@@ -137,6 +148,7 @@ F6_F7_VOCABULARY = frozenset(
     | EVIDENCE_REASONS
     | GET_ANSWER_RESULTS
     | DECLINE_REASONS
+    | LIST_CONNECTIONS_KEYS
 )
 
 
@@ -187,6 +199,13 @@ def test_example_is_valid_tool_input(
     if tool in SERVICE_MODELS:
         model, outside = SERVICE_MODELS[tool]
         model.model_validate({k: v for k, v in data.items() if k not in outside})  # strict
+    if tool == "update_assignment":
+        action = data["action"]
+        required, allowed = question_tools._ACTION_PARAMS[action]
+        params = {k for k, v in data.items() if k not in ACTION_OUTSIDE and v is not None}
+        assert required <= params <= allowed, (action, sorted(params))
+        body = {k: v for k, v in data.items() if k not in ACTION_OUTSIDE}
+        ACTION_MODELS[action].model_validate(body)  # strict
 
 
 # --- Giver ---------------------------------------------------------------------------------------
@@ -330,16 +349,20 @@ def test_answer_never_contacts_user_without_human_contact_lease() -> None:
     )
     assert "Only after that claim succeeds, ask your user" in flat
     assert "never treat this as permission to contact your user" in flat
-    assert "release_assignment` first" not in flat  # F7: no release-and-reclaim advice
+    assert "action `release` first" not in flat  # F7: no release-and-reclaim advice
     assert "only the human-contact upgrade with your current `lease_version` succeeds" in flat
 
 
 def test_answer_upgrade_example_is_a_claim_request() -> None:
-    upgrades = [d for tool, _, d in examples(ANSWER) if tool == "claim_assignment"]
-    assert upgrades, "no claim_assignment upgrade example"
+    upgrades = [
+        d
+        for tool, _, d in examples(ANSWER)
+        if tool == "update_assignment" and d["action"] == "claim"
+    ]
+    assert upgrades, "no update_assignment claim (upgrade) example"
     for data in upgrades:
         request = question_leases.ClaimRequest.model_validate(
-            {k: v for k, v in data.items() if k != "assignment_id"}
+            {k: v for k, v in data.items() if k not in ACTION_OUTSIDE}
         )
         # F7 upgrades in place only with human_contact and the current lease_version.
         assert request.human_contact is True and request.lease_version is not None
@@ -417,7 +440,10 @@ def test_connect_limits_and_rules_match_f6() -> None:
 
 # --- Connect: owner confirmation (F6 RG-27 follow-up) -------------------------------------------
 
-CONFIRM_TOOLS = ("respond_to_connection_request", "change_connection_tier")
+RESPOND = "respond_to_connection_request"
+END = "end_connection"
+# The actions that can widen access (approve, and change_tier up to Trusted Circle).
+CONFIRM_ACTIONS = ("approve", "change_tier")
 SAMPLE_REQUESTER = "Sam Rivers (@sam_rivers)"
 
 
@@ -436,13 +462,12 @@ def _change_for(
 
 
 def test_connect_tools_take_owner_confirmed() -> None:
-    for name in CONFIRM_TOOLS:
-        prop = TOOLS[name].parameters["properties"]["owner_confirmed"]
-        assert prop["type"] == "boolean" and prop["default"] is False, name
-        assert prop["description"] == connections.OWNER_CONFIRMED_DESCRIPTION
-        assert "owner_confirmed" not in TOOLS[name].parameters.get("required", [])
-    for name in ("revoke_connection", "cancel_connection_request"):
-        assert "owner_confirmed" not in TOOLS[name].parameters["properties"], name
+    prop = TOOLS[RESPOND].parameters["properties"]["owner_confirmed"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+    assert prop["description"] == connections.OWNER_CONFIRMED_DESCRIPTION
+    assert "owner_confirmed" not in TOOLS[RESPOND].parameters.get("required", [])
+    assert "owner_confirmed" not in TOOLS[END].parameters["properties"]
+    assert "tier" not in TOOLS[END].parameters["properties"]
 
 
 def test_connect_confirmation_error_matches_f6() -> None:
@@ -471,27 +496,189 @@ def test_connect_change_lines_match_f6(monkeypatch: pytest.MonkeyPatch) -> None:
     # Downgrade and unchanged tier need no flag, as the skill says.
     assert _change_for(monkeypatch, approved, trusted.value, conn) is None
     assert _change_for(monkeypatch, approved, trusted.value, trusted) is None
+    assert _change_for(monkeypatch, approved, conn.value, conn) is None  # unchanged Connections
 
 
 def test_connect_two_step_examples(monkeypatch: pytest.MonkeyPatch) -> None:
-    found = [(t, a.get("step"), d) for t, a, d in examples(CONNECT) if t in CONFIRM_TOOLS]
-    ones = [(t, d) for t, s, d in found if s == "1"]
-    twos = [(t, d) for t, s, d in found if s == "2"]
-    assert {t for t, _ in ones} == set(CONFIRM_TOOLS) and len(ones) == len(twos)
-    for (tool1, first), (tool2, second) in zip(ones, twos, strict=True):
-        assert tool1 == tool2 and not first.get("owner_confirmed")
+    found = [(a.get("step"), d) for t, a, d in examples(CONNECT) if t == RESPOND]
+    ones = [d for s, d in found if s == "1"]
+    twos = [d for s, d in found if s == "2"]
+    assert {d["action"] for d in ones} == set(CONFIRM_ACTIONS) and len(ones) == len(twos)
+    for first, second in zip(ones, twos, strict=True):
+        assert not first.get("owner_confirmed")
         assert second == first | {"owner_confirmed": True}
-    singles = [(t, d) for t, s, d in found if s is None]
-    assert {t for t, _ in singles} == set(CONFIRM_TOOLS)
+    singles = [d for s, d in found if s is None]
+    assert {d["action"] for d in singles} == {"decline", "change_tier"}
     approved = ConnectionRequestStatus.APPROVED.value
-    for tool, data in singles:
-        assert not data.get("owner_confirmed"), (tool, data)
-        if tool == "change_connection_tier":  # a downgrade from Trusted Circle: no flag
+    for data in singles:
+        assert not data.get("owner_confirmed"), data
+        if data["action"] == "change_tier":  # a downgrade from Trusted Circle: no flag
             tier = ConnectionTier(data["tier"])
             trusted = ConnectionTier.TRUSTED_CIRCLE.value
             assert _change_for(monkeypatch, approved, trusted, tier) is None
+    ends = [d for t, _, d in examples(CONNECT) if t == END]
+    assert ends and all(set(d) == {"request_id", "action"} for d in ends)
+
+
+# --- Connect: action tools (RG-59) ---------------------------------------------------------------
+
+CONNECT_ROW = re.compile(r"^\| `([a-z_]+)` \| `([a-z_]+)` \|([^|]*)\|([^|]*)\|$", re.M)
+CONNECT_SAMPLES: dict[str, Any] = {"tier": "connections", "owner_confirmed": True}
+
+
+def _documented_connect_actions() -> dict[tuple[str, str], tuple[str, str]]:
+    """(tool, action) -> (tier cell, owner_confirmed cell) from the connect skill's table."""
+    body = documents()[CONNECT].body
+    header = "| Tool | `action` | `tier` | `owner_confirmed` |"
+    assert header in body
+    table = body.split(header, 1)[1].split("\n\n", 1)[0]
+    rows = {(t, a): (tier.strip(), oc.strip()) for t, a, tier, oc in CONNECT_ROW.findall(table)}
+    assert rows
+    return rows
+
+
+def test_connect_action_table_matches_code() -> None:
+    rows = _documented_connect_actions()
+    for tool, actions in (
+        (RESPOND, connection_tools._RESPOND_ACTIONS),
+        (END, connection_tools._END_ACTIONS),
+    ):
+        assert TOOLS[tool].parameters["properties"]["action"]["enum"] == list(actions)
+        assert [a for t, a in rows if t == tool] == list(actions), tool
+    for (tool, action), (tier, confirmed) in rows.items():
+        takes_tier = tool == RESPOND and action in connection_tools._TIER_ACTIONS
+        assert (tier == "required") is takes_tier, (tool, action)
+        assert (tier == "not accepted") is (not takes_tier), (tool, action)
+        has_flag = "owner_confirmed" in TOOLS[tool].parameters["properties"]
+        if takes_tier:
+            assert confirmed.startswith("true only after the owner's yes"), (tool, action)
+        elif has_flag:  # decline, block: false is the default, true is refused
+            assert confirmed == "refused when true", (tool, action)
+        else:  # end_connection has no owner_confirmed parameter at all
+            assert confirmed == "not accepted", (tool, action)
+    assert TOOLS["list_connections"].parameters["properties"]["include"]["enum"] == list(
+        connection_tools._INCLUDE
+    )
+
+
+async def _connect_error(tool: str, args: dict[str, Any]) -> str:
+    """The tool's own refusal; action validation runs before any principal or database."""
+    server = create_mcp_server(
+        Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    )
+    if tool != "list_connections":
+        args = {"request_id": str(uuid4()), **args}
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool(tool, args)
+    text = str(exc.value)
+    prefix = f"Error executing tool {tool}: "
+    assert text.startswith(prefix), text
+    return text.removeprefix(prefix)
+
+
+@pytest.mark.anyio
+async def test_documented_connect_params_are_enforced() -> None:
+    for (tool, action), (tier, _confirmed) in _documented_connect_actions().items():
+        if tier == "required":
+            text = await _connect_error(tool, {"action": action})
+            assert text == f"invalid_request: Action '{action}' requires tier.", text
+        elif tool == RESPOND:
+            for name in ("tier", "owner_confirmed"):
+                text = await _connect_error(tool, {"action": action, name: CONNECT_SAMPLES[name]})
+                assert text == f"invalid_request: Action '{action}' does not accept {name}."
+
+
+QUOTED_CONNECT_INVALID = re.compile(r'"(invalid_request: [^"]+)"')
+
+
+@pytest.mark.anyio
+async def test_quoted_connect_errors_match_the_tools() -> None:
+    flat = _flat(CONNECT)
+    kinds = set()
+    for text in QUOTED_CONNECT_INVALID.findall(flat):
+        if m := re.fullmatch(r"invalid_request: Action '(\w+)' requires (\w+)\.", text):
+            tool, args = RESPOND, {"action": m.group(1)}
+            kinds.add("requires")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' does not accept (\w+)\.", text):
+            action, extra = m.groups()
+            tool, args = RESPOND, {"action": action, extra: CONNECT_SAMPLES[extra]}
+            kinds.add(f"accept {extra}")
+        elif m := re.fullmatch(r"invalid_request: Unknown action '([^']+)' for (\w+);.*", text):
+            tool, args = m.group(2), {"action": m.group(1)}
+            kinds.add("unknown action")
+        elif m := re.fullmatch(r"invalid_request: Unknown include '([^']+)' for (\w+);.*", text):
+            tool, args = m.group(2), {"include": m.group(1)}
+            kinds.add("unknown include")
         else:
-            assert data["action"] != "approve"
+            raise AssertionError(f"unrecognised quoted error: {text}")
+        assert await _connect_error(tool, args) == text
+    assert kinds == {
+        "requires",
+        "accept tier",
+        "accept owner_confirmed",
+        "unknown action",
+        "unknown include",
+    }
+
+
+def test_connect_decline_block_and_pending_change_tier_rules() -> None:
+    flat = _flat(CONNECT)
+    assert (
+        "With `decline` or `block`, Revel refuses `owner_confirmed` true and any `tier`, so never"
+        " pass them" in flat
+    )
+    assert (
+        "Revel refuses `owner_confirmed` true and any `tier` with `decline` or `block`, so never"
+        " pass them" in flat
+    )
+    # change_tier on a pending request is refused with F6's fixed InvalidState text.
+    assert f'("{connections.InvalidState.message}")' in flat
+    assert "`change_tier` works only on an approved connection" in flat
+    assert "use `approve` with the tier instead" in flat
+    source = inspect.getsource(connections.change_tier)
+    assert "from_status=_APPROVED" in source
+    # The step about a changed change list is gone (it cannot happen for connections).
+    assert "returns a different change list" not in flat
+
+
+def test_end_connection_retry_is_not_called_idempotent() -> None:
+    flat = _flat(CONNECT)
+    message = connections.InvalidState.message
+    assert (
+        f'If a retried `end_connection` returns "{message}", the connection or request is already'
+        " ended. Check `list_connections` instead of retrying" in flat
+    )
+    # revoke and cancel refuse a row that is no longer approved / pending.
+    assert "raise InvalidState()" in inspect.getsource(connections.revoke)
+    assert "raise InvalidState()" in inspect.getsource(connections.cancel_request)
+    for sentence in _sentences(CONNECT):
+        if "end_connection" in sentence:
+            assert "idempotent" not in sentence.lower(), sentence
+
+
+def test_request_ids_from_list_connections_are_documented() -> None:
+    flat = _flat(CONNECT)
+    # incoming/outgoing items carry the request id as `id`; connections entries as request_id.
+    for model in (connections.IncomingRequest, connections.OutgoingRequest):
+        assert "id" in model.model_fields and "request_id" not in model.model_fields
+    assert "request_id" in connections.ConnectionEntry.model_fields
+    for tool in (RESPOND, END):
+        assert "request_id" in TOOLS[tool].parameters["required"]
+    assert (
+        "The `id` of each `incoming` (or `outgoing`) item is the `request_id` the other tools"
+        " take; entries in `connections` carry it as `request_id`" in flat
+    )
+    source = inspect.getsource(connection_tools)
+    assert "svc.list_incoming" in source and "svc.list_outgoing" in source
+
+
+def test_list_connections_keys_are_documented() -> None:
+    flat = _flat(CONNECT)
+    assert {"connections", "incoming", "outgoing"} == LIST_CONNECTIONS_KEYS
+    for key in LIST_CONNECTIONS_KEYS:
+        assert f"`{key}`" in flat, key
+    for include in connection_tools._INCLUDE:
+        assert f"`{include}`" in flat, include
 
 
 def test_connect_requires_explicit_yes_before_owner_confirmed() -> None:
@@ -513,3 +700,145 @@ def test_connect_requires_explicit_yes_before_owner_confirmed() -> None:
             assert re.search(r"(?i)\b(only|after|never|need)\b", sentence), sentence
     index = " ".join(documents()["index"].body.split())
     assert "approving a connection request or upgrading a connection to Trusted Circle" in index
+
+
+# --- Answer: update_assignment actions (RG-59) ---------------------------------------------------
+
+UPDATE = "update_assignment"
+ACTION_ROW = re.compile(r"^\| `([a-z_]+)` \|([^|]*)\|([^|]*)\|$", re.M)
+SAMPLE_PARAMS: dict[str, Any] = {
+    "lease_version": 1,
+    "human_contact": True,
+    "delivery_confirmed": True,
+    "reason": "other",
+}
+
+
+def _documented_actions() -> dict[str, tuple[set[str], set[str]]]:
+    """The answer skill's action table: action -> (required, optional) parameter names."""
+    body = documents()[ANSWER].body
+    header = "| `action` | Required | Optional |"
+    assert header in body
+    table = body.split(header, 1)[1].split("\n\n", 1)[0]
+    rows = {
+        action: (set(BACKTICK.findall(req)), set(BACKTICK.findall(opt)))
+        for action, req, opt in ACTION_ROW.findall(table)
+    }
+    assert rows
+    return rows
+
+
+def test_update_assignment_schema_lists_the_code_actions() -> None:
+    props = TOOLS[UPDATE].parameters["properties"]
+    assert props["action"]["enum"] == list(question_tools._ACTION_PARAMS)
+    assert set(props) == {"assignment_id", "action", *question_tools._ACTION_SIGNATURE}
+    assert set(TOOLS[UPDATE].parameters["required"]) == {"assignment_id", "action"}
+    assert set(SAMPLE_PARAMS) == set(question_tools._ACTION_SIGNATURE)
+
+
+def test_documented_action_params_match_code() -> None:
+    documented = _documented_actions()
+    assert list(documented) == list(question_tools._ACTION_PARAMS)
+    for action, (required, optional) in documented.items():
+        code_required, code_allowed = question_tools._ACTION_PARAMS[action]
+        assert required == code_required, action
+        assert required | optional == code_allowed, action
+        assert not required & optional, action
+        # The service model the action builds takes exactly the allowed parameters.
+        assert set(ACTION_MODELS[action].model_fields) == code_allowed, action
+
+
+async def _update_error(args: dict[str, Any]) -> str:
+    """The tool's own refusal; per-action validation runs before any principal or database."""
+    server = create_mcp_server(
+        Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    )
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool(UPDATE, {"assignment_id": str(uuid4()), **args})
+    text = str(exc.value)
+    prefix = f"Error executing tool {UPDATE}: "
+    assert text.startswith(prefix), text
+    return text.removeprefix(prefix)
+
+
+@pytest.mark.anyio
+async def test_documented_params_are_enforced_by_the_tool() -> None:
+    for action, (required, optional) in _documented_actions().items():
+        given = {name: SAMPLE_PARAMS[name] for name in required}
+        for name in sorted(required):
+            rest = {k: v for k, v in given.items() if k != name}
+            text = await _update_error({"action": action, **rest})
+            assert text == f"invalid_request: Action '{action}' requires {name}.", text
+        for name in sorted(set(SAMPLE_PARAMS) - required - optional):
+            text = await _update_error({"action": action, **given, name: SAMPLE_PARAMS[name]})
+            assert text == f"invalid_request: Action '{action}' does not accept {name}.", text
+
+
+QUOTED_INVALID = re.compile(r'"(invalid_request: [^"]+)"')
+
+
+@pytest.mark.anyio
+async def test_quoted_update_assignment_errors_match_the_tool() -> None:
+    flat = _flat(ANSWER)
+    kinds = set()
+    for text in QUOTED_INVALID.findall(flat):
+        args: dict[str, Any]
+        if m := re.fullmatch(r"invalid_request: Action '(\w+)' requires (\w+)\.", text):
+            action, missing = m.groups()
+            required = question_tools._ACTION_PARAMS[action][0]
+            args = {n: SAMPLE_PARAMS[n] for n in required if n != missing}
+            kinds.add("requires")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' does not accept (\w+)\.", text):
+            action, extra = m.groups()
+            required = question_tools._ACTION_PARAMS[action][0]
+            args = {n: SAMPLE_PARAMS[n] for n in required} | {extra: SAMPLE_PARAMS[extra]}
+            kinds.add("accept")
+        elif m := re.fullmatch(r"invalid_request: Unknown action '([^']+)' for \w+;.*", text):
+            action, args = m.group(1), {}
+            kinds.add("unknown")
+        else:
+            raise AssertionError(f"unrecognised quoted error: {text}")
+        assert await _update_error({"action": action, **args}) == text
+    assert kinds == {"requires", "accept", "unknown"}
+    assert '"Error executing tool <name>: "' in flat
+
+
+def test_answer_documents_lease_response_fields() -> None:
+    flat = _flat(ANSWER)
+    for field in question_leases.LeaseResponse.model_fields:
+        if field != "question_id":
+            assert f"`{field}`" in flat, field
+
+
+def test_answer_examples_show_the_action_shapes() -> None:
+    shown = {d["action"] for t, _, d in examples(ANSWER) if t == UPDATE}
+    assert {"claim", "report_user_contact", "decline"} <= shown
+
+
+# --- Giver: get_question (RG-59) -----------------------------------------------------------------
+
+
+def test_giver_get_question_matches_code() -> None:
+    flat = _flat(GIVER)
+    tool = TOOLS["get_question"]
+    assert set(tool.parameters["properties"]) == {"question_id"}
+    for field in question_tools.GetQuestionResponse.model_fields:
+        if field != "question_id":
+            assert f"`{field}`" in flat, field
+    result = question_tools.GetQuestionResponse.model_fields["result"].annotation
+    assert frozenset(get_args(result)) == GET_ANSWER_RESULTS
+    # get_question records answer retrieval: not read-only, and guidance never says it is.
+    assert tool.annotations.read_only_hint is False and tool.annotations.idempotent_hint is True
+    for name in documents():
+        for sentence in _sentences(name):
+            if "get_question" in sentence:
+                assert not re.search(r"(?i)read[- ]only", sentence), (name, sentence)
+    assert "Revel records when an answer is retrieved" in flat
+    # Nor anywhere in the giver's get_question section (sentences need not name the tool).
+    body = documents()[GIVER].body
+    section = body.split("## 3. Get the answer", 1)[1].split("\n## ", 1)[0]
+    assert "`get_question`" in section and "answer is retrieved" in section
+    read_only = re.compile(r"(?i)\bread[- ]only\b|\bchanges nothing\b|\bno side effects?\b")
+    for sentence in re.split(r"(?<=[.:;])\s+", " ".join(section.split())):
+        assert not read_only.search(sentence), sentence
+    assert "calling again is safe" in flat

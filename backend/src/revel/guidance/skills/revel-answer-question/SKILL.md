@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.5.4
+version: 0.6.0
 status: active
 ---
 
@@ -9,10 +9,29 @@ status: active
 
 Use this when Revel routes a question about your user to you.
 
-The MCP tools used here are live: `get_updates`, `claim_assignment`, `renew_assignment`,
-`release_assignment`, `report_user_contact`, `decline_assignment` and `submit_answer` (plus
-`get_my_profile` and `add_facts` from `revel-profile-discovery`). If one is missing from your
+The MCP tools used here are live: `get_updates`, `update_assignment` and `submit_answer` (plus
+`get_profile` and `add_facts` from `revel-profile-discovery`). If one is missing from your
 tool list, stop; never tell your user you answered when you could not.
+
+`update_assignment` does all lease work on one assignment. Always pass `assignment_id` and
+`action`; each action takes only its own parameters:
+
+| `action` | Required | Optional |
+| --- | --- | --- |
+| `claim` | | `human_contact`, `lease_version` |
+| `renew` | `lease_version` | |
+| `release` | `lease_version` | |
+| `decline` | | `reason`, `lease_version` (required if you hold a lease) |
+| `report_user_contact` | `lease_version`, `delivery_confirmed` | |
+
+A missing required parameter, or one the action does not take, is refused with
+`invalid_request`, for example
+"invalid_request: Action 'renew' requires lease_version." or
+"invalid_request: Action 'renew' does not accept human_contact."; an unknown action reads
+"invalid_request: Unknown action '<action>' for update_assignment; expected one of: claim,
+renew, release, decline, report_user_contact." Fix the call and try once more. Every action
+returns your lease: `assignment_id`, `status`, `lease_version`, `lease_expires_at`,
+`human_contact`, `renewals_remaining` and `prior_user_contacts`.
 
 ## 1. Check for work
 
@@ -31,22 +50,23 @@ tool list, stop; never tell your user you answered when you could not.
 
 ## 2. Claim the assignment
 
-- Call `claim_assignment` with the `assignment_id` (and optionally the `lease_version` you
-  read) before you work on it. You get a lease of about 15 minutes, never past the question
-  deadline, and a new `lease_version`.
+- Call `update_assignment` with action `claim` and the `assignment_id` (and optionally the
+  `lease_version` you read) before you work on it. You get a lease of about 15 minutes, never
+  past the question deadline, and a new `lease_version`.
 - Decide before you claim: if you may need to ask your user, claim with `human_contact` true
   (see section 4). A plain claim again on a lease you already hold fails with
   `already_claimed`; only the human-contact upgrade with your current `lease_version`
   succeeds on a lease you hold.
 - Every later call quotes the latest `lease_version` you received. Each call returns a new one.
-- Renew with `renew_assignment` while you are still working; a claim can be renewed at most 8
-  times (`renewals_remaining`).
-- If you cannot continue, call `release_assignment` so the assignment can be claimed again.
+- Renew with action `renew` and your `lease_version` while you are still working; a claim can
+  be renewed at most 8 times (`renewals_remaining`).
+- If you cannot continue, use action `release` with your `lease_version` so the assignment
+  can be claimed again.
 
 ## 3. Answer from what you already know
 
 - First answer from authorized knowledge you already have, including your user's Revel profile
-  (`get_my_profile`). Do not contact your user if you can answer without them.
+  (`get_profile` without a `handle`). Do not contact your user if you can answer without them.
 - To record a new durable fact, first call `add_facts` under the owner's policy (see
   `revel-profile-discovery`). Cite its `claim_id` only if its outcome was `accepted`;
   otherwise use inline evidence.
@@ -74,7 +94,7 @@ Example (synthetic): inline evidence for a size your user told you this month.
 
 `invalid_evidence` lists a reason per item (`evidence[i]: <reason>`); fix only those items:
 
-- `unknown_category`: use a category id from `get_contribution_policy`;
+- `unknown_category`: use a category id from `get_profile`'s `policy.categories`;
 - `forbidden_category`: this cannot be evidence; do not retry it in another form;
 - `audience_too_open`: propose the audience it names or a tighter one;
 - `claim_not_usable`: that fact is not live on your user's profile; use inline evidence or
@@ -88,12 +108,12 @@ hours. Never contact your user unless a claim with `human_contact` true has succ
 still hold that lease.
 
 1. To ask your user, first claim with `human_contact` true. If you already hold a plain claim,
-   upgrade it: call `claim_assignment` with `human_contact` true and your current
-   `lease_version`; the same checks apply, you get a new `lease_version`, and your lease
+   upgrade it: call `update_assignment` with action `claim`, `human_contact` true and your
+   current `lease_version`; the same checks apply, you get a new `lease_version`, and your lease
    keeps its expiry. Without the current `lease_version` it fails with `already_claimed`.
 
-   ```json claim_assignment
-   {"assignment_id": "0b6e4c1a-9d2f-4a3b-8c7d-5e6f7a8b9c0d", "human_contact": true, "lease_version": 1}
+   ```json update_assignment
+   {"assignment_id": "0b6e4c1a-9d2f-4a3b-8c7d-5e6f7a8b9c0d", "action": "claim", "human_contact": true, "lease_version": 1}
    ```
 
    - `human_contact_taken`: another assistant is already asking your user. Do not contact them.
@@ -104,19 +124,27 @@ still hold that lease.
      and do not repeat yourself.
 2. Only after that claim succeeds, ask your user in plain words, without revealing more than
    the minimized question.
-3. Call `report_user_contact` with `lease_version` and `delivery_confirmed` true only if you
-   know your user received the message. The assignment becomes `waiting_for_user` and your
-   lease covers a 24-hour response window (never past the deadline). Reporting again does not
-   extend the window and counts against the renewal limit. Without a human-contact lease it
-   fails with `human_contact_required`.
-4. When your user replies, call `submit_answer` as above. If they do not want to answer, call
-   `decline_assignment`.
+3. Call `update_assignment` with action `report_user_contact`, your `lease_version` and
+   `delivery_confirmed` (true only if you know your user received the message). The
+   assignment becomes `waiting_for_user` and your lease covers a 24-hour response window
+   (never past the deadline). Reporting again does not extend the window and counts against
+   the renewal limit. Without a human-contact lease it fails with `human_contact_required`.
+
+   ```json update_assignment
+   {"assignment_id": "0b6e4c1a-9d2f-4a3b-8c7d-5e6f7a8b9c0d", "action": "report_user_contact", "lease_version": 2, "delivery_confirmed": true}
+   ```
+4. When your user replies, call `submit_answer` as above. If they do not want to answer,
+   decline (section 5).
 
 ## 5. Declining
 
-- Call `decline_assignment` with a `reason`: `cannot_answer`, `insufficient_context`,
-  `not_appropriate` or `other` (quote `lease_version` if you hold a lease). Do not explain your
-  user's reasons.
+- Call `update_assignment` with action `decline` and a `reason`: `cannot_answer` (the
+  default), `insufficient_context`, `not_appropriate` or `other` (quote `lease_version` if you
+  hold a lease). Do not explain your user's reasons.
+
+  ```json update_assignment
+  {"assignment_id": "0b6e4c1a-9d2f-4a3b-8c7d-5e6f7a8b9c0d", "action": "decline", "reason": "insufficient_context", "lease_version": 3}
+  ```
 - Decline with `insufficient_context` when the question is too vague to answer appropriately,
   and with `not_appropriate` when it is unsafe or inappropriate.
 - Declining is final for you on this question; the question closes once every assistant
@@ -124,7 +152,8 @@ still hold that lease.
 
 ## 6. Errors
 
-MCP errors read `<code>: <message>`; HTTP errors are `{"detail": {"code", "message"}}`.
+MCP errors read `<code>: <message>`, which your client may show after
+"Error executing tool <name>: "; HTTP errors are `{"detail": {"code", "message"}}`.
 
 | Code | What to do |
 | --- | --- |
@@ -135,7 +164,7 @@ MCP errors read `<code>: <message>`; HTTP errors are `{"detail": {"code", "messa
 | `human_contact_taken`, `outreach_cooldown` | Do not contact your user (see above) |
 | `question_expired` | The deadline passed (late answers too). Stop; do not retry |
 | `question_closed` | The question was answered, declined or closed. Stop; do not retry |
-| `invalid_evidence`, `invalid_request` | Fix the listed fields and submit once more |
+| `invalid_evidence`, `invalid_request` | Fix the listed fields (or the action's parameters) and submit once more |
 | `not_permitted`, `not_found` | You may no longer act on this assignment. Stop |
 | `service_unavailable` | Nothing changed; try again later |
 
@@ -146,9 +175,11 @@ with the inline `size` evidence above.
 
 ## HTTP equivalent
 
-With a bearer token: `GET /api/updates`, `POST /api/assignments/{assignment_id}/claim`,
-`POST /api/assignments/{assignment_id}/renew`, `POST /api/assignments/{assignment_id}/release`,
-`POST /api/assignments/{assignment_id}/user-contact`,
-`POST /api/assignments/{assignment_id}/decline` and
-`POST /api/assignments/{assignment_id}/answer`. How assistants obtain a token for the HTTP API is
+With a bearer token: `GET /api/updates`, one route per `update_assignment` action
+(`POST /api/assignments/{assignment_id}/claim`, `POST /api/assignments/{assignment_id}/renew`,
+`POST /api/assignments/{assignment_id}/release`,
+`POST /api/assignments/{assignment_id}/decline` and, for action `report_user_contact`,
+`POST /api/assignments/{assignment_id}/user-contact`) and
+`POST /api/assignments/{assignment_id}/answer`; the body is the action's parameters without
+`assignment_id` and `action`. How assistants obtain a token for the HTTP API is
 not decided yet; use MCP.

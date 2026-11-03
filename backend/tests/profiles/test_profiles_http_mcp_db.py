@@ -94,20 +94,14 @@ def test_app_still_serves_health_and_mcp(
     assert listed.status_code == 200
     tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
     assert {"whoami", "ping"} <= set(tools)
-    f5 = (
-        "get_contribution_policy",
-        "add_facts",
-        "get_my_profile",
-        "set_fact_audience",
-        "remove_fact",
-    )
+    f5 = ("get_profile", "add_facts", "update_fact", "remove_fact", "set_contribution_policy")
     hints = {name: tools[name]["annotations"]["readOnlyHint"] for name in f5}
-    assert hints["get_contribution_policy"] is True and hints["get_my_profile"] is True
+    assert hints["get_profile"] is True
     assert hints["add_facts"] is False and hints["remove_fact"] is False
-    assert hints["set_fact_audience"] is False
+    assert hints["update_fact"] is False
     assert tools["remove_fact"]["annotations"]["destructiveHint"] is True
     assert tools["remove_fact"]["annotations"]["idempotentHint"] is False
-    assert "volunteers" in tools["get_contribution_policy"]["description"]
+    assert "volunteers" in tools["get_profile"]["description"]
 
 
 def test_bearer_mcp_and_ui_share_one_profile(
@@ -169,8 +163,11 @@ def test_bearer_mcp_and_ui_share_one_profile(
         assert profile["policy"]["version"] == 1 and profile["policy_version"] == 1
         vias = sorted(f["contributed_via"] for f in profile["facts"])
         assert vias == ["api", "mcp"]
-        mcp_profile = mcp_call(client, "get_my_profile", {})["structuredContent"]
+        mcp_profile = mcp_call(client, "get_profile", {})["structuredContent"]
         assert {f["id"] for f in mcp_profile["facts"]} == {f["id"] for f in profile["facts"]}
+        assert mcp_profile["profile_id"] == profile["profile_id"]
+        assert mcp_profile["policy_version"] == 1
+        assert mcp_profile["policy"] == client.get("/api/v1/profile/policy").json()
         assert client.get("/api/v1/profile").json()["profile_id"] == profile["profile_id"]
         assert client.get("/api/v1/profile/summary").json()["pending_review"] == 0
         assert ui.get("/api/ui/profile/summary").status_code == 200
@@ -178,7 +175,11 @@ def test_bearer_mcp_and_ui_share_one_profile(
         # Agent narrowing via MCP and bearer; widening without the owner's confirmation is
         # 403 / tool error (#29, covered in test_owner_controls_http_mcp_db); UI may widen.
         fid = mcp_result["claim_id"]
-        narrowed = mcp_call(client, "set_fact_audience", {"fact_id": fid, "audience": "only_me"})
+        narrowed = mcp_call(
+            client,
+            "update_fact",
+            {"fact_id": fid, "action": "set_audience", "audience": "only_me"},
+        )
         assert narrowed["structuredContent"]["audience"] == "only_me"
         widen = client.patch(
             f"/api/v1/profile/facts/{fid}/audience", json={"audience": "connections"}
@@ -186,7 +187,9 @@ def test_bearer_mcp_and_ui_share_one_profile(
         assert widen.status_code == 403
         assert widen.json()["detail"] == "owner_confirmation_required"
         tool_widen = mcp_call(
-            client, "set_fact_audience", {"fact_id": fid, "audience": "connections"}
+            client,
+            "update_fact",
+            {"fact_id": fid, "action": "set_audience", "audience": "connections"},
         )
         assert tool_widen["isError"] is True
         assert "owner_confirmation_required" in tool_widen["content"][0]["text"]
@@ -244,7 +247,7 @@ def test_unavailable_authorization_is_generic_503(
     response = client.get("/api/v1/profile")
     assert response.status_code == 503
     assert response.json() == {"detail": "Authorization service unavailable"}
-    tool = mcp_call(client, "get_my_profile", {})
+    tool = mcp_call(client, "get_profile", {})
     assert tool["isError"] is True
     assert tool["content"][0]["text"].endswith("Authorization service unavailable")
     fga.error = None

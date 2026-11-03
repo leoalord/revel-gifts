@@ -13,24 +13,29 @@ import re
 from typing import Any
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel
 
 from revel.api import profiles as profiles_api
 from revel.guidance import documents
 from revel.mcp import profile_tools
-from revel.services import profiles
+from revel.mcp.server import create_mcp_server
+from revel.services import claim_writes, profiles
+from revel.settings import Settings
 
 from .test_skills_f6_f7 import TOOLS
 
 DISCOVERY = "revel-profile-discovery"
-OWNER_TOOLS = ("set_contribution_policy", "review_pending_fact", "set_fact_audience")
+OWNER_TOOLS = ("set_contribution_policy", "update_fact", "remove_fact")
 FENCE = re.compile(r"^```json ([a-z_]+)([^\n]*)\n(.*?)\n```$", re.M | re.S)
 
-# Tool -> (strict request model, tool arguments outside that model).
-SERVICE_MODELS: dict[str, tuple[type[BaseModel], frozenset[str]]] = {
-    "set_contribution_policy": (profiles.AgentPolicyUpdate, frozenset()),
-    "review_pending_fact": (profiles.OwnerConfirmation, frozenset({"fact_id", "decision"})),
-    "set_fact_audience": (profiles_api.AudienceBody, frozenset({"fact_id"})),
+# (tool, action or None) -> (strict request model of the matching HTTP route, tool arguments
+# outside that model).
+SERVICE_MODELS: dict[tuple[str, str | None], tuple[type[BaseModel], frozenset[str]]] = {
+    ("set_contribution_policy", None): (profiles.AgentPolicyUpdate, frozenset()),
+    ("update_fact", "approve"): (profiles.OwnerConfirmation, frozenset({"fact_id", "action"})),
+    ("update_fact", "set_audience"): (profiles_api.AudienceBody, frozenset({"fact_id", "action"})),
+    ("remove_fact", None): (profiles.OwnerConfirmation, frozenset({"fact_id"})),
 }
 
 
@@ -46,7 +51,7 @@ def owner_steps() -> list[tuple[str, str | None, dict[str, Any]]]:
         if tool == "add_facts":
             continue
         attrs = dict(part.split("=", 1) for part in info.split())
-        assert set(attrs) <= {"step"}, attrs
+        assert set(attrs) <= {"step", "reject"}, attrs
         found.append((tool, attrs.get("step"), json.loads(raw)))
     assert {tool for tool, _, _ in found} == set(OWNER_TOOLS)
     # Every json fence is either an add_facts example or an owner-control example.
@@ -63,18 +68,18 @@ def test_owner_example_is_valid_tool_input(tool: str, data: dict[str, Any]) -> N
     registered = TOOLS[tool]
     assert set(data) <= set(registered.parameters["properties"]), sorted(data)
     registered.fn_metadata.arg_model.model_validate(data)
-    model, outside = SERVICE_MODELS[tool]
+    model, outside = SERVICE_MODELS[(tool, data.get("action"))]
     model.model_validate({k: v for k, v in data.items() if k not in outside})  # extra=forbid
 
 
 def test_examples_cover_flag_and_no_flag_cases() -> None:
     examples = owner_examples()
-    review = {
-        d["decision"]: d.get("owner_confirmed", False)
-        for t, d in examples
-        if t == ("review_pending_fact")
-    }
-    assert review == {"approve": True, "reject": False}
+    approvals = [d for t, d in examples if t == "update_fact" and d["action"] == "approve"]
+    assert [d.get("owner_confirmed", False) for d in approvals] == [False, True]
+    widen = [d for t, d in examples if t == "update_fact" and d["action"] == "set_audience"]
+    assert [d.get("owner_confirmed", False) for d in widen] == [False, True]
+    # Rejecting is remove_fact on a pending fact: one call.
+    assert [t for t, _ in examples].count("remove_fact") == 1
     policies = [d for t, d in examples if t == "set_contribution_policy"]
     assert any(d["expected_version"] is None and d.get("owner_confirmed") for d in policies)
     assert any(not d.get("owner_confirmed") for d in policies)  # tightening needs no flag
@@ -101,7 +106,8 @@ def test_reason_code_and_messages_exist_in_f5() -> None:
         assert field in profiles.PolicyUpdate.model_fields and f"`{field}`" in flat
     assert "require_review" in profiles.CategorySetting.model_fields
     assert "expected_version" in profiles.PolicyUpdate.model_fields
-    assert "version" in profiles.PolicyOut.model_fields and "`policy.version`" in flat
+    assert "version" in profiles.PolicyOut.model_fields and "`policy.policy.version`" in flat
+    assert "get_profile" in profile_tools._POLICY_CONFLICT
 
 
 def _first_approval_change() -> str:
@@ -120,16 +126,24 @@ def test_two_step_flow_for_every_widening_example() -> None:
     steps = owner_steps()
     ones = [(t, d) for t, s, d in steps if s == "1"]
     twos = [(t, d) for t, s, d in steps if s == "2"]
-    assert {t for t, _ in ones} == set(OWNER_TOOLS)
+    # Rejecting (remove_fact) narrows: always one call.
+    assert {t for t, _ in ones} == set(OWNER_TOOLS) - {"remove_fact"}
     assert len(ones) == len(twos)
     for (tool1, first), (tool2, second) in zip(ones, twos, strict=True):
         # Step 2 is the identical call plus owner_confirmed true; step 1 has no flag.
         assert tool1 == tool2 and not first.get("owner_confirmed")
         assert second == first | {"owner_confirmed": True}
-    # One-call examples never carry the flag (tightening, reject).
+    # One-call examples never carry the flag (tightening), except a rejection the owner asked
+    # for explicitly: remove_fact never needs confirmation, the flag only records who decided.
     for tool, step, data in steps:
-        if step is None:
+        if step is None and tool != "remove_fact":
             assert not data.get("owner_confirmed"), (tool, data)
+    attrs = [
+        dict(part.split("=", 1) for part in info.split())
+        for tool, info, _ in FENCE.findall(documents()[DISCOVERY].body)
+        if tool == "remove_fact"
+    ]
+    assert attrs == [{"reject": "owner"}]
 
 
 def test_first_approval_consequence_matches_f5() -> None:
@@ -192,3 +206,129 @@ def test_corrections_keep_audience_and_never_readd() -> None:
     )
     assert "lands at the category default, which undoes the owner's choice" in flat
     assert "supersedes_id" in profiles.FactInput.model_fields
+
+
+# --- update_fact actions, remove_fact and the owner read (RG-59) ---------------------------------
+
+FACT_ROW = re.compile(r"^\| `([a-z_]+)` \|([^|]*)\|([^|]*)\|$", re.M)
+
+
+def _documented_fact_actions() -> dict[str, tuple[str, str]]:
+    """The discovery skill's update_fact table: action -> (audience cell, owner_confirmed cell)."""
+    body = documents()[DISCOVERY].body
+    header = "| `action` | `audience` | `owner_confirmed` |"
+    assert header in body
+    table = body.split(header, 1)[1].split("\n\n", 1)[0]
+    rows = {a: (aud.strip(), oc.strip()) for a, aud, oc in FACT_ROW.findall(table)}
+    assert rows
+    return rows
+
+
+def test_update_fact_table_matches_code() -> None:
+    rows = _documented_fact_actions()
+    schema = TOOLS["update_fact"].parameters["properties"]
+    assert schema["action"]["enum"] == list(profile_tools.FACT_ACTIONS) == list(rows)
+    assert set(schema) == {"fact_id", "action", "audience", "owner_confirmed"}
+    audience = rows["set_audience"][0]
+    assert audience.startswith("required: ")
+    assert re.findall(r"`([a-z_]+)`", audience) == list(profile_tools.AUDIENCES)
+    assert rows["approve"][0] == "not accepted"
+    for _action, (_aud, flag) in rows.items():
+        assert flag.startswith("true only after the owner's yes")
+    assert "owner_confirmed" in TOOLS["remove_fact"].parameters["properties"]
+
+
+async def _profile_error(tool: str, args: dict[str, Any]) -> str:
+    """The tool's own refusal; per-action validation runs before any principal or database."""
+    server = create_mcp_server(
+        Settings(_env_file=None, app_env="test", public_base_url="http://localhost:8000")
+    )
+    with pytest.raises(ToolError) as exc:
+        await server.call_tool(tool, {"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", **args})
+    text = str(exc.value)
+    prefix = f"Error executing tool {tool}: "
+    assert text.startswith(prefix), text
+    return text.removeprefix(prefix)
+
+
+@pytest.mark.anyio
+async def test_documented_update_fact_params_are_enforced() -> None:
+    rows = _documented_fact_actions()
+    for action, (audience, _flag) in rows.items():
+        if audience.startswith("required"):
+            text = await _profile_error("update_fact", {"action": action})
+            assert text == f"invalid_request: Action '{action}' requires audience."
+            text = await _profile_error("update_fact", {"action": action, "audience": "friends"})
+            assert text.startswith(f"invalid_request: Action '{action}' requires audience to be")
+        else:
+            text = await _profile_error("update_fact", {"action": action, "audience": "only_me"})
+            assert text == f"invalid_request: Action '{action}' does not accept audience."
+
+
+@pytest.mark.anyio
+async def test_quoted_update_fact_errors_match_the_tool() -> None:
+    flat = _flat()
+    kinds = set()
+    for text in re.findall(r'"(invalid_request: [^"]+)"', flat):
+        if m := re.fullmatch(r"invalid_request: Action '(\w+)' requires audience\.", text):
+            args = {"action": m.group(1)}
+            kinds.add("requires")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' requires audience to be .*", text):
+            args = {"action": m.group(1), "audience": "friends"}
+            kinds.add("one of")
+        elif m := re.fullmatch(r"invalid_request: Action '(\w+)' does not accept audience\.", text):
+            args = {"action": m.group(1), "audience": "only_me"}
+            kinds.add("accept")
+        elif m := re.fullmatch(
+            r"invalid_request: Unknown action '([^']+)' for update_fact;.*", text
+        ):
+            args = {"action": m.group(1)}
+            kinds.add("unknown")
+        else:
+            raise AssertionError(f"unrecognised quoted error: {text}")
+        assert await _profile_error("update_fact", args) == text
+    assert kinds == {"requires", "one of", "accept", "unknown"}
+    assert '"Error executing tool <name>: "' in flat
+
+
+def test_owner_read_shape_matches_code() -> None:
+    flat = _flat()
+    tool = TOOLS["get_profile"]
+    assert tool.annotations.read_only_hint is True
+    for field in profile_tools.OwnerProfileView.model_fields:
+        if field not in ("profile_id", "policy_version"):
+            assert f"`{field}`" in flat, field
+    for field in profiles.PolicyResponse.model_fields:
+        assert f"`{field}`" in flat or f"`policy.{field}`" in flat, field
+    assert "`policy.categories`" in flat and "`policy.policy.version`" in flat
+    assert "`policy.defaults`" in flat and "`policy.policy` is null" in flat
+    # Read the version where get_profile puts it, per the tool's own description.
+    assert "policy.policy.version is the expected_version" in profile_tools.GET_PROFILE_DESCRIPTION
+
+
+def test_remove_fact_rules_match_code() -> None:
+    flat = _flat()
+    source = inspect.getsource(profile_tools._remove_or_reject)
+    # Pending facts are rejected first; only a fact_not_pending refusal falls back to removal.
+    assert "profiles.reject_fact(" in source and '"fact_not_pending"' in source
+    assert "profiles.remove_fact(" in source
+    assert "Rejecting a pending fact is `remove_fact` and never needs confirmation" in flat
+    assert (
+        "Pass `owner_confirmed` true only when the owner explicitly told you to reject that fact"
+        in flat
+    )
+    assert "the fact it would have replaced stays live" in flat
+    assert "a replacement's target stays live" in (profiles.reject_fact.__doc__ or "")
+    assert f'("{profile_tools._CONFLICT};' in flat or f'"{profile_tools._CONFLICT}"' in flat
+    # MCP gives the generic conflict text; HTTP reasons are tied to their own routes.
+    assert (
+        f'Over MCP the error is "{profile_tools._CONFLICT}". Over HTTP, '
+        "`DELETE /api/v1/profile/facts/{fact_id}` returns `409` `fact_not_removable` and "
+        "`POST /api/v1/profile/facts/{fact_id}/reject` returns `409` `fact_not_pending`" in flat
+    )
+    remove_src = inspect.getsource(claim_writes.remove)
+    reject_src = inspect.getsource(claim_writes.reject)
+    assert '"fact_not_removable"' in remove_src and '"fact_not_pending"' in reject_src
+    assert "Do not retry it blindly; call `get_profile`" in flat
+    # Section 6 (corrections) says it too, not only the rejection example in section 9.
+    assert "If the owner rejects it instead, the fact it would have replaced stays live" in flat

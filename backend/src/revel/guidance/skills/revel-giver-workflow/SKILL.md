@@ -1,7 +1,7 @@
 ---
 name: revel-giver-workflow
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.5.4
+version: 0.6.0
 status: active
 ---
 
@@ -9,9 +9,9 @@ status: active
 
 Use this when your user wants a gift idea for someone they are connected to on Revel.
 
-The MCP tools used here are live: `get_profile`, `submit_question`, `get_question_status` and
-`get_answer`. If one is missing from your tool list, stop and tell your user; never say a
-question was sent when you could not send it.
+The MCP tools used here are live: `get_profile`, `submit_question` and `get_question`. If one
+is missing from your tool list, stop and tell your user; never say a question was sent when
+you could not send it.
 
 ## 1. Read the profile first
 
@@ -73,18 +73,25 @@ Errors (MCP: `<code>: <message>`; HTTP: `{"detail": {"code", "message"}}`):
 
 ## 3. Get the answer
 
-- On a later turn, check with `get_question_status` (`question_id`): `status` is `open`,
-  `answered`, `declined`, `expired`, `closed` or `cancelled`, and `answer_available` says
-  whether there is an answer to retrieve. Do not poll in a tight loop.
-- Call `get_answer` (`question_id`). Its `result` is:
+- On a later turn, call `get_question` with the `question_id`. It returns the question's
+  `status` (`open`, `answered`, `declined`, `expired`, `closed` or `cancelled`) with
+  `expires_at`, `created_at`, `closed_at` and `answer_available`, and the answer when there is
+  one. Do not poll in a tight loop.
+
+  ```json get_question
+  {"question_id": "5d2a7b9e-1c3f-4e8a-9b6d-2f4c8e0a1b3d"}
+  ```
+
+- Its `result` is:
   - `answer`: use `answer.body`. It comes with its `audience` and minimal `evidence` labels
     (category and `evidence_type`); an `inferred` answer is the respondent's conclusion, so
     say so when you rely on it;
   - `no_shareable_answer`: an answer cannot be shared with your user now. It carries no reason.
     Do not probe, re-ask or rephrase to work around it, and do not guess why. Plan without it;
   - `not_answered`: no answer yet.
-- Revel re-checks your user's access every time you retrieve an answer, so a later call can
-  return less. Retrieving renews nothing and never extends the deadline.
+- Revel re-checks your user's access and the facts the answer relies on every time you call
+  `get_question`, so a later call can return less. Revel records when an answer is retrieved;
+  calling again is safe, renews nothing and never extends the deadline.
 - If the question is `declined` or `expired`, plan with what you have.
 
 ## 4. Suggest gifts
@@ -101,6 +108,7 @@ on the retailer's site.
 
 ## HTTP equivalent
 
-With a bearer token: `POST /api/questions` (same body as `submit_question`),
-`GET /api/questions/{question_id}` and `GET /api/questions/{question_id}/answer`. How
+With a bearer token: `POST /api/questions` (same body as `submit_question`), and for
+`get_question` both `GET /api/questions/{question_id}` (the status) and
+`GET /api/questions/{question_id}/answer` (the `result` and `answer`). How
 assistants obtain a token for the HTTP API is not decided yet; use MCP.

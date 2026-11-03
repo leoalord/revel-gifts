@@ -1,7 +1,7 @@
 ---
 name: revel-profile-discovery
 description: Build the user's Revel gifting profile from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience.
-version: 0.5.4
+version: 0.6.0
 status: active
 ---
 
@@ -9,10 +9,25 @@ status: active
 
 Use this when your user asks you to set up or add to their own Revel gifting profile.
 
-The MCP tools used here are live: `whoami`, `get_contribution_policy`, `add_facts`,
-`get_my_profile`, `set_fact_audience`, `remove_fact`, `set_contribution_policy` and
-`review_pending_fact`. If one is missing from your tool list, stop and tell the user; never say
-something was saved when you could not save it.
+The MCP tools used here are live: `whoami`, `get_profile`, `add_facts`, `update_fact`,
+`remove_fact` and `set_contribution_policy`. If one is missing from your tool list, stop and
+tell the user; never say something was saved when you could not save it.
+
+`update_fact` takes a `fact_id` and an `action`, and each action takes only its own
+parameters:
+
+| `action` | `audience` | `owner_confirmed` |
+| --- | --- | --- |
+| `set_audience` | required: `public`, `connections`, `trusted_circle` or `only_me` | true only after the owner's yes to a widening |
+| `approve` | not accepted | true only after the owner's yes |
+
+Revel refuses anything else with `invalid_request`, for example
+"invalid_request: Action 'set_audience' requires audience.",
+"invalid_request: Action 'set_audience' requires audience to be one of: public, connections,
+trusted_circle, only_me.", "invalid_request: Action 'approve' does not accept audience." or
+"invalid_request: Unknown action '<action>' for update_fact; expected one of: set_audience,
+approve." (your client may show it after "Error executing tool <name>: "). Fix the call and
+try once more.
 
 ## 1. Confirm identity and consent
 
@@ -25,13 +40,17 @@ something was saved when you could not save it.
 
 ## 2. Read the owner's policy first
 
-- Call `get_contribution_policy`. It lists every category with its `effective_audience` (the
-  widest audience Revel accepts without the owner's review), `allowed_audiences`,
-  `require_review` and `details_schema`.
-- If `policy` is null, the owner has not approved a contribution policy yet: everything you add
-  waits for their review. Offer to help them approve one (see section 9); they can also do it
-  in the Revel website.
-- Call `get_my_profile` to see what Revel already holds, so you do not resubmit known facts.
+- Call `get_profile` without a `handle`. It returns your user's own profile: `facts` (live and
+  pending review), a contribution `summary`, and `policy`, the owner's contribution policy.
+  `policy` has `policy` (the approved settings, with their `version`), `defaults`,
+  `audiences`, `provisional_caveat` and `categories`.
+- `policy.categories` lists every category with its `effective_audience` (the widest audience
+  Revel accepts without the owner's review), `allowed_audiences`, `require_review` and
+  `details_schema`.
+- If `policy.policy` is null, the owner has not approved a contribution policy yet (Revel then
+  shows the `policy.defaults` that apply): everything you add waits for their review. Offer to
+  help them approve one (see section 9); they can also do it in the Revel website.
+- Read `facts` to see what Revel already holds, so you do not resubmit known facts.
 - Change the policy only when the owner asks, following section 9.
 
 ## 3. Identify useful, durable facts
@@ -93,8 +112,9 @@ Default audiences (the owner's policy may tighten them):
 Rules:
 
 - Confidence is not permission. A certain fact can still be private.
-- Narrow an audience with `set_fact_audience` (`fact_id`, `audience`) whenever the owner
-  wants; tell them what you changed. Widen one only with the owner's confirmation (section 9).
+- Narrow an audience with `update_fact` (`fact_id`, `action` `set_audience`, `audience`)
+  whenever the owner wants; tell them what you changed. Widen one only with the owner's
+  confirmation (section 9).
 - Inferred or low-confidence facts are stored with status `provisional` and shared with a
   caveat.
 - A fact with `involves_others` set always waits for the owner's approval. Tell the owner it is
@@ -176,13 +196,18 @@ actually returned:
   set a wider audience, the replacement comes back `pending_review` with the message "Held for
   the owner's review because it would widen who can see the fact it replaces; the old fact stays
   live until approved." Approving it is a widening change: use the two-step flow in section 9
-  (`review_pending_fact`, then `owner_confirmed` true only after the owner's yes).
+  (`update_fact` with `action` `approve`, then `owner_confirmed` true only after the owner's
+  yes). If the owner rejects it instead, the fact it would have replaced stays live.
 - Never remove a fact the owner narrowed or removed and then add the same content again as a new
   fact. A new fact lands at the category default, which undoes the owner's choice. Correct it
   with `supersedes_id` instead, or leave it as the owner set it.
-- If the user asks you to undo something you added, call `remove_fact` with its `fact_id`. It is
-  not idempotent: removing an already removed or replaced fact is an error. Do not retry it;
-  call `get_my_profile` and check the fact's current status.
+- If the user asks you to undo something you added, call `remove_fact` with its `fact_id`. A
+  live fact is removed; a fact still pending review is rejected instead (see section 9). It is
+  not idempotent: repeating it, or a fact that changed meanwhile, is an error. Over MCP the
+  error is "The fact changed; read the profile again and retry". Over HTTP,
+  `DELETE /api/v1/profile/facts/{fact_id}` returns `409` `fact_not_removable` and
+  `POST /api/v1/profile/facts/{fact_id}/reject` returns `409` `fact_not_pending`. Do not retry
+  it blindly; call `get_profile` and check the fact's current status.
 
 ## 7. Ask only what matters
 
@@ -215,7 +240,7 @@ available. Anything that widens access needs their explicit confirmation:
 | Loosening a category's audience | Requiring review (`require_review_all`, a category's `require_review`) |
 | Turning off `require_review_all` or a category's `require_review` | Withdrawing Public |
 | Turning `share_provisional` or `enrichment_enabled` back on | Turning `enrichment_enabled` off |
-| Approving a pending fact (including sensitive and `involves_others` facts) | Rejecting a pending fact |
+| Approving a pending fact (including sensitive and `involves_others` facts) | Rejecting a pending fact (`remove_fact`) |
 | Widening a fact's audience | Narrowing a fact's audience |
 
 Getting the owner's yes, for every change that may widen access (two calls):
@@ -224,8 +249,8 @@ Getting the owner's yes, for every change that may widen access (two calls):
 2. If it widens access, Revel refuses with `owner_confirmation_required` and the exact list of
    changes (MCP: one `- <change>` line each; HTTP: `changes` in a `403`). Nothing is written.
 3. Quote that list to the owner word for word. For the first policy approval, also show what
-   the policy will be: the default audience of each category (`effective_audience` from
-   `get_contribution_policy`), whether Public is on, and the `share_provisional` and
+   the policy will be: the default audience of each category (`effective_audience` in
+   `get_profile`'s `policy.categories`), whether Public is on, and the `share_provisional` and
    `require_review_all` settings. Say plainly that after approval, routine facts your
    assistants add are accepted and shared automatically, without the owner's review. Revel's
    own wording for it is: "Approve the contribution policy for the first time: facts your
@@ -242,12 +267,12 @@ true on your own to get past a refusal.
 Tightening needs no confirmation (the first call simply succeeds), but always tell the owner
 what you changed.
 
-Policy changes: call `get_contribution_policy` first and pass its `policy.version` as
+Policy changes: call `get_profile` (no `handle`) first and pass `policy.policy.version` as
 `expected_version` (null before the first approval). Omitted fields keep their current values.
 `category_settings`, when sent, replaces the whole map (each category takes `audience` and
 `require_review`): send the full current map with only the intended edit, because omitting a
 category you tightened earlier widens it again. If the policy changed meanwhile, the call fails
-("The policy changed; read it again with get_contribution_policy and retry with its version";
+("The policy changed; read it again with get_profile and retry with its version";
 HTTP `409` `policy_version_conflict`). Read it again and start over from step 1: an earlier yes
 does not carry over to a changed proposal.
 
@@ -274,37 +299,42 @@ Tightening sizes to Only Me (no confirmation needed; tell the owner afterwards):
 
 Approving a pending fact: step 1, then step 2 after the owner's yes.
 
-```json review_pending_fact step=1
-{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "decision": "approve"}
+```json update_fact step=1
+{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "approve"}
 ```
 
-```json review_pending_fact step=2
-{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "decision": "approve", "owner_confirmed": true}
+```json update_fact step=2
+{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "approve", "owner_confirmed": true}
 ```
 
-Rejecting a pending fact needs no flag:
+Rejecting a pending fact is `remove_fact` and never needs confirmation, because it narrows.
+Pass `owner_confirmed` true only when the owner explicitly told you to reject that fact (Revel
+records the rejection as theirs); otherwise leave it out. A rejected fact is not shared, and if
+it was a correction, the fact it would have replaced stays live.
 
-```json review_pending_fact
-{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "decision": "reject"}
+```json remove_fact reject=owner
+{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "owner_confirmed": true}
 ```
 
 Widening a fact's audience: step 1, then step 2 after the owner's yes.
 
-```json set_fact_audience step=1
-{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "audience": "connections"}
+```json update_fact step=1
+{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "set_audience", "audience": "connections"}
 ```
 
-```json set_fact_audience step=2
-{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "audience": "connections", "owner_confirmed": true}
+```json update_fact step=2
+{"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "set_audience", "audience": "connections", "owner_confirmed": true}
 ```
 
 Sensitive facts stay Only Me even when approved; Public needs the owner's Public opt-in. A fact
 that changed meanwhile fails with a conflict ("The fact changed; read the profile again and
-retry"); read the profile with `get_my_profile` and check its status before asking again.
+retry"); read the profile with `get_profile` and check its status before asking again.
 
 ## HTTP equivalent
 
-The same operations exist over HTTP under `/api/v1/profile` (see `/openapi.json`):
+The same operations exist over HTTP under `/api/v1/profile` (see `/openapi.json`); `get_profile`
+without a handle is `GET /api/v1/profile` plus `GET /api/v1/profile/policy`, and rejecting a
+pending fact is `POST /api/v1/profile/facts/{fact_id}/reject`:
 `GET /api/v1/profile/policy`, `POST /api/v1/profile/facts` (body `{"facts": [...]}`),
 `GET /api/v1/profile`, `GET /api/v1/profile/summary`,
 `PATCH /api/v1/profile/facts/{fact_id}/audience` and `DELETE /api/v1/profile/facts/{fact_id}`,

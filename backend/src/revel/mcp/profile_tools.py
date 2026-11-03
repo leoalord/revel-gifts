@@ -1,14 +1,17 @@
-"""MCP tools for F5 profiles and contributions (RG-18). Registered by
-``revel.mcp.server.create_mcp_server``.
+"""MCP tools for F5 profiles and contributions (RG-18; consolidated in RG-59, #31). Registered
+by ``revel.mcp.server.create_mcp_server``.
 
 Thin adapters over ``revel.services.profiles`` (same behavior as ``/api/v1/profile*``). Each
 tool resolves the caller with ``principal_from_mcp_context`` first (rejects disconnected
 delegations) and acts only on that user's own profile, except ``get_profile(handle)`` (RG-56,
 #28), which reads another person's profile as the caller may see it: principal first, then
 F6's ``resolve_handle``, then ``read_shared_profile`` with the resolved profile id (no tool
-takes a profile id). Errors are ``ToolError`` with generic text (no SDK or internal detail),
-except ``owner_confirmation_required`` (#29), whose text lists the exact widening changes so the
-assistant can quote them to the owner.
+takes a profile id). ``get_profile()`` without a handle is the owner read (``get_my_profile``
+plus ``get_policy``); owner and shared reads stay separate service and authorization paths.
+Errors are ``ToolError`` with generic text (no SDK or internal detail), except
+``owner_confirmation_required`` (#29), whose text lists the exact widening changes so the
+assistant can quote them to the owner, and ``invalid_request`` per-action validation errors
+(RG-59), worded like the other consolidated adapters.
 Contract: ``docs/contracts/f5-profiles.md``.
 """
 
@@ -22,7 +25,7 @@ from uuid import UUID
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from revel.auth.authz import AuthorizationDenied
@@ -39,20 +42,33 @@ from revel.services.profiles import (
     FactOut,
     PolicyResponse,
     PolicyUpdate,
-    ProfileOut,
     SharedProfileOut,
+    SummaryOut,
 )
 
 logger = logging.getLogger(__name__)
 
-POLICY_DESCRIPTION = (
-    "Read the user's contribution policy and the fact categories: for each category its "
-    "effective audience (the widest audience accepted without the user's review), allowed "
-    "audiences, whether review is required and the details schema. Read-only. Call it before "
-    "add_facts. Never collected: street addresses and birth years. Sensitive topics (health, "
-    "religion, politics, orientation, finances) may be saved only when the user volunteers "
-    "them, in the 'sensitive' category (Only Me, explicit evidence, held for the user's "
-    "approval); never infer them or ask about them."
+POLICY_GUIDANCE = (
+    "The policy lists the fact categories: for each its effective audience (the widest "
+    "audience accepted without the user's review), allowed audiences, whether review is "
+    "required and the details schema. Read it before add_facts. Never collected: street "
+    "addresses and birth years. Sensitive topics (health, religion, politics, orientation, "
+    "finances) may be saved only when the user volunteers them, in the 'sensitive' category "
+    "(Only Me, explicit evidence, held for the user's approval); never infer them or ask about "
+    "them."
+)
+GET_PROFILE_DESCRIPTION = (
+    "Read a Revel profile. Read-only. Without handle: the user's own profile, i.e. their facts "
+    "(live and pending review) with audience and status, a summary of recent contributions, "
+    "and 'policy', their contribution policy (policy.policy is null before the first approval; "
+    "policy.policy.version is the expected_version for set_contribution_policy). "
+    + POLICY_GUIDANCE
+    + " With handle: another person's profile by their EXACT handle (no partial search): "
+    "display name, handle and avatar plus only the facts they share with the user (by "
+    "connection tier, or Public facts if they opted in). Facts marked provisional are not yet "
+    "confirmed by that person; mention the caveat. If nothing is available under that handle "
+    "the result is the same whether the handle does not exist, is hidden or shares nothing "
+    "with the user; do not guess other handles. Handle lookups are rate limited."
 )
 ADD_FACTS_DESCRIPTION = (
     "Save 1-20 short, actionable gifting facts about the user to their Revel profile "
@@ -66,10 +82,6 @@ ADD_FACTS_DESCRIPTION = (
     "'rejected' with a reason_code. To correct a fact, send the replacement with supersedes_id; "
     "the old fact is retired only when the replacement is accepted."
 )
-PROFILE_DESCRIPTION = (
-    "Read the user's own profile facts (live and pending review) with their audience and "
-    "status, the current contribution policy and a summary of recent contributions. Read-only."
-)
 CONFIRMATION_RULE = (
     "Anything that widens access needs owner_confirmed=true: first ask the owner, quote "
     "exactly what will change, and set owner_confirmed only after the owner clearly agrees in "
@@ -79,40 +91,34 @@ CONFIRMATION_RULE = (
 )
 SET_POLICY_DESCRIPTION = (
     "Approve or change the user's contribution policy for the user, when they ask you to. "
-    "Call get_contribution_policy first and pass its policy version as expected_version (null "
-    "before the first approval); omitted fields keep their current values and "
+    "Call get_profile (no handle) first and pass policy.policy.version as expected_version "
+    "(null before the first approval); omitted fields keep their current values and "
     "category_settings, when sent, replaces the whole map. Widening (the first approval, "
     "public_opt_in on, a looser category audience, turning off require_review_all or a "
     "category's require_review, enrichment_enabled or share_provisional back on) needs the "
     "owner's confirmation; narrowing (tighter audiences, requiring review, withdrawing "
     "Public, turning provisional sharing or contributions off) does not. "
     + CONFIRMATION_RULE
-    + " Returns the same shape as get_contribution_policy."
+    + " Returns the policy in the same shape as get_profile's 'policy'."
 )
-REVIEW_DESCRIPTION = (
-    "Approve or reject one of the user's facts that is pending their review, when they decide. "
-    "Approving makes it active and shared with its audience (a replacement retires the fact it "
-    "corrects) and always needs the owner's confirmation; rejecting needs none. "
-    + CONFIRMATION_RULE
-)
-AUDIENCE_DESCRIPTION = (
-    "Change who can see one of the user's facts (public > connections > trusted_circle > "
-    "only_me). Narrowing needs no confirmation; widening does. Sensitive facts are always "
-    "only_me and Public needs the user's Public opt-in. " + CONFIRMATION_RULE
+UPDATE_FACT_DESCRIPTION = (
+    "Change one of the user's facts. action='set_audience' (requires audience): change who "
+    "can see it (public > connections > trusted_circle > only_me); narrowing needs no "
+    "confirmation, widening does; sensitive facts are always only_me and Public needs the "
+    "user's Public opt-in. action='approve' (takes no audience): approve a fact pending the "
+    "user's review, when they decide; it becomes active and shared with its audience (a "
+    "replacement retires the fact it corrects) and always needs the owner's confirmation. To "
+    "reject a pending fact use remove_fact. " + CONFIRMATION_RULE
 )
 REMOVE_DESCRIPTION = (
     "Remove one of the user's facts (e.g. undo a wrong contribution or a fact the user asked "
-    "to forget). It stops being shared immediately. Removing an already removed or replaced "
-    "fact is an error (not idempotent)."
+    "to forget), or reject a fact pending their review. It stops being shared immediately "
+    "and needs no confirmation. Removing an already removed or replaced fact is an error (not "
+    "idempotent)."
 )
-
-SHARED_PROFILE_DESCRIPTION = (
-    "Read another Revel user's profile by their EXACT handle (no partial search): their "
-    "display name, handle and avatar plus only the facts they share with the user (by "
-    "connection tier, or Public facts if they opted in). Facts marked provisional are not yet "
-    "confirmed by that person; mention the caveat. Read-only. If nothing is available under "
-    "that handle the result is the same whether the handle does not exist, is hidden or "
-    "shares nothing with the user; do not guess other handles. Rate limited."
+REJECT_CONFIRMED_DESCRIPTION = (
+    "Pending facts only: set true only when the owner explicitly told you to reject this "
+    "pending fact. Ignored for other facts."
 )
 
 _NOT_FOUND = "Fact not found"
@@ -121,10 +127,13 @@ _RATE_LIMITED = "Too many lookups; try again later"
 _NOT_ALLOWED = "Not allowed"
 _UNAVAILABLE = "Authorization service unavailable"
 _CONFLICT = "The fact changed; read the profile again and retry"
-_POLICY_CONFLICT = (
-    "The policy changed; read it again with get_contribution_policy and retry with its version"
-)
+_POLICY_CONFLICT = "The policy changed; read it again with get_profile and retry with its version"
 _INVALID = "Invalid request"
+_INVALID_REQUEST = "invalid_request"  # error code shared with the F6/F7 adapters (RG-59)
+
+FactAction = Literal["set_audience", "approve"]
+FACT_ACTIONS: tuple[FactAction, ...] = ("set_audience", "approve")
+AUDIENCES: tuple[str, ...] = tuple(a.value for a in Audience)  # widest first
 
 
 async def _run[T](settings: Any, operation: Callable[[Session, Principal], Awaitable[T]]) -> T:
@@ -178,6 +187,88 @@ def _invalid_text(errors: list[dict[str, Any]]) -> str:
     return f"{_INVALID}: " + "; ".join(parts) if parts else _INVALID
 
 
+def _invalid_request(message: str) -> ToolError:
+    """A per-action validation error (``invalid_request: <message>``), raised before any
+    service call."""
+    return ToolError(f"{_INVALID_REQUEST}: {message}")
+
+
+def _shown(value: str) -> str:
+    """An agent-supplied action name echoed in an error, bounded."""
+    return value if len(value) <= 40 else value[:40] + "..."
+
+
+def _fact_action(action: str, audience: str | None) -> tuple[FactAction, Audience | None]:
+    """Validate ``update_fact``'s action and its per-action parameters."""
+    if action not in FACT_ACTIONS:
+        raise _invalid_request(
+            f"Unknown action '{_shown(action)}' for update_fact; expected one of: "
+            + ", ".join(FACT_ACTIONS)
+            + "."
+        )
+    if action == "approve":
+        if audience is not None:
+            raise _invalid_request("Action 'approve' does not accept audience.")
+        return "approve", None
+    if audience is None:
+        raise _invalid_request("Action 'set_audience' requires audience.")
+    if audience not in AUDIENCES:
+        raise _invalid_request(
+            "Action 'set_audience' requires audience to be one of: " + ", ".join(AUDIENCES) + "."
+        )
+    return "set_audience", Audience(audience)
+
+
+async def _remove_or_reject(
+    session: Session, principal: Principal, fact_id: UUID, *, owner_confirmed: bool
+) -> FactOut:
+    """``remove_fact``: reject a pending fact (audit event ``rejected``), else remove it.
+
+    There is no separate status read to go stale: ``reject_fact`` checks the status under the
+    fact's row lock and refuses a fact that is not pending with
+    ``FactConflict('fact_not_pending')`` (rolled back, no event); only then is the fact removed
+    with ``remove_fact``, which re-checks under its own lock (a fact already removed or replaced
+    stays ``fact_not_removable``, the existing conflict error). Both are owner-authorized
+    service calls (no claim query here), and a fact never returns to pending_review, so the
+    fallback cannot remove a fact that should have been rejected."""
+    try:
+        return await profiles.reject_fact(
+            session, principal, fact_id, owner_confirmed=owner_confirmed
+        )
+    except profiles.FactConflict as exc:
+        if exc.reason != "fact_not_pending":
+            raise
+    return await profiles.remove_fact(session, principal, fact_id)
+
+
+class OwnerProfileView(BaseModel):
+    """``get_profile()`` without a handle: ``get_my_profile``'s facts and summary plus the full
+    ``get_policy`` response as ``policy`` (``policy.policy`` and ``policy.defaults`` are what
+    ``get_my_profile`` returned as ``policy`` and ``defaults``)."""
+
+    profile_id: UUID | None
+    policy_version: int | None
+    facts: list[FactOut]
+    summary: SummaryOut
+    policy: PolicyResponse
+
+
+async def _read_owner(settings: Any) -> dict[str, Any]:
+    async def read(session: Session, principal: Principal) -> OwnerProfileView:
+        profile = await profiles.get_my_profile(session, principal)
+        policy = await profiles.get_policy(session, principal)
+        return OwnerProfileView(
+            profile_id=profile.profile_id,
+            policy_version=profile.policy_version,
+            facts=profile.facts,
+            summary=profile.summary,
+            policy=policy,
+        )
+
+    view = await _run(settings, read)
+    return view.model_dump(mode="json")
+
+
 async def _read_shared(settings: Any, handle: str) -> SharedProfileOut:
     principal = await principal_from_mcp_context(runtime_for(settings))
     try:
@@ -201,8 +292,20 @@ OwnerConfirmed = Annotated[bool, Field(description=profiles.OWNER_CONFIRMED_DESC
 
 
 def register(server: MCPServer, settings: Any) -> None:
-    async def get_contribution_policy() -> PolicyResponse:
-        return await _run(settings, profiles.get_policy)
+    async def get_profile(
+        handle: Annotated[
+            str | None,
+            Field(
+                description="Another person's exact Revel handle. Omit to read the user's own "
+                "profile and contribution policy."
+            ),
+        ] = None,
+    ) -> dict[str, Any]:
+        # Plain dict output: the owner and shared views are different shapes, and a union
+        # return type would be wrapped as {"result": ...}, changing the shared view.
+        if handle is None:
+            return await _read_owner(settings)
+        return (await _read_shared(settings, handle)).model_dump(mode="json")
 
     async def add_facts(
         facts: Annotated[
@@ -212,16 +315,39 @@ def register(server: MCPServer, settings: Any) -> None:
     ) -> AddFactsResult:
         return await _run(settings, lambda s, p: profiles.add_facts(s, p, facts))
 
-    async def get_my_profile() -> ProfileOut:
-        return await _run(settings, profiles.get_my_profile)
-
-    async def set_fact_audience(
-        fact_id: UUID, audience: Audience, owner_confirmed: OwnerConfirmed = False
+    async def update_fact(
+        fact_id: UUID,
+        # Plain str (with an enum in the schema) so an unknown value gets the shared
+        # invalid_request wording instead of the SDK's validation error.
+        action: Annotated[
+            str,
+            Field(
+                description="'set_audience' (requires audience) or 'approve' (a pending fact; "
+                "takes no audience).",
+                json_schema_extra={"enum": list(FACT_ACTIONS)},
+            ),
+        ],
+        audience: Annotated[
+            str | None,
+            Field(
+                description="set_audience only: the new audience (public, connections, "
+                "trusted_circle or only_me).",
+                json_schema_extra={"enum": [*AUDIENCES, None]},
+            ),
+        ] = None,
+        owner_confirmed: OwnerConfirmed = False,
     ) -> FactOut:
+        checked, new_audience = _fact_action(action, audience)
+        if checked == "approve":
+            return await _run(
+                settings,
+                lambda s, p: profiles.approve_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
+            )
+        assert new_audience is not None
         return await _run(
             settings,
             lambda s, p: profiles.set_fact_audience(
-                s, p, fact_id, audience, owner_confirmed=owner_confirmed
+                s, p, fact_id, new_audience, owner_confirmed=owner_confirmed
             ),
         )
 
@@ -256,34 +382,18 @@ def register(server: MCPServer, settings: Any) -> None:
             lambda s, p: profiles.set_policy(s, p, update, owner_confirmed=owner_confirmed),
         )
 
-    async def review_pending_fact(
+    async def remove_fact(
         fact_id: UUID,
-        decision: Literal["approve", "reject"],
-        owner_confirmed: OwnerConfirmed = False,
+        owner_confirmed: Annotated[bool, Field(description=REJECT_CONFIRMED_DESCRIPTION)] = False,
     ) -> FactOut:
-        operation = profiles.approve_fact if decision == "approve" else profiles.reject_fact
         return await _run(
             settings,
-            lambda s, p: operation(s, p, fact_id, owner_confirmed=owner_confirmed),
+            lambda s, p: _remove_or_reject(s, p, fact_id, owner_confirmed=owner_confirmed),
         )
-
-    async def remove_fact(fact_id: UUID) -> FactOut:
-        return await _run(settings, lambda s, p: profiles.remove_fact(s, p, fact_id))
-
-    async def get_profile(
-        handle: Annotated[str, Field(description="The person's exact Revel handle.")],
-    ) -> SharedProfileOut:
-        return await _read_shared(settings, handle)
 
     read_only = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     tools: list[tuple[Callable[..., Any], str, str, str, ToolAnnotations]] = [
-        (
-            get_contribution_policy,
-            "get_contribution_policy",
-            "Contribution policy",
-            POLICY_DESCRIPTION,
-            read_only,
-        ),
+        (get_profile, "get_profile", "Read a profile", GET_PROFILE_DESCRIPTION, read_only),
         (
             add_facts,
             "add_facts",
@@ -295,14 +405,6 @@ def register(server: MCPServer, settings: Any) -> None:
                 idempotentHint=False,
                 openWorldHint=False,
             ),
-        ),
-        (get_my_profile, "get_my_profile", "My profile", PROFILE_DESCRIPTION, read_only),
-        (
-            get_profile,
-            "get_profile",
-            "Someone's shared profile",
-            SHARED_PROFILE_DESCRIPTION,
-            read_only,
         ),
         (
             set_contribution_policy,
@@ -317,28 +419,19 @@ def register(server: MCPServer, settings: Any) -> None:
             ),
         ),
         (
-            review_pending_fact,
-            "review_pending_fact",
-            "Approve or reject a pending fact",
-            REVIEW_DESCRIPTION,
-            # Rejecting removes the fact; a repeat is a conflict (ToolError).
+            update_fact,
+            "update_fact",
+            "Change a fact's audience or approve it",
+            UPDATE_FACT_DESCRIPTION,
+            # A repeat approve is a conflict (ToolError), so not idempotent.
             ToolAnnotations(
-                readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
-            ),
-        ),
-        (
-            set_fact_audience,
-            "set_fact_audience",
-            "Change a fact's audience",
-            AUDIENCE_DESCRIPTION,
-            ToolAnnotations(
-                readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+                readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
             ),
         ),
         (
             remove_fact,
             "remove_fact",
-            "Remove a fact",
+            "Remove or reject a fact",
             REMOVE_DESCRIPTION,
             # A repeat remove is a conflict (ToolError), so not idempotent.
             ToolAnnotations(

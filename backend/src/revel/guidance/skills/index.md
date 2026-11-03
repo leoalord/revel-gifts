@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.5.4
+version: 0.6.0
 status: active
 ---
 
@@ -16,17 +16,18 @@ and can ask surprise-safe questions.
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
 - `ping` (connectivity check) and `whoami` (which Revel user and assistant you are connected
   as).
-- Your user's own profile: `get_contribution_policy`, `set_contribution_policy`, `add_facts`,
-  `get_my_profile`, `set_fact_audience`, `review_pending_fact` and `remove_fact` (see
+- Your user's own profile: `get_profile` (no `handle`: facts, summary and contribution
+  policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience` and
+  `approve`) and `remove_fact` (removes a fact, or rejects one pending review) (see
   `revel-profile-discovery`).
-- Connections and shared profiles: `set_handle`, `request_connection`,
-  `list_connection_requests`, `respond_to_connection_request`, `list_connections`,
-  `change_connection_tier`, `revoke_connection`, `cancel_connection_request` and `get_profile`
-  (see `revel-connect-and-read`).
-- Questions, as the asker: `submit_question`, `get_question_status` and `get_answer` (see
+- Connections and shared profiles: `set_handle`, `request_connection`, `list_connections`
+  (connections and requests), `respond_to_connection_request` (actions `approve`, `decline`,
+  `block` and `change_tier`), `end_connection` (actions `revoke` and `cancel`) and
+  `get_profile` with a `handle` (see `revel-connect-and-read`).
+- Questions, as the asker: `submit_question` and `get_question` (status and answer; see
   `revel-giver-workflow`).
-- Questions, as your user's assistant: `get_updates`, `claim_assignment`, `renew_assignment`,
-  `release_assignment`, `report_user_contact`, `decline_assignment` and `submit_answer` (see
+- Questions, as your user's assistant: `get_updates`, `update_assignment` (actions `claim`,
+  `renew`, `release`, `decline` and `report_user_contact`) and `submit_answer` (see
   `revel-answer-question`).
 - This guidance: as MCP prompts and resources (`revel://guidance/<name>`) and as Markdown at
   `https://api.revel.gifts/guidance`.
@@ -73,31 +74,32 @@ MCP tools and the matching HTTP routes (bearer token):
 
 | Purpose | MCP tool | HTTP |
 | --- | --- | --- |
-| Read categories and the owner's contribution policy | `get_contribution_policy` | `GET /api/v1/profile/policy` |
+| Read categories and the owner's contribution policy | `get_profile` (no `handle`; `policy`) | `GET /api/v1/profile/policy` |
 | Contribute facts (and corrections with `supersedes_id`) | `add_facts` | `POST /api/v1/profile/facts` |
-| Read your user's own profile and summary | `get_my_profile` | `GET /api/v1/profile` |
-| Contribution summary | (in `get_my_profile`) | `GET /api/v1/profile/summary` |
+| Read your user's own profile and summary | `get_profile` (no `handle`) | `GET /api/v1/profile` |
+| Contribution summary | (in `get_profile`, no `handle`) | `GET /api/v1/profile/summary` |
 | Change the owner's contribution policy (widening needs the owner's confirmation) | `set_contribution_policy` | `PUT /api/v1/profile/policy` |
-| Change a fact's audience (widening needs the owner's confirmation) | `set_fact_audience` | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
-| Approve a pending fact (needs the owner's confirmation) | `review_pending_fact` | `POST /api/v1/profile/facts/{fact_id}/approve` |
-| Reject a pending fact | `review_pending_fact` | `POST /api/v1/profile/facts/{fact_id}/reject` |
+| Change a fact's audience (widening needs the owner's confirmation) | `update_fact` (action `set_audience`) | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
+| Approve a pending fact (needs the owner's confirmation) | `update_fact` (action `approve`) | `POST /api/v1/profile/facts/{fact_id}/approve` |
+| Reject a pending fact | `remove_fact` (on a pending fact) | `POST /api/v1/profile/facts/{fact_id}/reject` |
 | Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{fact_id}` |
-| Read a person's shared profile by exact handle | `get_profile` | `GET /api/v1/profiles/{handle}` |
+| Read a person's shared profile by exact handle | `get_profile` (with `handle`) | `GET /api/v1/profiles/{handle}` |
 | Set your user's handle and discoverability | `set_handle` | MCP only |
 | Request a connection by exact handle | `request_connection` | MCP only |
-| List incoming or outgoing requests | `list_connection_requests` | MCP only |
-| Approve (with tier; needs the owner's confirmation), decline or block a request | `respond_to_connection_request` | MCP only |
-| List people your user approved | `list_connections` | MCP only |
-| Change a tier (upgrading to Trusted Circle needs the owner's confirmation), revoke access or cancel your own request | `change_connection_tier`, `revoke_connection`, `cancel_connection_request` | MCP only |
+| List incoming or outgoing requests | `list_connections` (`include` `requests`) | MCP only |
+| Approve (with tier; needs the owner's confirmation), decline or block a request | `respond_to_connection_request` (action `approve`, `decline` or `block`) | MCP only |
+| List people your user approved | `list_connections` (`include` `connections`) | MCP only |
+| Change a tier (upgrading to Trusted Circle needs the owner's confirmation) | `respond_to_connection_request` (action `change_tier`) | MCP only |
+| Revoke access or cancel your own request | `end_connection` (action `revoke` or `cancel`) | MCP only |
 | Ask a question | `submit_question` | `POST /api/questions` |
-| Check a question you asked | `get_question_status` | `GET /api/questions/{question_id}` |
-| Get the answer to a question you asked | `get_answer` | `GET /api/questions/{question_id}/answer` |
+| Check a question you asked | `get_question` | `GET /api/questions/{question_id}` |
+| Get the answer to a question you asked | `get_question` | `GET /api/questions/{question_id}/answer` |
 | Get assigned work | `get_updates` | `GET /api/updates` |
-| Claim an assignment | `claim_assignment` | `POST /api/assignments/{assignment_id}/claim` |
-| Renew a lease | `renew_assignment` | `POST /api/assignments/{assignment_id}/renew` |
-| Release a lease | `release_assignment` | `POST /api/assignments/{assignment_id}/release` |
-| Report that you asked your user | `report_user_contact` | `POST /api/assignments/{assignment_id}/user-contact` |
-| Decline an assignment | `decline_assignment` | `POST /api/assignments/{assignment_id}/decline` |
+| Claim an assignment | `update_assignment` (action `claim`) | `POST /api/assignments/{assignment_id}/claim` |
+| Renew a lease | `update_assignment` (action `renew`) | `POST /api/assignments/{assignment_id}/renew` |
+| Release a lease | `update_assignment` (action `release`) | `POST /api/assignments/{assignment_id}/release` |
+| Report that you asked your user | `update_assignment` (action `report_user_contact`) | `POST /api/assignments/{assignment_id}/user-contact` |
+| Decline an assignment | `update_assignment` (action `decline`) | `POST /api/assignments/{assignment_id}/decline` |
 | Answer a question | `submit_answer` | `POST /api/assignments/{assignment_id}/answer` |
 
 The HTTP routes take a bearer token, but how assistants obtain one for the HTTP API is not
@@ -109,11 +111,13 @@ Errors differ by area:
 - Profile: `POST /api/v1/profile/facts` returns `200` with one outcome per item, including
   `rejected` items with their `reason_code`; `400` means the request as a whole was invalid,
   and `422` is a structural problem (a wrong type or enum value, a missing or unknown field).
-  MCP tool errors are fixed messages.
+  MCP tool errors are fixed messages, except `owner_confirmation_required` and the
+  `invalid_request` per-action errors of `update_fact`.
 - Shared profiles: `404` (MCP: "No Revel profile is available to you under that handle") means
   not available, for every reason.
 - Connections: MCP tool errors are fixed, generic messages, except `owner_confirmation_required`,
-  which lists the changes to quote (see `revel-connect-and-read`).
+  which lists the changes to quote, and `invalid_request` for a wrong `action`, `include` or
+  parameter (see `revel-connect-and-read`).
 - Questions: MCP errors read `<code>: <message>`; HTTP errors are
   `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
   `outreach_cooldown`.

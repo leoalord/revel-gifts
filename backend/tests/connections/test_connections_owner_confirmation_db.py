@@ -268,20 +268,23 @@ async def test_mcp_tools_quote_the_changes_and_take_the_flag(
     )
     assert done.structured_content["status"] == "approved"
 
-    upgrade = {"request_id": rid, "tier": "trusted_circle"}
-    message = await error_text("change_connection_tier", upgrade)
+    name = "respond_to_connection_request"
+    upgrade = {"request_id": rid, "action": "change_tier", "tier": "trusted_circle"}
+    message = await error_text(name, upgrade)
+    assert "owner_confirmation_required: this widens access. Ask the owner" in message
     assert "- Let Sam (@sam_demo) see facts you share with Trusted Circle" in message
     assert rows(session)[0].granted_tier == "connections"
-    done = await server.call_tool("change_connection_tier", {**upgrade, "owner_confirmed": True})
+    done = await server.call_tool(name, {**upgrade, "owner_confirmed": True})
     assert done.structured_content["tier"] == "trusted_circle"
-    done = await server.call_tool(
-        "change_connection_tier", {"request_id": rid, "tier": "connections"}
-    )
+    downgrade = {"request_id": rid, "action": "change_tier", "tier": "connections"}
+    done = await server.call_tool(name, downgrade)
     assert done.structured_content["tier"] == "connections"
 
     tools = {t.name: t for t in await server.list_tools()}
-    for name in ("respond_to_connection_request", "change_connection_tier"):
-        schema = tools[name].input_schema["properties"]["owner_confirmed"]
-        assert schema["default"] is False
-        assert schema["description"] == svc.OWNER_CONFIRMED_DESCRIPTION
-        assert "owner_confirmed" in tools[name].description
+    assert "change_connection_tier" not in tools
+    schema = tools[name].input_schema["properties"]["owner_confirmed"]
+    assert schema["default"] is False
+    assert schema["description"] == svc.OWNER_CONFIRMED_DESCRIPTION
+    assert "owner_confirmed" in tools[name].description
+    assert "quote exactly what will change" in tools[name].description
+    assert "only after the owner clearly agrees" in tools[name].description

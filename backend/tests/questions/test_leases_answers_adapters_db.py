@@ -191,18 +191,19 @@ async def test_mcp_lease_answer_and_retrieval_tools(
         "submit_question", {"handle": "chelsea", "requested_information": REQUESTED}
     )
     question_id = created.structured_content["question_id"]  # type: ignore[index]
-    pending = await asker.call_tool("get_answer", {"question_id": question_id})
+    pending = await asker.call_tool("get_question", {"question_id": question_id})
     assert pending.structured_content["result"] == "not_answered"  # type: ignore[index]
 
     a1 = assignment_for(factory, world.owner_d1.id)
     responder = mcp_server(settings, monkeypatch, agent_principal(world.owner_d1))
     lease = (
-        await responder.call_tool("claim_assignment", {"assignment_id": a1})
+        await responder.call_tool("update_assignment", {"assignment_id": a1, "action": "claim"})
     ).structured_content
     assert lease is not None and lease["status"] == "claimed"
     renewed = (
         await responder.call_tool(
-            "renew_assignment", {"assignment_id": a1, "lease_version": lease["lease_version"]}
+            "update_assignment",
+            {"assignment_id": a1, "action": "renew", "lease_version": lease["lease_version"]},
         )
     ).structured_content
     assert renewed is not None
@@ -239,16 +240,69 @@ async def test_mcp_lease_answer_and_retrieval_tools(
     ).structured_content
     assert answered is not None and answered["audience"] == "connections"
     with pytest.raises(ToolError, match=r": not_found: "):
-        await responder.call_tool("get_answer", {"question_id": question_id})
+        await responder.call_tool("get_question", {"question_id": question_id})
 
     # mcp_server patches the module-level principal resolver: rebuild the requester's server.
     asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
     status = (
-        await asker.call_tool("get_question_status", {"question_id": question_id})
+        await asker.call_tool("get_question", {"question_id": question_id})
     ).structured_content
     assert status is not None and status["status"] == "answered"
     released = (
-        await asker.call_tool("get_answer", {"question_id": question_id})
+        await asker.call_tool("get_question", {"question_id": question_id})
     ).structured_content
     assert released is not None and released["result"] == "answer"
     assert [e["kind"] for e in released["answer"]["evidence"]] == ["claim", "inline"]
+
+
+@pytest.mark.anyio
+@requires_db
+async def test_mcp_update_assignment_other_actions(
+    factory: sessionmaker[Session],
+    settings: Settings,
+    fga: Any,
+    world_builder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await world_builder()
+    configure_question_deps(settings, QuestionDeps(sessionmaker=factory))
+    asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
+    await asker.call_tool(
+        "submit_question", {"handle": "chelsea", "requested_information": REQUESTED}
+    )
+    a1 = assignment_for(factory, world.owner_d1.id)
+    a2 = assignment_for(factory, world.owner_d2.id)
+    one = mcp_server(settings, monkeypatch, agent_principal(world.owner_d1))
+    lease = (
+        await one.call_tool(
+            "update_assignment", {"assignment_id": a1, "action": "claim", "human_contact": True}
+        )
+    ).structured_content
+    assert lease is not None and lease["human_contact"] is True
+    waiting = (
+        await one.call_tool(
+            "update_assignment",
+            {
+                "assignment_id": a1,
+                "action": "report_user_contact",
+                "lease_version": lease["lease_version"],
+                "delivery_confirmed": True,
+            },
+        )
+    ).structured_content
+    assert waiting is not None and waiting["status"] == "waiting_for_user"
+    released = (
+        await one.call_tool(
+            "update_assignment",
+            {"assignment_id": a1, "action": "release", "lease_version": waiting["lease_version"]},
+        )
+    ).structured_content
+    assert released is not None and released["status"] == "released"
+    two = mcp_server(settings, monkeypatch, agent_principal(world.owner_d2))
+    declined = (
+        await two.call_tool(
+            "update_assignment",
+            {"assignment_id": a2, "action": "decline", "reason": "not_appropriate"},
+        )
+    ).structured_content
+    assert declined is not None and declined["status"] == "declined"
