@@ -118,6 +118,9 @@ Outcome per item (`accepted | pending_review | rejected`):
   (shared with a caveat while `share_provisional`), else `active`.
 - `supersedes_id`: if the replacement is accepted, the old fact becomes `superseded` in the same
   transaction; if pending, the old fact stays live until the owner approves the replacement.
+  For agents, a replacement without `audience` inherits the replaced fact's audience (capped at
+  the category's effective default), and one wider than the replaced fact is held for review
+  (see "Owner confirmation").
 
 Contributors: the owner (UI, explicit acceptance) and the owner's own agents (MCP/API).
 Third-party contributions are out of MVP scope and denied. `claim_events` record actor user and
@@ -193,7 +196,18 @@ review, withdrawing Public, `enrichment_enabled` off, rejecting a pending fact, 
 writes (no new version). A mixed policy write that contains any widening needs the flag; the
 refusal lists only the widening parts. The check runs under the profile lock against the
 current policy, after the version check (409 first) and validation (400 first) and before
-anything is written; a refusal writes nothing.
+any policy or claim row is written; a refusal writes no policy, claim or claim_event rows. (A
+policy write ensures the profile first, in its own transaction, so a refused FIRST approval
+may still leave the profile row and its owner tuple, as `add_facts` would.)
+
+Corrections by an agent (`add_facts` with `supersedes_id`) never widen silently (#29 review
+B1). The replacement is compared with the replaced fact's current audience (also across
+categories): with no `audience`, it inherits the replaced fact's audience, capped at the
+replacement category's effective default (`involves_others` still defaults to Only Me); an
+explicit audience wider than the replaced fact's is `pending_review` (message says why; the old
+fact stays live, and approving it needs `owner_confirmed`), even within the category default;
+an equal or narrower one follows the usual rules (accepted and superseding atomically unless
+another review rule applies). Owner corrections in the browser are unchanged.
 
 Refusal (`reason_code` `owner_confirmation_required`):
 

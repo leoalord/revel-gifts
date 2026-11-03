@@ -124,19 +124,23 @@ def lock_claim(session: Session, profile_id: UUID, claim_id: UUID) -> Claim:
     return claim
 
 
-def lock_claims(session: Session, profile_id: UUID, claim_ids: Iterable[UUID]) -> None:
+def lock_claims(
+    session: Session, profile_id: UUID, claim_ids: Iterable[UUID]
+) -> dict[UUID, Audience]:
     """Lock the given facts of ``profile_id`` ``FOR UPDATE`` in id order (missing or foreign
     ids are skipped; later per-row checks report them). Callers that will lock several facts
-    call this first so concurrent transactions acquire them in one global order."""
+    call this first so concurrent transactions acquire them in one global order. Returns the
+    locked facts' current audiences (e.g. so a replacement can be compared with its target)."""
     ids = sorted(set(claim_ids))
     if not ids:
-        return
-    session.execute(
-        select(Claim.id)
+        return {}
+    rows = session.execute(
+        select(Claim.id, Claim.audience)
         .where(Claim.profile_id == profile_id, Claim.id.in_(ids))
         .order_by(Claim.id)
         .with_for_update()
     ).all()
+    return {row.id: Audience(row.audience) for row in rows}
 
 
 def _supersede(

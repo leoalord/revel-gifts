@@ -971,10 +971,26 @@ def _accepted_status(fact: FactInput) -> ClaimStatus:
     return ClaimStatus.ACTIVE
 
 
+_HOLD_WIDENS_REPLACED = (
+    "Held for the owner's review because it would widen who can see the fact it replaces; "
+    "the old fact stays live until approved."
+)
+
+
 def _plan_fact(
-    principal: PrincipalLike, policy: PolicyView, fact: FactInput
-) -> claim_writes.NewFact:
-    """Validate one fact and decide its status under ``policy`` (raises ``_Rejected``)."""
+    principal: PrincipalLike,
+    policy: PolicyView,
+    fact: FactInput,
+    replaced_audience: Audience | None = None,
+) -> tuple[claim_writes.NewFact, str | None]:
+    """Validate one fact and decide its status under ``policy`` (raises ``_Rejected``).
+    Returns the planned fact and, when an agent's replacement is held because it would widen
+    the replaced fact's audience, the outcome message.
+
+    ``replaced_audience`` is the current audience of the (locked) ``supersedes_id`` target. An
+    agent's replacement never widens it silently (#29 review B1): with no audience it inherits
+    the replaced fact's audience, capped at the category's effective default; an explicit
+    wider audience is held for review (approval then needs the owner's confirmation)."""
     try:
         spec = validate_category(fact.category)
         statement = _check_statement(spec, fact.statement)
@@ -983,12 +999,22 @@ def _plan_fact(
     except CategoryError as exc:
         raise _Rejected(exc.reason_code, exc.message) from None
     effective = policy.effective_audience(spec)
-    # Facts involving other people: tightest plausible audience unless one is given.
-    audience = fact.audience or (Audience.ONLY_ME if fact.involves_others else effective)
+    owner_ui = _is_owner_ui(principal)
+    replacing = None if owner_ui else replaced_audience
+    if fact.audience is not None:
+        audience = fact.audience
+    elif fact.involves_others:
+        # Facts involving other people: tightest plausible audience unless one is given.
+        audience = Audience.ONLY_ME
+    elif replacing is not None:
+        # Inherit the replaced fact's audience, never wider than the category allows.
+        audience = replacing if replacing.rank >= effective.rank else effective
+    else:
+        audience = effective
     if not policy.audience_allowed(spec, audience):
         raise _Rejected("invalid_field", _audience_refusal(spec, audience))
+    widens_replaced = replacing is not None and audience.rank < replacing.rank
     acceptance: AcceptanceMode | None
-    owner_ui = _is_owner_ui(principal)
     if not owner_ui and policy.approved and not policy.enrichment_enabled:
         raise _Rejected("enrichment_disabled", "The owner has turned contributions off")
     if spec.sensitive:
@@ -1007,12 +1033,18 @@ def _plan_fact(
             fact.involves_others
             or not policy.approved
             or audience.rank < effective.rank
+            or widens_replaced
             or policy.requires_review(spec)
         ):
             status, acceptance = ClaimStatus.PENDING_REVIEW, None
         else:
             status, acceptance = _accepted_status(fact), AcceptanceMode.AUTOMATIC
-    return claim_writes.NewFact(
+    hold_message = (
+        _HOLD_WIDENS_REPLACED
+        if widens_replaced and status is ClaimStatus.PENDING_REVIEW and not fact.involves_others
+        else None
+    )
+    planned = claim_writes.NewFact(
         category=spec.id,
         statement=statement,
         details=details,
@@ -1026,6 +1058,7 @@ def _plan_fact(
         policy_version=policy.version,
         supersedes_id=fact.supersedes_id,
     )
+    return planned, hold_message
 
 
 async def add_facts(
@@ -1051,7 +1084,7 @@ async def add_facts(
         policy = _policy_view(_current_policy_row(session, profile_id))
         # Lock every supersede target up front in id order, so two batches naming the same
         # facts in opposite orders queue instead of deadlocking.
-        claim_writes.lock_claims(
+        replaced = claim_writes.lock_claims(
             session,
             profile_id,
             {
@@ -1070,7 +1103,12 @@ async def add_facts(
         for index, raw in enumerate(facts):
             try:
                 item = _coerce(raw)
-                planned = _plan_fact(principal, policy, item)
+                planned, hold_message = _plan_fact(
+                    principal,
+                    policy,
+                    item,
+                    replaced.get(item.supersedes_id) if item.supersedes_id else None,
+                )
             except _Rejected as exc:
                 results.append(_rejected(index, exc.reason_code, exc.message))
                 continue
@@ -1102,7 +1140,8 @@ async def add_facts(
                     claim_id=claim.id,
                     status=status,
                     audience=Audience(claim.audience),
-                    message=_outcome_message(status, involves_others=item.involves_others),
+                    message=hold_message
+                    or _outcome_message(status, involves_others=item.involves_others),
                 )
             )
         session.commit()

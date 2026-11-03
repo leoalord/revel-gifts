@@ -468,3 +468,107 @@ async def test_browser_owner_needs_no_flag(session: Session, world: World) -> No
     await profiles.set_fact_audience(session, world.alex.ui, r.claim_id, Audience.ONLY_ME)
     widened = await profiles.set_fact_audience(session, world.alex.ui, r.claim_id, Audience.PUBLIC)
     assert widened.audience is Audience.PUBLIC
+
+
+# --- Corrections never widen silently (review B1) ---------------------------------------------
+
+
+async def test_agent_correction_inherits_or_holds_wider_audience(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    await profiles.set_policy(session, world.alex.ui, PolicyUpdate())
+    (private,) = await add(session, world.alex.mcp, fact(audience="only_me"))
+    assert (private.outcome, private.audience) == ("accepted", Audience.ONLY_ME)
+
+    # Reproduction 1: audience omitted -> inherits Only Me (not the Connections default).
+    (fixed,) = await add(
+        session, world.alex.mcp, fact(statement="Loves sencha", supersedes_id=str(private.claim_id))
+    )
+    assert (fixed.outcome, fixed.audience) == ("accepted", Audience.ONLY_ME)
+    assert claim_row(factory, private.claim_id).status == ClaimStatus.SUPERSEDED.value
+
+    # Reproduction 2: cross-category, audience omitted -> still Only Me.
+    (cross,) = await add(
+        session,
+        world.alex.api,
+        fact("style", "Minimalist style", supersedes_id=str(fixed.claim_id)),
+    )
+    assert (cross.outcome, cross.audience) == ("accepted", Audience.ONLY_ME)
+
+    # Explicit wider audience -> held, old stays live; approval needs the confirmation.
+    (wider,) = await add(
+        session,
+        world.alex.mcp,
+        fact(
+            "style", "Scandinavian style", audience="connections", supersedes_id=str(cross.claim_id)
+        ),
+    )
+    assert (wider.outcome, wider.audience) == ("pending_review", Audience.CONNECTIONS)
+    assert "widen who can see the fact it replaces" in wider.message
+    assert claim_row(factory, cross.claim_id).status == ClaimStatus.ACTIVE.value
+    with pytest.raises(OwnerConfirmationRequired):
+        await profiles.approve_fact(session, world.alex.mcp, wider.claim_id)
+    await profiles.approve_fact(session, world.alex.mcp, wider.claim_id, owner_confirmed=True)
+    assert claim_row(factory, cross.claim_id).status == ClaimStatus.SUPERSEDED.value
+
+
+async def test_agent_correction_capped_at_category_default_and_narrower_accepted(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    await profiles.set_policy(session, world.alex.ui, PolicyUpdate())
+    (wide,) = await add(session, world.alex.mcp, fact())  # interest at Connections
+    assert wide.audience is Audience.CONNECTIONS
+    # Inherited Connections is wider than Sizes allows: capped at its default (Trusted Circle).
+    (size,) = await add(
+        session,
+        world.alex.mcp,
+        fact(
+            "size",
+            "Wears M",
+            details={"item": "shirt", "size": "M"},
+            supersedes_id=str(wide.claim_id),
+        ),
+    )
+    assert (size.outcome, size.audience) == ("accepted", Audience.TRUSTED_CIRCLE)
+    assert claim_row(factory, wide.claim_id).status == ClaimStatus.SUPERSEDED.value
+    # Equal or narrower explicit audience: accepted and supersedes atomically.
+    (same,) = await add(
+        session,
+        world.alex.api,
+        fact(
+            "size",
+            "Wears L",
+            details={"item": "shirt", "size": "L"},
+            audience="trusted_circle",
+            supersedes_id=str(size.claim_id),
+        ),
+    )
+    assert (same.outcome, same.audience) == ("accepted", Audience.TRUSTED_CIRCLE)
+    (narrow,) = await add(
+        session,
+        world.alex.api,
+        fact(
+            "size",
+            "Wears XL",
+            details={"item": "shirt", "size": "XL"},
+            audience="only_me",
+            supersedes_id=str(same.claim_id),
+        ),
+    )
+    assert (narrow.outcome, narrow.audience) == ("accepted", Audience.ONLY_ME)
+    assert claim_row(factory, same.claim_id).status == ClaimStatus.SUPERSEDED.value
+    (ev,) = [e for e in events(factory, narrow.claim_id) if e.action == "auto_accepted"]
+    assert ev.acceptance == "automatic"
+
+
+async def test_owner_ui_corrections_unchanged(
+    factory: sessionmaker[Session], session: Session, world: World
+) -> None:
+    await profiles.set_policy(session, world.alex.ui, PolicyUpdate())
+    (private,) = await add(session, world.alex.ui, fact(audience="only_me"))
+    (ui_fix,) = await add(
+        session, world.alex.ui, fact(statement="Loves sencha", supersedes_id=str(private.claim_id))
+    )
+    # The owner's own entry uses the category's effective default and is explicit, as before.
+    assert (ui_fix.outcome, ui_fix.audience) == ("accepted", Audience.CONNECTIONS)
+    assert claim_row(factory, private.claim_id).status == ClaimStatus.SUPERSEDED.value
