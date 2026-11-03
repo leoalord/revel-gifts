@@ -1,4 +1,4 @@
-# F5 profiles and contributions: operation contract v1 (#9, RG-18)
+# F5 profiles and contributions: operation contract v1 (#9, RG-18; shared reads #28, RG-56)
 
 Owner: revel-f5-profiles. Status: **provisional** until #9's reviewed merge (v1 as implemented on the RG-18 branch). Published before
 implementation so F6, F7, F8 (#10) and F9 (#11) can draft against it; changes are announced.
@@ -53,7 +53,10 @@ Append-only versions (current = highest `version`). Fields:
   `require_review_all` (default false), `enrichment_enabled` (default true);
 - `category_settings: {<category>: {"audience"?: Audience, "require_review"?: bool}}`. A category
   audience may be anything from `only_me` up to its default; `public` only for public-eligible
-  categories while `public_opt_in` is true.
+  categories while `public_opt_in` is true. A write whose resulting `public_opt_in` is false
+  **normalizes** an explicit `public` audience of a public-eligible category: the audience key
+  is dropped (the category falls back to its default; other keys such as `require_review` are
+  kept) instead of a 400 (#28). `public` for a never-eligible category is still a 400.
 
 **Effective default audience** for a category = its `category_settings` audience, else
 `public` for public-eligible categories while opted in, else the category default.
@@ -62,7 +65,9 @@ Append-only versions (current = highest `version`). Fields:
 Policy writes are human-only (browser UI, `via="ui"`): widening access beyond the approved policy
 needs owner approval. Agents read the policy. Writes take `expected_version` (the version the UI
 read; `null` before the first); a mismatch returns **409** with the current policy. The first
-approval creates version 1. Omitted fields keep their current values (`category_settings`, when
+approval creates version 1. A later write whose effective content (all flags, the normalized
+`category_settings` and F7's carried-forward fields) equals the current policy creates **no**
+new version and returns the current policy unchanged (#28); the version check still applies. Omitted fields keep their current values (`category_settings`, when
 sent, replaces the whole map; when omitted it is carried forward, minus Public audiences if the
 opt-in is withdrawn). F7's `questions_enabled` / `question_settings` are carried forward
 unchanged. Tightening a category's effective audience also narrows that category's existing
@@ -246,7 +251,8 @@ again (or a superseded fact) is **409** `{"detail": "fact_not_removable", "fact"
 
 Locking: `add_facts` locks every `supersedes_id` target up front in id order (after the
 profile's `FOR SHARE`), so batches naming the same facts in opposite orders queue instead of
-deadlocking.
+deadlocking. Approving a replacement locks the replacement and its target together in the same
+id order before touching either (#28), so it cannot deadlock with a batch that names both.
 
 ### Errors
 
@@ -260,9 +266,58 @@ caller's** (never reveals existence); 409 policy version conflict or a fact that
 503 authorization/identity service unavailable (generic text, no SDK detail).
 MCP tools return the same outcomes as tool results or `ToolError` with generic text.
 
-## Not in #9
+## Shared profile reads (#28, RG-56)
 
-Reads of other people's profiles (Sam reading Alex) need F6's handle resolution. Planned F5
-follow-up: service `read_shared_profile(session, principal, *, profile_id)` over `visible_claims`
-and MCP tool `get_profile(handle)` / `GET /api/v1/profiles/{handle}`, wired once F6 exposes
-handle → profile resolution.
+Reading another person's profile (Sam reading Alex). Every adapter: principal first, then F6's
+`resolve_handle(session, principal, handle=...)`, then
+`read_shared_profile(session, principal, *, profile_id=<resolved profile_id>)`. **No adapter
+accepts a profile id**; `read_shared_profile` is internal and is only given the id that
+`resolve_handle` returned for the same principal, so undiscoverable and blocking targets stay
+hidden at the database layer. Facts come only from F4's `visible_claims` (tier from OpenFGA,
+live statuses, audience <= tier, current `share_provisional` and `public_opt_in`); F5 filters
+nothing itself. Nothing is written (F6's lookup quota aside); no F5 lock is held.
+
+| Operation | MCP tool (agent) | HTTP bearer (agent API) | HTTP browser (F8, F6 #18) |
+| --- | --- | --- | --- |
+| Someone's shared profile | `get_profile(handle)` (readOnlyHint) | `GET /api/v1/profiles/{handle}` | `GET /api/ui/profiles/{handle}` |
+
+The bearer route authenticates with the bearer token only (F2: cookies never authenticate
+bearer routes); the browser route uses the session cookie (`CurrentUIPrincipal`; a GET, so no
+same-origin check). Both return the same body and errors. Handles are exact (trimmed,
+lowercased, one leading `@` dropped).
+
+```json
+{"handle": "alex_demo", "display_name": "Alex", "avatar_url": "https://..." | null,
+ "facts": [{"id": "...", "category": "interest", "statement": "Collects stamps", "details": null,
+   "audience": "public", "evidence_type": "explicit", "confidence": "unknown",
+   "observed_at": null, "observed_precision": "unknown", "provisional": false}],
+ "provisional_caveat": "Facts marked provisional were inferred ..." | null}
+```
+
+`facts` items are exactly F4's `SharedClaim` projection: never contributor, `contributed_via`,
+status, policy version, `supersedes_id` or timestamps. `provisional_caveat` is set only when a
+returned fact is provisional (shown only while the owner's `share_provisional` is on).
+Connections viewers see Connections and Public facts, Trusted Circle also Trusted Circle facts,
+an unconnected viewer Public facts only while the owner is opted in. Only Me, pending,
+superseded and removed facts are never returned to anyone else. A user's agents see what the
+user sees. The owner (or the owner's agent) reading their own handle gets the same shape with
+all of their own live facts (including Only Me); `get_my_profile` remains the management read.
+
+Errors (fixed text; never service or SDK detail):
+
+- **404** `{"detail": "target_not_found"}` / MCP `ToolError("No Revel profile is available to
+  you under that handle")` for every hidden case, identically: nonexistent or malformed handle,
+  undiscoverable target without an approved connection, a target who blocked the caller, a
+  target with no profile yet, and a resolvable target where the viewer's tier is `none`
+  (unconnected without the Public opt-in, revoked, blocked, an agent whose tuples are gone).
+- **429** `{"detail": "rate_limited"}` / `ToolError` (F6's lookup limit; misses cost, hits are
+  free, checked before resolution).
+- **403** `{"detail": "not_allowed"}` / `ToolError("Not allowed")` when F6 finds the acting
+  delegation is no longer active (F2 normally rejects a disconnected agent before this: 401 /
+  its own tool error). Independent of the handle.
+- **503** `{"detail": "Authorization service unavailable"}` / `ToolError` for OpenFGA or any
+  other failure.
+
+Python: `read_shared_profile(session, principal, *, profile_id: UUID | None) ->
+SharedProfileOut` (raises `SharedProfileNotFound` for `None` or tier `none`,
+`AuthorizationUnavailable` on OpenFGA failure); `SharedProfileOut`, `SharedFactOut`.
