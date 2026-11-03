@@ -14,6 +14,7 @@ Authentication and authorization stay server-side on the API routes; these files
 
 from __future__ import annotations
 
+import posixpath
 from pathlib import Path
 
 from fastapi import APIRouter, Request, status
@@ -55,6 +56,14 @@ def _file_in_dist(dist: Path, relative: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _normalize(path: str) -> str:
+    """Collapse ``//``, ``.`` and ``..`` segments (never above the root) to a relative path,
+    so e.g. ``/app//assets/x.js`` and ``/app/./assets/x.js`` are treated as ``assets/x.js``."""
+    if "\x00" in path:
+        return path
+    return posixpath.normpath("/" + path).lstrip("/")
+
+
 def _headers(cache_control: str) -> dict[str, str]:
     return {**SECURITY_HEADERS, "Cache-Control": cache_control}
 
@@ -81,6 +90,7 @@ async def ui(request: Request, path: str = "") -> Response:
     if not index.is_file():
         return _not_built()
 
+    path = _normalize(path)
     file = _file_in_dist(dist, path)
     if file is not None:
         in_assets = file.parent.is_relative_to(dist / ASSETS_DIR)

@@ -116,6 +116,31 @@ def test_missing_asset_is_404_not_html(client: TestClient) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "/app//assets/missing.js",
+        "/app/./assets/missing.js",
+        "/app/%2E/assets/missing.js",
+        "/app/assets//missing.js",
+        "/app/policy/../assets/missing.js",
+        "/app/policy/%2E%2E/assets/missing.js",
+    ],
+)
+def test_unnormalized_missing_asset_is_404_not_html(client: TestClient, path: str) -> None:
+    response = client.get(path)
+    assert response.status_code == 404, path
+    assert not response.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.parametrize("path", ["/app//assets/index-abc123.js", "/app/./assets/index-abc123.js"])
+def test_unnormalized_existing_asset_served(client: TestClient, path: str) -> None:
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.text == ASSET_JS
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "/app/..%2Fsecret.txt",
         "/app/%2e%2e/secret.txt",
         "/app/%2E%2E%2Fsecret.txt",

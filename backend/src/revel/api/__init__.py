@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 
 def routers() -> list[APIRouter]:
+    from revel.api.connections import router as connections_router
     from revel.api.profiles import router as profiles_router
     from revel.api.questions import router as questions_router
     from revel.api.ui_static import router as ui_static_router
@@ -16,6 +17,7 @@ def routers() -> list[APIRouter]:
         agents_router,
         profiles_router,
         questions_router,
+        connections_router,
         guidance_router(),
         ui_static_router,
     ]

@@ -40,19 +40,22 @@ export interface LogoutResult {
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
+  /** The whole parsed response body (e.g. a 409 carrying the current resource). */
+  readonly body: unknown;
 
-  constructor(status: number, detail: unknown) {
+  constructor(status: number, detail: unknown, body: unknown = null) {
     super(typeof detail === "string" ? detail : `Request failed with status ${status}`);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.body = body;
   }
 }
 
 /** Thrown after a 401; the unauthorized handler has already been invoked. */
 export class UnauthorizedError extends ApiError {
-  constructor(detail: unknown) {
-    super(401, detail);
+  constructor(detail: unknown, body: unknown = null) {
+    super(401, detail, body);
     this.name = "UnauthorizedError";
   }
 }
@@ -82,8 +85,67 @@ export const browserNavigation = {
   },
 };
 
-export function redirectToLogin(): void {
+// --- sign-in redirect-loop guard ---------------------------------------------------------
+// If sign-in "succeeds" but the session cookie never sticks (e.g. blocked cookies), every 401
+// would bounce the browser back to /auth/login forever. A timestamp in sessionStorage marks
+// each automatic redirect; a 401 soon after one stops and asks the user instead.
+
+export const LOGIN_MARKER_KEY = "revel.signInRedirectAt";
+export const LOGIN_LOOP_WINDOW_MS = 30_000;
+
+function readLoginMarker(): number | null {
+  try {
+    const value = window.sessionStorage.getItem(LOGIN_MARKER_KEY);
+    const time = value === null ? NaN : Number(value);
+    return Number.isFinite(time) ? time : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLoginMarker(now: number): void {
+  try {
+    window.sessionStorage.setItem(LOGIN_MARKER_KEY, String(now));
+  } catch {
+    // Storage unavailable: no loop guard, sign-in still works.
+  }
+}
+
+export function clearLoginMarker(): void {
+  try {
+    window.sessionStorage.removeItem(LOGIN_MARKER_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function recentSignInRedirect(now: number = Date.now()): boolean {
+  const marker = readLoginMarker();
+  return marker !== null && now >= marker && now - marker < LOGIN_LOOP_WINDOW_MS;
+}
+
+type Listener = () => void;
+const signInLoopListeners = new Set<Listener>();
+
+/** Subscribe to "sign-in didn't stick" (a 401 right after an automatic redirect). */
+export function onSignInLoop(listener: Listener): () => void {
+  signInLoopListeners.add(listener);
+  return () => signInLoopListeners.delete(listener);
+}
+
+/** Navigate to sign-in, recording the attempt for the loop guard. */
+export function startSignIn(): void {
+  writeLoginMarker(Date.now());
   browserNavigation.assign(loginUrl());
+}
+
+/** Default 401 handling: redirect to sign-in unless that just happened. */
+export function redirectToLogin(): void {
+  if (recentSignInRedirect()) {
+    for (const listener of signInLoopListeners) listener();
+    return;
+  }
+  startSignIn();
 }
 
 type UnauthorizedHandler = () => void;
@@ -139,10 +201,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const body = await readBody(response);
   if (response.status === 401) {
     unauthorizedHandler();
-    throw new UnauthorizedError(detailOf(body));
+    throw new UnauthorizedError(detailOf(body), body);
   }
   if (!response.ok) {
-    throw new ApiError(response.status, detailOf(body));
+    throw new ApiError(response.status, detailOf(body), body);
   }
   return body as T;
 }
