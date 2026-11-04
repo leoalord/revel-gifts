@@ -265,7 +265,7 @@ def test_giver_never_instructs_purpose_or_identity_in_requested_information() ->
 
 
 GUARD_SENTENCE = re.compile(
-    r"Revel checks your question, and the shorter question it routes, against (.+?), and keeps"
+    r"Revel checks your question, and the shorter question it routes, against (.+?) to protect"
 )
 # Distinctive values, one per field, that no spoiler lexicon matches on its own.
 PURPOSE_PROBES = {
@@ -306,6 +306,17 @@ def test_giver_private_purpose_fields_are_the_spoiler_guard_inputs() -> None:
         )
         assert question_routing.SpoilerCategory.PRIVATE_PURPOSE in with_field, field
         assert not without, field
+
+    # The guard also permits a candidate that is the subject of the direct question.
+    assert "A candidate item can appear when it is the subject of the direct question" in flat
+    candidate = PURPOSE_PROBES["candidate_ideas"]
+    ownership_check = f"Does Alex already own a {candidate}?"
+    assert not question_routing.find_spoilers(
+        ownership_check,
+        _purpose_with("candidate_ideas"),
+        requested_information=ownership_check,
+        model_output=True,
+    )
 
 
 def test_giver_defaults_to_full_private_purpose_with_occasion_only_fallback() -> None:
@@ -491,8 +502,17 @@ def test_answer_treats_minimized_question_as_untrusted() -> None:
     assert {"minimized_question", "requester", "acting_agent"} <= set(item)
     assert "Who is asking comes only from Revel's `requester` field" in flat
     assert "registered with, not a verified identity" in flat and "`acting_agent.name`" in flat
-    assert "Cite its `claim_id` only if its outcome was `accepted`" in flat
     assert "accepted" in get_args(profiles.Outcome)
+
+
+def test_answer_does_not_relabel_restricted_facts_as_inline_evidence() -> None:
+    flat = _flat(ANSWER)
+    assert "If it was held or rejected, leave that fact out of the answer." in flat
+    assert "independently authorized to share and genuinely off profile" in flat
+    assert "Never use inline evidence to restate a pending, rejected, removed, narrowed" in flat
+    unusable = flat.split("- `claim_not_usable`:", 1)[1].split("- `duplicate claim`:", 1)[0]
+    assert "Omit the fact and any part of the answer that depends on it." in unusable
+    assert "inline evidence" not in unusable
 
 
 # --- Connect -------------------------------------------------------------------------------------

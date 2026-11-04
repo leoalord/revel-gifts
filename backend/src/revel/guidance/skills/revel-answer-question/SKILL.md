@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.7.0
+version: 0.7.1
 status: active
 ---
 
@@ -68,13 +68,17 @@ returns your lease: `assignment_id`, `status`, `lease_version`, `lease_expires_a
 - First answer from authorized knowledge you already have, including your user's Revel profile
   (`get_profile` without a `handle`). Do not contact your user if you can answer without them.
 - To record a new durable fact, first call `add_facts` under the owner's policy (see
-  `revel-manage-profile`). Cite its `claim_id` only if its outcome was `accepted`;
-  otherwise use inline evidence.
+  `revel-manage-profile`). If Revel accepted it and it is eligible to share, cite its
+  `claim_id`. If it was held or rejected, leave that fact out of the answer. Follow the
+  owner's normal review process if applicable.
 - Call `submit_answer` with `assignment_id`, `lease_version`, `body` (the answer only, a short
   sentence or two) and `evidence`: 1 to 10 items, each either
   - `{claim_id}`: a live fact on your user's profile, or
   - `{category, proposed_audience, evidence_type, observed_month}`: inline labels for something
-    not on the profile. `observed_month` (`YYYY-MM`) is optional.
+    independently authorized to share and genuinely off profile. `observed_month`
+    (`YYYY-MM`) is optional. Never use inline evidence to restate a pending, rejected,
+    removed, narrowed or otherwise unshareable fact. If you cannot answer from other
+    permitted evidence, decline without disclosing the restricted fact or reason.
 - Cite only what the answer relies on. Never include quotes, raw conversation, source details
   or extra context, and never reveal more than the answer requires.
 - Never propose an audience more open than the owner's policy allows for the category. The
@@ -97,8 +101,9 @@ Example (synthetic): inline evidence for a size your user told you this month.
 - `unknown_category`: use a category id from `get_profile`'s `policy.categories`;
 - `forbidden_category`: this cannot be evidence; do not retry it in another form;
 - `audience_too_open`: propose the audience it names or a tighter one;
-- `claim_not_usable`: that fact is not live on your user's profile; use inline evidence or
-  read the profile again;
+- `claim_not_usable`: read the profile again. Omit the fact and any part of the answer that
+  depends on it. Retry only if the remaining permitted evidence can support the answer, or
+  if a currently usable profile fact supports it;
 - `duplicate claim`: the same `claim_id` is cited twice; cite it once;
 - `observed_month is in the future`: give the month you actually observed it (this month or
   earlier), or omit `observed_month`.

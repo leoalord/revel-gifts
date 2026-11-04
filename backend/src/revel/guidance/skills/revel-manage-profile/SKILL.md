@@ -1,7 +1,7 @@
 ---
 name: revel-manage-profile
 description: Build, maintain and edit your user's own Revel gifting profile, from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience; and manage its policy, approvals and audiences with the owner's confirmation.
-version: 0.7.0
+version: 0.7.1
 status: active
 ---
 
@@ -46,20 +46,25 @@ try once more.
   pending review), a contribution `summary`, and `policy`, the owner's contribution policy.
   `policy` has `policy` (the approved settings, with their `version`), `defaults`,
   `audiences`, `provisional_caveat` and `categories`.
-- `policy.categories` lists every category with its `effective_audience` (the widest audience
-  Revel accepts without the owner's review), `allowed_audiences`, `require_review` and
-  `details_schema`.
+- `policy.categories` lists every category with its `effective_audience` (the audience the
+  policy normally assigns when omitted), `allowed_audiences`, `require_review` and
+  `details_schema`. Read the review and sharing settings separately before describing what
+  will be accepted or shared.
 - If `policy.policy` is null, the owner has not approved a contribution policy yet (Revel then
   shows the `policy.defaults` that apply): everything you add waits for their review. Offer to
   help them approve one (see section 9); they can also do it in the Revel website.
-- Read `facts` to see what Revel already holds, so you do not resubmit known facts.
+- Read active, provisional and pending facts before proposing anything. Compare their meaning,
+  even if worded differently, and skip facts already covered. Copies of the same evidence across
+  assistants do not corroborate each other.
 - Change the policy only when the owner asks, following section 9.
 
 ## 3. Identify useful, durable facts
 
 Look for: interests and hobbies, style, favorite brands, wishes, dislikes, items they already
 own, birthday month and day, city or region, sizes, anniversaries, life events, sentimental
-context, and foods to avoid.
+context, and foods to avoid. Keep only a short, supported fact that could change a gift
+choice or prevent a mistake. Leave unsupported categories empty, and leave unrelated context
+where it is. Keep drafts in this conversation separate from what Revel confirms it stored.
 
 Never collect or submit:
 
@@ -92,14 +97,19 @@ Call `add_facts` with `facts`: a list of 1 to 20 items. Each item has:
   and `day`, never a year; for `location`: `city`, `region` or `country`, never a street; for
   `size`: `item` and `size`; for `diet_exclusion`: `exclude`);
 - `evidence_type`: `explicit` (the user said it), `observed` (seen in their behavior) or
-  `inferred` (your conclusion);
+  `inferred` (your conclusion). For example, “I prefer compact gear” is explicit; repeatedly
+  choosing compact gear is observed; concluding that compact gear would be preferred based
+  on their small daypack is inferred;
 - `confidence`: `low`, `medium`, `high` or `unknown` (the default);
-- `observed_at` (an ISO date) with `observed_precision` `day`, `month` or `year`; with no date,
-  omit both (the precision is then `unknown`);
+- `observed_at` (an ISO date) is the date of the statement or observation, separate from the date of
+  an event described by the fact and from when you save it. Set `observed_precision` to `day`,
+  `month` or `year`. For October 2026 without a known day, use `2026-10-01` with `month`; for
+  2026 without a known month, use `2026-01-01` with `year`. These are date anchors. If you do
+  not know the evidence date, omit both fields (precision is `unknown`);
 - `involves_others`: `true` for any fact that mentions or concerns another person;
 - `audience` (`only_me`, `trusted_circle`, `connections` or `public`): omitting it applies the
-  category's `effective_audience`, the widest audience accepted automatically. Omit it only for
-  routine facts that clearly fit that default. When in doubt, always set the tighter audience.
+  category's `effective_audience` for routine facts, subject to review and sharing rules. Omit
+  it only for routine facts that clearly fit that default. When in doubt, set a tighter audience.
 
 Default audiences (the owner's policy may tighten them):
 
@@ -117,8 +127,9 @@ Rules:
 - Narrow an audience with `update_fact` (`fact_id`, `action` `set_audience`, `audience`)
   whenever the owner wants; tell them what you changed. Widen one only with the owner's
   confirmation (section 9).
-- Inferred or low-confidence facts are stored with status `provisional` and shared with a
-  caveat.
+- An inferred or low-confidence fact accepted without review is stored as `provisional`.
+  Other people can see it with a caveat only if its audience permits them to read it and the
+  owner's current policy allows provisional sharing (`share_provisional`).
 - A fact with `involves_others` set always waits for the owner's approval. Tell the owner it is
   waiting for them; they can approve it with you (section 9) or in the Revel website.
 
@@ -152,7 +163,7 @@ Your own conclusion, stored as provisional:
 A fact about another person, held for the owner's review (audience defaults to Only Me):
 
 ```json add_facts outcome=pending_review status=pending_review
-{"category": "life_event", "statement": "Is planning a hiking trip with their sister Sam", "evidence_type": "explicit", "involves_others": true}
+{"category": "life_event", "statement": "Is planning a hiking trip with a family member", "evidence_type": "explicit", "involves_others": true}
 ```
 
 Sensitive information the owner volunteered and asked you to save:
@@ -185,13 +196,19 @@ actually returned:
   - `supersedes_not_found`: the fact you meant to replace is no longer live; read the profile
     again;
   - `enrichment_disabled`: the owner has turned assistant contributions off. Stop and tell them.
+- If the call outcome is unknown, read the profile and check for the submitted items, including
+  pending facts, before retrying. Report any outcome you cannot verify as unknown.
 - A request that is malformed as a whole (a wrong enum value, a missing `evidence_type`, an
   unknown field) fails entirely with a validation error. Fix it before you send it again.
 
 ## 6. Contradictions and corrections
 
-- If a new fact contradicts an existing one, submit it as a new fact; do not delete the old one.
-  Both stay visible to the owner, who can correct or remove either.
+- Keep an unresolved contradiction in your draft when submitting it would create another
+  active fact. Preserve both pieces of evidence for the owner's review in this conversation,
+  and ask for clarification only when the conflict could change a gift choice. If the new
+  assertion is genuinely inferred or low-confidence and can be saved under policy, record
+  it with its actual evidence and uncertainty. Leave the old fact in place. Use a replacement
+  only for a supported correction.
 - To correct a fact, call `add_facts` with `supersedes_id` set to the old fact's id. The old fact
   is retired only when the replacement is accepted.
 - A correction may keep the old fact's audience or set a narrower one. Leave `audience` unset
@@ -215,21 +232,28 @@ actually returned:
 
 ## 7. Ask only what matters
 
-After using what you already know, ask the user only questions whose answers would change gift
-choices. Often that is zero; never more than five at first. Examples: "Anything you would rather
-not receive?" or "What would you like more time or equipment for?"
+After checking what you already know and what Revel holds, ask only about a gap that could
+change a gift choice or prevent a consequential mistake. Stop when you have enough evidence for
+the current decision. One specific fact can be enough, and zero questions is fine. For
+example, urban birdwatching, a preference for compact gear, and recently purchased binoculars
+give you a direction and help avoid a duplicate. Leave aesthetics blank and ask about a
+specific constraint later if a candidate depends on it. Offer to let the owner skip a
+question and carry the gap forward if it remains relevant.
 
 ## 8. Finish with a summary
 
 Tell the owner, briefly, what you added and who can see it, what is waiting for their review,
-and how to correct it in Revel. Invite them to connect their other assistants, which may know
+and how to correct it in Revel. Check current policy before reporting visibility. An
+accepted provisional fact can stay in the owner's profile while provisional sharing is
+off. Invite them to connect their other assistants, which may know
 different useful details.
 
-Example (synthetic), after the trip fact above came back `pending_review`:
+Example (synthetic), with provisional sharing enabled and the trip fact above returned as
+`pending_review`:
 
 > I added 4 things to your Revel profile. Your connections can see: you enjoy trail running;
 > your birthday is March 14; you probably own a GPS watch (marked as unconfirmed). Only you can
-> see your shoe size. One item, about your hiking trip with your sister Sam, is waiting for
+> see your shoe size. One item, about your hiking trip with a family member, is waiting for
 > your approval in Revel. You can change or remove any of these in Revel.
 
 ## 9. Owner controls: policy, approvals and audiences
@@ -254,15 +278,14 @@ Getting the owner's yes, for every change that may widen access (two calls):
    changes (MCP: one `- <change>` line each; HTTP: `changes` in a `403`). Nothing is written.
 3. Quote that list to the owner word for word: include each returned `- <change>` line in your
    message to the owner, exactly as Revel wrote it. Never write that Revel returned a list
-   without the lines themselves. To approve a pending fact, also show the owner the fact's
-   `statement` (from `get_profile`), since the change line names only its category and
-   audience. For the first policy approval, also show what
-   the policy will be: the default audience of each category (`effective_audience` in
-   `get_profile`'s `policy.categories`), whether Public is on, and the `share_provisional` and
-   `require_review_all` settings. Say plainly that after approval, routine facts your
-   assistants add are accepted and shared automatically, without the owner's review. Revel's
-   own wording for it is: "Approve the contribution policy for the first time: facts your
-   assistants add within it are then accepted and shared automatically, without your review".
+   without the lines themselves. For a pending approval or audience widening, show the
+   specific fact's `statement` from `get_profile`. For every first policy approval, also
+   show the proposed settings: category audiences and review requirements, Public opt-in,
+   `share_provisional`, `require_review_all` and `enrichment_enabled`. Start with the defaults
+   from `get_profile` and apply the options in the proposed call. Explain what the owner is
+   authorizing: routine facts can be accepted and shared automatically only where the
+   resulting policy allows it. If review is required, facts wait for approval. If
+   contributions are disabled, assistants cannot add facts.
 4. Ask, and wait for a clear yes from the owner in this conversation. Only then repeat the
    identical call with `owner_confirmed` true. A yes covers only the changes you quoted.
 5. If the second call returns a different change list or a conflict, quote the new list and

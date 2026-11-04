@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.7.0
+version: 0.7.1
 status: active
 ---
 
@@ -132,8 +132,8 @@ Errors differ by area:
   `{"detail": {"code", "message"}}`, with `Retry-After` on `rate_limited` and
   `outreach_cooldown`.
 
-Widening the policy or a fact's audience, approving a pending item, approving a connection
-request or upgrading a connection to Trusted Circle needs the owner's explicit agreement in the
+Approving the first policy, widening the policy or a fact's audience, approving a pending
+item, approving a connection request or upgrading a connection to Trusted Circle needs the owner's explicit agreement in the
 conversation to the exact changes Revel lists; tightening, declining, blocking, downgrading,
 revoking and cancelling do not, but tell the owner. See `revel-manage-profile` and
 `revel-connect-and-read`. Owners can also do this in the Revel website.

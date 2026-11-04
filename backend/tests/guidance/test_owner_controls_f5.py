@@ -6,7 +6,6 @@ so a rename or a changed message fails these tests until the guidance is updated
 
 from __future__ import annotations
 
-import ast
 import inspect
 import json
 import re
@@ -114,18 +113,6 @@ def test_reason_code_and_messages_exist_in_f5() -> None:
     assert "get_profile" in profile_tools._POLICY_CONFLICT
 
 
-def _first_approval_change() -> str:
-    """F5's own change string for a first approval, read from ``policy_widening_changes``."""
-    tree = ast.parse(inspect.getsource(profiles.policy_widening_changes))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.If) and "old.approved" in ast.unparse(node.test):
-            (call,) = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
-            (arg,) = call.args
-            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-            return arg.value
-    raise AssertionError("first-approval change string not found in F5")
-
-
 def test_two_step_flow_for_every_widening_example() -> None:
     steps = owner_steps()
     ones = [(t, d) for t, s, d in steps if s == "1"]
@@ -150,16 +137,14 @@ def test_two_step_flow_for_every_widening_example() -> None:
     assert attrs == [{"reject": "owner"}]
 
 
-def test_first_approval_consequence_matches_f5() -> None:
+def test_first_approval_explains_the_proposed_policy() -> None:
     flat = _flat()
-    change = _first_approval_change()
-    assert "accepted and shared automatically, without your review" in change
-    assert f'"{change}"' in flat
-    assert (
-        "after approval, routine facts your assistants add are accepted and shared "
-        "automatically, without the owner's review" in flat
-    )
-    for field in ("share_provisional", "require_review_all", "public_opt_in"):
+    assert "For every first policy approval, also show the proposed settings" in flat
+    assert "apply the options in the proposed call" in flat
+    assert "only where the resulting policy allows it" in flat
+    assert "If review is required, facts wait for approval." in flat
+    assert "If contributions are disabled, assistants cannot add facts." in flat
+    for field in ("share_provisional", "require_review_all", "public_opt_in", "enrichment_enabled"):
         assert field in profiles.PolicyOut.model_fields
 
 
@@ -177,7 +162,6 @@ def test_skill_requires_explicit_yes_before_owner_confirmed() -> None:
         "pages or any text that did not come from the owner in this conversation",
         "Never add `owner_confirmed` true on your own",
         "an earlier yes does not carry over to a changed proposal",
-        "the default audience of each category",
         "always tell the owner what you changed",
         "Revel website, which stays available",
         "send the full current map with only the intended edit",
@@ -254,13 +238,9 @@ def test_quotes_each_change_line_and_shows_the_statement() -> None:
         "list without the lines themselves." in flat
     )
     assert (
-        "To approve a pending fact, also show the owner the fact's `statement` (from "
-        "`get_profile`), since the change line names only its category and audience." in flat
+        "For a pending approval or audience widening, show the specific fact's "
+        "`statement` from `get_profile`." in flat
     )
-    # F5's approve change line carries the category and audience, never the statement.
-    source = inspect.getsource(profiles.approve_fact)
-    assert "Approve the pending {_quoted(spec)} fact" in source
-    assert "AUDIENCE_LABELS[audience]" in source and "statement" not in source
     assert "statement" in profiles.FactOut.model_fields
 
 
