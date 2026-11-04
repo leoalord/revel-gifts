@@ -89,10 +89,12 @@ LIST_CONNECTIONS = (
     "own pending or approved requests to others)."
 )
 _CONFIRM = (
-    "approve, and change_tier to 'trusted_circle', need owner_confirmed=true: first ask the "
-    "owner, quote exactly what will change (the person and the tier; a call without the flag "
-    "returns owner_confirmation_required with the exact change), and set owner_confirmed only "
-    "after the owner clearly agrees in this conversation. Never infer consent."
+    "Approving a request or upgrading an approved connection from 'connections' to "
+    "'trusted_circle' needs owner_confirmed=true. First ask the owner, quote exactly what "
+    "will change (the person and the tier; a call without the flag returns "
+    "owner_confirmation_required with the exact change), and set owner_confirmed only "
+    "after the owner clearly agrees in this conversation. Never infer consent. A downgrade "
+    "or unchanged tier needs no owner_confirmed. Confirm a downgrade with the user first."
 )
 RESPOND = (
     "Respond to a connection request addressed to the user, or change an approved "
@@ -100,9 +102,9 @@ RESPOND = (
     "'trusted_circle' (Trusted Circle sees more sensitive facts). action='change_tier' "
     "requires tier and changes an approved connection; it takes effect on the person's next "
     "request. action='decline'. action='block' also works on an approved connection; the "
-    "person can no longer find or request the user. decline and block do not accept tier or "
-    "owner_confirmed. " + _CONFIRM + " A downgrade to 'connections', decline and block need "
-    "no owner_confirmed, but confirm the decision with the user first."
+    "person can no longer find or request the user. For decline or block, omit tier and "
+    "owner_confirmed. Explicit owner_confirmed=false is treated as omission; true is "
+    "rejected. Confirm the decision with the user first. " + _CONFIRM
 )
 END_CONNECTION = (
     "End a connection by request_id. action='revoke': revoke an approved connection the user "
