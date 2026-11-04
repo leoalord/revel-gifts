@@ -25,7 +25,7 @@ from uuid import UUID
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, RootModel
 from sqlalchemy.orm import Session
 
 from revel.auth.authz import AuthorizationDenied
@@ -49,9 +49,10 @@ from revel.services.profiles import (
 logger = logging.getLogger(__name__)
 
 POLICY_GUIDANCE = (
-    "The policy lists the fact categories: for each its effective audience (the widest "
-    "audience accepted without the user's review), allowed audiences, whether review is "
-    "required and the details schema. Read it before add_facts. Never collected: street "
+    "The policy lists the fact categories: for each its effective audience (the policy's "
+    "audience limit for routine contributions), allowed audiences, whether review is "
+    "required and the details schema. An audience alone does not imply approval or sharing. "
+    "Read the policy before add_facts. Never collected: street "
     "addresses and birth years. Sensitive topics (health, religion, politics, orientation, "
     "finances) may be saved only when the user volunteers them, in the 'sensitive' category "
     "(Only Me, explicit evidence, held for the user's approval); never infer them or ask about "
@@ -77,7 +78,8 @@ ADD_FACTS_DESCRIPTION = (
     "volunteered them (evidence_type 'explicit'; Only Me; held for the user's approval); "
     "never infer them or ask about them. Set involves_others when a fact is about other "
     "people too. Each fact gets its own outcome: 'accepted' (status 'active', or "
-    "'provisional' when inferred or low confidence, shared with a caveat), 'pending_review' "
+    "'provisional' when inferred or low confidence, shareable with a caveat only while the "
+    "owner's current policy allows it), 'pending_review' "
     "(held for the user's approval, e.g. an audience wider than their policy allows) or "
     "'rejected' with a reason_code. To correct a fact, send the replacement with supersedes_id; "
     "the old fact is retired only when the replacement is accepted."
@@ -104,21 +106,24 @@ SET_POLICY_DESCRIPTION = (
 UPDATE_FACT_DESCRIPTION = (
     "Change one of the user's facts. action='set_audience' (requires audience): change who "
     "can see it (public > connections > trusted_circle > only_me); narrowing needs no "
-    "confirmation, widening does; sensitive facts are always only_me and Public needs the "
-    "user's Public opt-in. action='approve' (takes no audience): approve a fact pending the "
+    "confirmation. Sensitive facts are always only_me and Public needs the user's Public opt-in. "
+    "action='approve' (takes no audience): approve a fact pending the "
     "user's review, when they decide; it becomes active and shared with its audience (a "
     "replacement retires the fact it corrects) and always needs the owner's confirmation. To "
-    "reject a pending fact use remove_fact. " + CONFIRMATION_RULE
+    "reject a pending fact use remove_fact with action='reject'. For approvals and widening, "
+    "first call without confirmation for a preview. Retry with owner_confirmed=true and the "
+    "preview's expected_updated_at only after the owner agrees. If Revel returns a new "
+    "preview, ask again. " + CONFIRMATION_RULE
 )
 REMOVE_DESCRIPTION = (
-    "Remove one of the user's facts (e.g. undo a wrong contribution or a fact the user asked "
-    "to forget), or reject a fact pending their review. It stops being shared immediately "
-    "and needs no confirmation. Removing an already removed or replaced fact is an error (not "
-    "idempotent)."
+    "Remove one of the user's live facts (action='remove'), or reject a fact pending their "
+    "review (action='reject'). State mismatch is a conflict: reread and confirm the intended "
+    "operation before retrying. Neither action requires confirmation. For legacy calls "
+    "omitting action, owner_confirmed=true selects reject; otherwise the default is remove."
 )
 REJECT_CONFIRMED_DESCRIPTION = (
-    "Pending facts only: set true only when the owner explicitly told you to reject this "
-    "pending fact. Ignored for other facts."
+    "Reject only: set true only when the owner explicitly told you to reject this pending "
+    "fact. If action is omitted, true selects reject."
 )
 
 _NOT_FOUND = "Fact not found"
@@ -144,27 +149,31 @@ async def _run[T](settings: Any, operation: Callable[[Session, Principal], Await
     except profiles.FactNotFound:
         raise ToolError(_NOT_FOUND) from None
     except profiles.OwnerConfirmationRequired as exc:
-        raise ToolError(_confirmation_text(exc.changes)) from None
+        raise ToolError(_confirmation_text(exc)) from None
     except (profiles.NotAllowed, AuthorizationDenied):
         raise ToolError(_NOT_ALLOWED) from None
     except profiles.AuthorizationUnavailable:
         raise ToolError(_UNAVAILABLE) from None
     except profiles.PolicyVersionConflict:
         raise ToolError(_POLICY_CONFLICT) from None
-    except profiles.FactConflict:
-        raise ToolError(_CONFLICT) from None
+    except profiles.FactConflict as exc:
+        raise ToolError(f"{exc.reason}: {_CONFLICT}") from None
     except profiles.PolicyInvalid as exc:
         raise ToolError(_invalid_text(exc.errors)) from None
     except profiles.InvalidRequest:
         raise ToolError(_INVALID) from None
 
 
-def _confirmation_text(changes: list[str]) -> str:
-    """``owner_confirmation_required: ...`` with every widening change, one per line."""
-    listed = "\n".join(f"- {change}" for change in changes)
+def _confirmation_text(error: profiles.OwnerConfirmationRequired) -> str:
+    """Show the proposed changes separately from any retry parameter."""
+    listed = "\n".join(f"- {change}" for change in error.changes)
+    expected = error.expected_updated_at
+    retry = (
+        f"\nFor this preview, pass expected_updated_at={expected.isoformat()}." if expected else ""
+    )
     return (
-        "owner_confirmation_required: this widens access. Ask the owner, quoting exactly these "
-        "changes, and call again with owner_confirmed=true only if they clearly agree:\n" + listed
+        "owner_confirmation_required: ask the owner, quoting exactly these changes, and call "
+        "again with owner_confirmed=true only if they clearly agree:\n" + listed + retry
     )
 
 
@@ -219,28 +228,6 @@ def _fact_action(action: str, audience: str | None) -> tuple[FactAction, Audienc
     return "set_audience", Audience(audience)
 
 
-async def _remove_or_reject(
-    session: Session, principal: Principal, fact_id: UUID, *, owner_confirmed: bool
-) -> FactOut:
-    """``remove_fact``: reject a pending fact (audit event ``rejected``), else remove it.
-
-    There is no separate status read to go stale: ``reject_fact`` checks the status under the
-    fact's row lock and refuses a fact that is not pending with
-    ``FactConflict('fact_not_pending')`` (rolled back, no event); only then is the fact removed
-    with ``remove_fact``, which re-checks under its own lock (a fact already removed or replaced
-    stays ``fact_not_removable``, the existing conflict error). Both are owner-authorized
-    service calls (no claim query here), and a fact never returns to pending_review, so the
-    fallback cannot remove a fact that should have been rejected."""
-    try:
-        return await profiles.reject_fact(
-            session, principal, fact_id, owner_confirmed=owner_confirmed
-        )
-    except profiles.FactConflict as exc:
-        if exc.reason != "fact_not_pending":
-            raise
-    return await profiles.remove_fact(session, principal, fact_id)
-
-
 class OwnerProfileView(BaseModel):
     """``get_profile()`` without a handle: ``get_my_profile``'s facts and summary plus the full
     ``get_policy`` response as ``policy`` (``policy.policy`` and ``policy.defaults`` are what
@@ -253,7 +240,13 @@ class OwnerProfileView(BaseModel):
     policy: PolicyResponse
 
 
-async def _read_owner(settings: Any) -> dict[str, Any]:
+class ProfileView(RootModel[OwnerProfileView | SharedProfileOut]):
+    """Both possible top-level object shapes; no additional result wrapper."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
+
+
+async def _read_owner(settings: Any) -> OwnerProfileView:
     async def read(session: Session, principal: Principal) -> OwnerProfileView:
         profile = await profiles.get_my_profile(session, principal)
         policy = await profiles.get_policy(session, principal)
@@ -265,8 +258,7 @@ async def _read_owner(settings: Any) -> dict[str, Any]:
             policy=policy,
         )
 
-    view = await _run(settings, read)
-    return view.model_dump(mode="json")
+    return await _run(settings, read)
 
 
 async def _read_shared(settings: Any, handle: str) -> SharedProfileOut:
@@ -300,12 +292,10 @@ def register(server: MCPServer, settings: Any) -> None:
                 "profile and contribution policy."
             ),
         ] = None,
-    ) -> dict[str, Any]:
-        # Plain dict output: the owner and shared views are different shapes, and a union
-        # return type would be wrapped as {"result": ...}, changing the shared view.
+    ) -> ProfileView:
         if handle is None:
-            return await _read_owner(settings)
-        return (await _read_shared(settings, handle)).model_dump(mode="json")
+            return ProfileView(await _read_owner(settings))
+        return ProfileView(await _read_shared(settings, handle))
 
     async def add_facts(
         facts: Annotated[
@@ -336,18 +326,33 @@ def register(server: MCPServer, settings: Any) -> None:
             ),
         ] = None,
         owner_confirmed: OwnerConfirmed = False,
+        expected_updated_at: Annotated[
+            AwareDatetime | None,
+            Field(description="The exact fact revision supplied in the confirmation preview."),
+        ] = None,
     ) -> FactOut:
         checked, new_audience = _fact_action(action, audience)
         if checked == "approve":
             return await _run(
                 settings,
-                lambda s, p: profiles.approve_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
+                lambda s, p: profiles.approve_fact(
+                    s,
+                    p,
+                    fact_id,
+                    owner_confirmed=owner_confirmed,
+                    expected_updated_at=expected_updated_at,
+                ),
             )
         assert new_audience is not None
         return await _run(
             settings,
             lambda s, p: profiles.set_fact_audience(
-                s, p, fact_id, new_audience, owner_confirmed=owner_confirmed
+                s,
+                p,
+                fact_id,
+                new_audience,
+                owner_confirmed=owner_confirmed,
+                expected_updated_at=expected_updated_at,
             ),
         )
 
@@ -385,11 +390,19 @@ def register(server: MCPServer, settings: Any) -> None:
     async def remove_fact(
         fact_id: UUID,
         owner_confirmed: Annotated[bool, Field(description=REJECT_CONFIRMED_DESCRIPTION)] = False,
+        action: Annotated[
+            Literal["remove", "reject"] | None,
+            Field(description="Remove a live fact or reject a pending fact."),
+        ] = None,
     ) -> FactOut:
-        return await _run(
-            settings,
-            lambda s, p: _remove_or_reject(s, p, fact_id, owner_confirmed=owner_confirmed),
-        )
+        if action == "reject" or (action is None and owner_confirmed):
+            return await _run(
+                settings,
+                lambda s, p: profiles.reject_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
+            )
+        if owner_confirmed:
+            raise _invalid_request("Action 'remove' does not accept owner_confirmed=true.")
+        return await _run(settings, lambda s, p: profiles.remove_fact(s, p, fact_id))
 
     read_only = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     tools: list[tuple[Callable[..., Any], str, str, str, ToolAnnotations]] = [

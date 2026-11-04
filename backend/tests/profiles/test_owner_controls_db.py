@@ -110,17 +110,25 @@ async def test_first_policy_approval_needs_confirmation(
     assert row.approved_by_user_id == world.alex.user.id  # the owner, as for the browser
 
 
+@pytest.mark.parametrize(
+    ("update", "effect"),
+    [
+        (PolicyUpdate(require_review_all=True), "every assistant contribution is held"),
+        (PolicyUpdate(enrichment_enabled=False), "assistant contributions are disabled"),
+    ],
+)
 async def test_first_approval_needs_confirmation_even_when_strict(
-    session: Session, world: World
+    session: Session, world: World, update: PolicyUpdate, effect: str
 ) -> None:
-    """The first approval widens (automatic acceptance starts) even if every flag tightens."""
+    """Every first approval needs confirmation, even without automatic sharing."""
     with pytest.raises(OwnerConfirmationRequired) as info:
         await profiles.set_policy(
             session,
             world.alex.api,
-            PolicyUpdate(require_review_all=True, share_provisional=False),
+            update,
         )
-    assert len(info.value.changes) == 1
+    (change,) = info.value.changes
+    assert effect in change and "automatically" not in change
 
 
 @pytest.mark.parametrize(
@@ -330,7 +338,11 @@ async def test_agent_approves_replacement_atomically_with_confirmation(
     assert claim_row(factory, old.claim_id).status == ClaimStatus.ACTIVE.value
 
     approved = await profiles.approve_fact(
-        session, world.alex.mcp, new.claim_id, owner_confirmed=True
+        session,
+        world.alex.mcp,
+        new.claim_id,
+        owner_confirmed=True,
+        expected_updated_at=info.value.expected_updated_at,
     )
     assert approved.status is ClaimStatus.ACTIVE
     assert claim_row(factory, old.claim_id).status == ClaimStatus.SUPERSEDED.value
@@ -361,9 +373,15 @@ async def test_agent_approves_sensitive_and_involves_others_only_with_confirmati
     )
     for r in (sensitive, others):
         assert r.outcome == "pending_review"
-        with pytest.raises(OwnerConfirmationRequired):
+        with pytest.raises(OwnerConfirmationRequired) as info:
             await profiles.approve_fact(session, world.alex.api, r.claim_id)
-        out = await profiles.approve_fact(session, world.alex.api, r.claim_id, owner_confirmed=True)
+        out = await profiles.approve_fact(
+            session,
+            world.alex.api,
+            r.claim_id,
+            owner_confirmed=True,
+            expected_updated_at=info.value.expected_updated_at,
+        )
         assert out.status is ClaimStatus.ACTIVE and out.audience is Audience.ONLY_ME
 
 
@@ -395,11 +413,16 @@ async def test_agent_audience_widening_needs_confirmation(
     await profiles.set_fact_audience(session, world.alex.mcp, r.claim_id, Audience.ONLY_ME)
     with pytest.raises(OwnerConfirmationRequired) as info:
         await profiles.set_fact_audience(session, world.alex.mcp, r.claim_id, Audience.CONNECTIONS)
-    assert info.value.changes == [
-        "Widen who can see this 'Interests and hobbies' fact from Only me to Connections"
-    ]
+    (change,) = info.value.changes
+    assert "Widen who can see this 'Interests and hobbies' fact" in change
+    assert change.endswith("from Only me to Connections")
     widened = await profiles.set_fact_audience(
-        session, world.alex.api, r.claim_id, Audience.CONNECTIONS, owner_confirmed=True
+        session,
+        world.alex.api,
+        r.claim_id,
+        Audience.CONNECTIONS,
+        owner_confirmed=True,
+        expected_updated_at=info.value.expected_updated_at,
     )
     assert widened.audience is Audience.CONNECTIONS
     changes = [
@@ -506,9 +529,15 @@ async def test_agent_correction_inherits_or_holds_wider_audience(
     assert (wider.outcome, wider.audience) == ("pending_review", Audience.CONNECTIONS)
     assert "widen who can see the fact it replaces" in wider.message
     assert claim_row(factory, cross.claim_id).status == ClaimStatus.ACTIVE.value
-    with pytest.raises(OwnerConfirmationRequired):
+    with pytest.raises(OwnerConfirmationRequired) as info:
         await profiles.approve_fact(session, world.alex.mcp, wider.claim_id)
-    await profiles.approve_fact(session, world.alex.mcp, wider.claim_id, owner_confirmed=True)
+    await profiles.approve_fact(
+        session,
+        world.alex.mcp,
+        wider.claim_id,
+        owner_confirmed=True,
+        expected_updated_at=info.value.expected_updated_at,
+    )
     assert claim_row(factory, cross.claim_id).status == ClaimStatus.SUPERSEDED.value
 
 

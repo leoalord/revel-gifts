@@ -66,6 +66,11 @@ def ok(result: dict[str, Any]) -> dict[str, Any]:
     return result["structuredContent"]
 
 
+def preview_revision(text: str) -> str:
+    line = next(line for line in text.splitlines() if "expected_updated_at=" in line)
+    return line.split("expected_updated_at=", 1)[1].removesuffix(".")
+
+
 def test_tools_are_listed_with_the_confirmation_rule(
     stack: tuple[TestClient, AuthRuntime, Any],
 ) -> None:
@@ -93,6 +98,7 @@ def test_tools_are_listed_with_the_confirmation_rule(
         "only_me",
         None,
     ]
+    assert "expected_updated_at" in update["properties"]
     assert "audience" not in update["required"]
     assert set(update["required"]) == {"fact_id", "action"}
     assert "set_audience" in tools["update_fact"]["description"]
@@ -104,6 +110,7 @@ def test_tools_are_listed_with_the_confirmation_rule(
         "explicitly told you to reject"
         in (remove["inputSchema"]["properties"]["owner_confirmed"]["description"])
     )
+    assert "action" in remove["inputSchema"]["properties"]
     assert "reject a fact pending" in remove["description"]
 
 
@@ -244,7 +251,13 @@ def test_bearer_owner_controls(
     assert "Approve the pending" in refused.json()["changes"][0]
     refused = client.post(f"/api/v1/profile/facts/{a}/approve", json={"owner_confirmed": False})
     assert refused.status_code == 403
-    approved = client.post(f"/api/v1/profile/facts/{a}/approve", json={"owner_confirmed": True})
+    approved = client.post(
+        f"/api/v1/profile/facts/{a}/approve",
+        json={
+            "owner_confirmed": True,
+            "expected_updated_at": refused.json()["expected_updated_at"],
+        },
+    )
     assert approved.status_code == 200 and approved.json()["status"] == "active"
     rejected = client.post(f"/api/v1/profile/facts/{b}/reject")
     assert rejected.status_code == 200 and rejected.json()["status"] == "removed"
@@ -262,7 +275,11 @@ def test_bearer_owner_controls(
     assert widen.json()["changes"][0].endswith("from Only me to Connections")
     widened = client.patch(
         f"/api/v1/profile/facts/{a}/audience",
-        json={"audience": "connections", "owner_confirmed": True},
+        json={
+            "audience": "connections",
+            "owner_confirmed": True,
+            "expected_updated_at": widen.json()["expected_updated_at"],
+        },
     )
     assert widened.status_code == 200 and widened.json()["audience"] == "connections"
 
@@ -387,7 +404,17 @@ def test_mcp_review_and_audience(
     approve = {"fact_id": pid, "action": "approve"}
     text = tool_error(mcp_call(client, "update_fact", approve))
     assert CONFIRM in text and old_id in text
-    fact = ok(mcp_call(client, "update_fact", {**approve, "owner_confirmed": True}))
+    fact = ok(
+        mcp_call(
+            client,
+            "update_fact",
+            {
+                **approve,
+                "owner_confirmed": True,
+                "expected_updated_at": preview_revision(text),
+            },
+        )
+    )
     assert fact["status"] == "active" and fact["supersedes_id"] == old_id
     statuses = {
         f["id"]: f["status"]
@@ -407,7 +434,17 @@ def test_mcp_review_and_audience(
     text = tool_error(mcp_call(client, "update_fact", widen))
     assert CONFIRM in text and "from Only me to Trusted Circle" in text
     assert client.get("/api/v1/profile").json()["facts"][0]["audience"] == "only_me"
-    widened = ok(mcp_call(client, "update_fact", {**widen, "owner_confirmed": True}))
+    widened = ok(
+        mcp_call(
+            client,
+            "update_fact",
+            {
+                **widen,
+                "owner_confirmed": True,
+                "expected_updated_at": preview_revision(text),
+            },
+        )
+    )
     assert widened["audience"] == "trusted_circle"
 
     # Another user's assistant: the fact does not exist for them.
@@ -439,11 +476,106 @@ def test_mcp_review_and_audience(
     assert _events(factory, pid)[-1][0] == "audience_changed"  # Bob changed nothing
 
 
+def test_confirmed_widening_requires_the_previewed_fact_revision(
+    stack: tuple[TestClient, AuthRuntime, Any],
+) -> None:
+    client, _, _ = stack
+    ok(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {
+                "expected_version": None,
+                "owner_confirmed": True,
+            },
+        )
+    )
+    added = _add_mcp(client, {**FACT, "audience": "trusted_circle"})
+    fact_id = added["claim_id"]
+    args = {"fact_id": fact_id, "action": "set_audience", "audience": "connections"}
+    preview = tool_error(mcp_call(client, "update_fact", args))
+    assert FACT["statement"] in preview and "from Trusted Circle to Connections" in preview
+    old_revision = preview_revision(preview)
+
+    url = f"/api/v1/profile/facts/{fact_id}/audience"
+    assert client.patch(url, json={"audience": "only_me"}).status_code == 200
+    stale_args = {**args, "owner_confirmed": True, "expected_updated_at": old_revision}
+    fresh = tool_error(mcp_call(client, "update_fact", stale_args))
+    assert CONFIRM in fresh and "from Only me to Connections" in fresh
+    fresh_revision = preview_revision(fresh)
+    assert fresh_revision != old_revision
+    assert client.get("/api/v1/profile").json()["facts"][0]["audience"] == "only_me"
+    out = ok(mcp_call(client, "update_fact", {**stale_args, "expected_updated_at": fresh_revision}))
+    assert out["audience"] == "connections"
+
+
+@pytest.mark.parametrize(
+    ("initial", "changed"), [("connections", "only_me"), ("only_me", "connections")]
+)
+def test_confirmed_approval_requires_the_previewed_pending_audience(
+    stack: tuple[TestClient, AuthRuntime, Any],
+    initial: str,
+    changed: str,
+) -> None:
+    client, _, _ = stack
+    ok(
+        mcp_call(
+            client,
+            "set_contribution_policy",
+            {
+                "expected_version": None,
+                "owner_confirmed": True,
+                "require_review_all": True,
+            },
+        )
+    )
+    added = _add_mcp(client, {**FACT, "audience": initial})
+    fact_id = added["claim_id"]
+    url = f"/api/v1/profile/facts/{fact_id}"
+    preview = client.post(f"{url}/approve")
+    assert preview.status_code == 403
+    old_revision = preview.json()["expected_updated_at"]
+    audience = client.patch(f"{url}/audience", json={"audience": changed})
+    if changed == "connections":
+        assert audience.status_code == 403
+        audience = client.patch(
+            f"{url}/audience",
+            json={
+                "audience": changed,
+                "owner_confirmed": True,
+                "expected_updated_at": audience.json()["expected_updated_at"],
+            },
+        )
+    assert audience.status_code == 200 and audience.json()["status"] == "pending_review"
+
+    for params in ({"expected_updated_at": old_revision}, {}):
+        refused = client.post(f"{url}/approve", json={"owner_confirmed": True, **params})
+        assert refused.status_code == 403 and refused.json()["detail"] == CONFIRM
+        assert refused.json()["expected_updated_at"] != old_revision
+        label = {"connections": "Connections", "only_me": "Only me"}[changed]
+        assert f"visible to {label}" in refused.json()["changes"][0]
+
+    rejected_before_approval = client.get("/api/v1/profile").json()["facts"][0]
+    assert rejected_before_approval["status"] == "pending_review"
+    approved = client.post(
+        f"{url}/approve",
+        json={
+            "owner_confirmed": True,
+            "expected_updated_at": refused.json()["expected_updated_at"],
+        },
+    )
+    assert approved.status_code == 200 and approved.json()["status"] == "active"
+    for args in ({"action": "reject"}, {"owner_confirmed": True}):
+        assert "fact_not_pending" in tool_error(
+            mcp_call(client, "remove_fact", {"fact_id": fact_id, **args})
+        )
+    assert client.get("/api/v1/profile").json()["facts"][0]["status"] == "active"
+
+
 def test_remove_fact_rejects_pending_and_removes_live(
     stack: tuple[TestClient, AuthRuntime, Any], factory: sessionmaker[Session]
 ) -> None:
-    """RG-59: remove_fact rejects a pending fact (audit 'rejected'; owner_confirmed only makes
-    the acceptance explicit) and removes anything else ('removed', as before)."""
+    """The explicit action distinguishes rejecting a pending fact and removing a live fact."""
     client, runtime, _ = stack
     ok(
         mcp_call(
@@ -462,7 +594,9 @@ def test_remove_fact_rejects_pending_and_removes_live(
     assert {p["outcome"] for p in pending} == {"pending_review"}
     auto_id, explicit_id = (p["claim_id"] for p in pending)
 
-    rejected = ok(mcp_call(client, "remove_fact", {"fact_id": auto_id}))
+    assert "fact_not_removable" in tool_error(mcp_call(client, "remove_fact", {"fact_id": auto_id}))
+    assert client.delete(f"/api/v1/profile/facts/{auto_id}").status_code == 409
+    rejected = ok(mcp_call(client, "remove_fact", {"fact_id": auto_id, "action": "reject"}))
     assert rejected["status"] == "removed"
     assert _events(factory, auto_id)[-1] == ("rejected", "automatic")
     assert "removed" not in [a for a, _ in _events(factory, auto_id)]
@@ -473,10 +607,14 @@ def test_remove_fact_rejects_pending_and_removes_live(
     assert confirmed["status"] == "removed"
     assert _events(factory, explicit_id)[-1] == ("rejected", "explicit")
 
-    # A live fact is removed exactly as before (owner_confirmed is ignored); the refused
-    # reject attempt leaves no event behind.
+    # A stale reject attempt against a live fact leaves no event behind.
     before = _events(factory, live_id)
-    removed = ok(mcp_call(client, "remove_fact", {"fact_id": live_id, "owner_confirmed": True}))
+    for args in ({"action": "reject"}, {"owner_confirmed": True}):
+        assert "fact_not_pending" in tool_error(
+            mcp_call(client, "remove_fact", {"fact_id": live_id, **args})
+        )
+    assert _events(factory, live_id) == before
+    removed = ok(mcp_call(client, "remove_fact", {"fact_id": live_id, "action": "remove"}))
     assert removed["status"] == "removed"
     after = _events(factory, live_id)
     assert after[: len(before)] == before and after[len(before) :] == [("removed", "automatic")]
@@ -502,48 +640,10 @@ def test_remove_fact_rejects_pending_and_removes_live(
         )
     )["results"]
     assert repl["outcome"] == "pending_review"
-    ok(mcp_call(client, "remove_fact", {"fact_id": repl["claim_id"]}))
+    ok(mcp_call(client, "remove_fact", {"fact_id": repl["claim_id"], "action": "reject"}))
     assert _events(factory, repl["claim_id"])[-1][0] == "rejected"
     live_ids = {f["id"] for f in client.get("/api/v1/profile").json()["facts"]}
     assert target in live_ids and repl["claim_id"] not in live_ids
-
-
-@pytest.mark.anyio
-async def test_remove_fact_uses_owner_authorized_services_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The adapter decides pending vs live through the authorized services alone: reject first,
-    and only a ``fact_not_pending`` refusal falls back to remove (no raw claim read; the static
-    guard in tests/authz/test_claim_read_guard.py covers the module)."""
-    from revel.mcp import profile_tools
-    from revel.services import profiles
-
-    calls: list[str] = []
-    fact = object()
-
-    async def reject(_s: Any, _p: Any, _fid: Any, *, owner_confirmed: bool) -> Any:
-        calls.append(f"reject:{owner_confirmed}")
-        raise profiles.FactConflict(fact, "fact_not_pending")  # type: ignore[arg-type]
-
-    async def remove(_s: Any, _p: Any, _fid: Any) -> Any:
-        calls.append("remove")
-        return fact
-
-    monkeypatch.setattr(profiles, "reject_fact", reject)
-    monkeypatch.setattr(profiles, "remove_fact", remove)
-    out = await profile_tools._remove_or_reject(None, None, None, owner_confirmed=True)  # type: ignore[arg-type]
-    assert out is fact and calls == ["reject:True", "remove"]
-
-    # Any other refusal (or a missing fact) is not retried as a removal.
-    async def reject_gone(*_a: Any, **_k: Any) -> Any:
-        calls.append("reject")
-        raise profiles.FactNotFound()
-
-    calls.clear()
-    monkeypatch.setattr(profiles, "reject_fact", reject_gone)
-    with pytest.raises(profiles.FactNotFound):
-        await profile_tools._remove_or_reject(None, None, None, owner_confirmed=False)  # type: ignore[arg-type]
-    assert calls == ["reject"]
 
 
 def _add_mcp(client: TestClient, item: dict[str, Any]) -> dict[str, Any]:
