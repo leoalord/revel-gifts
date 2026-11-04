@@ -1,11 +1,16 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.7.1
+version: 0.7.2
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.7.2 (2026-11-03)
+
+- Confirm fact approvals and audience widening with the fact timestamp returned by the
+  confirmation preview. Give the explicit `remove` or `reject` action when undoing a fact.
 
 ## 0.7.1 (2026-11-03)
 
