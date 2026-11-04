@@ -1,11 +1,19 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.7.0
+version: 0.7.1
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.7.1 (2026-11-03)
+
+- Profile guidance distinguishes drafts, pending facts and current provisional sharing,
+  preserves evidence date precision, and asks for clarification only when a gap matters.
+  The first-policy confirmation explains the proposed settings.
+- Answer guidance keeps pending and restricted facts out of inline evidence.
+- Gift guidance explains when a directly requested item may appear in the routed question.
 
 ## 0.7.0 (2026-11-03)
 

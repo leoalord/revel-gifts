@@ -100,8 +100,6 @@ def _policy_update(data: dict[str, Any]) -> tuple[PolicyUpdate, bool]:
 
 
 async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
-    from .test_owner_controls_f5 import _first_approval_change
-
     agent = world.alex.mcp
 
     # First approval, step 1 (no flag): refused with the change list the skill quotes.
@@ -110,7 +108,8 @@ async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
     with pytest.raises(profiles.OwnerConfirmationRequired) as refused:
         await profiles.set_policy(session, agent, step1, owner_confirmed=flag1)
     assert refused.value.reason_code == "owner_confirmation_required"
-    assert refused.value.changes == [_first_approval_change()]  # defaults, Public off
+    assert len(refused.value.changes) == 1  # defaults, Public off
+    assert "first time" in refused.value.changes[0]
     assert (await profiles.get_policy(session, agent)).policy is None  # nothing written
 
     # Step 2: the identical call with the owner's confirmation succeeds.

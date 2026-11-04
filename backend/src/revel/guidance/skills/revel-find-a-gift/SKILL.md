@@ -1,7 +1,7 @@
 ---
 name: revel-find-a-gift
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.7.0
+version: 0.7.1
 status: active
 ---
 
@@ -35,9 +35,11 @@ Call `submit_question` with the recipient's `handle` and:
   `notes`. The occasion, date and budget go here, never in `requested_information`.
 - By default, include the `occasion`, `occasion_date`, `budget` and the `candidate_ideas` you
   are weighing. Revel checks your question, and the shorter question it routes, against
-  `occasion`, `occasion_date`, `budget`, `candidate_ideas` and `notes`, and keeps their words
-  out of what the recipient's assistants see: that is how it keeps the question surprise-safe.
-  What you leave out, Revel cannot check for.
+  `occasion`, `occasion_date`, `budget`, `candidate_ideas` and `notes` to protect the
+  private plan. A candidate item can appear when it is the subject of the direct question
+  (for example, binoculars in an ownership check). Keep the rest of the plan, including
+  other candidate ideas, in `private_purpose`. Supply the relevant private details so Revel
+  can check for them.
 - If your own client refuses to send these details, send the `occasion` alone. The question
   itself must then stay neutral: never put a gift idea, brand or product name in
   `requested_information` (for example, ask "What outdoor gear does Alex already have?").
