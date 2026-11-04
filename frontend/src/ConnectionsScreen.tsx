@@ -71,7 +71,7 @@ function PersonView({ person }: { person: PublicIdentity | Person }) {
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
     <section aria-labelledby={id} className="panel">
-      <h3 id={id}>{title}</h3>
+      <h3 id={id} tabIndex={-1}>{title}</h3>
       {children}
     </section>
   );
@@ -327,9 +327,10 @@ export function ConnectionsScreen() {
     try {
       await action();
       setNotice(success);
+      return true;
     } catch (error) {
-      if (error instanceof UnauthorizedError) return;
-      setAlert(messageFor(error));
+      if (!(error instanceof UnauthorizedError)) setAlert(messageFor(error));
+      return false;
     } finally {
       setBusy(false);
       // Re-read after every action, success or not (e.g. a 404/409 means the list is stale).
@@ -337,21 +338,27 @@ export function ConnectionsScreen() {
     }
   };
 
-  if (loadError) {
+  if (loadError || !data) {
     return (
-      <div role="alert">
-        <p>{loadError}</p>
-        <button type="button" onClick={reload}>
-          Retry
-        </button>
-      </div>
+      <section aria-labelledby="connections-heading">
+        <h2 id="connections-heading">Connections</h2>
+        {loadError ? (
+          <>
+            <p role="alert" className="alert">{loadError}</p>
+            <button type="button" onClick={() => {
+              setLoadError(null);
+              reload();
+            }}>Retry</button>
+          </>
+        ) : <p role="status">Loading connections…</p>}
+      </section>
     );
   }
-  if (!data) return <p role="status">Loading connections…</p>;
 
   return (
     <section aria-labelledby="connections-heading" className="connections">
       <h2 id="connections-heading">Connections</h2>
+      <p className="page-intro">Manage who can access your gifting profile and which assistants can act for you.</p>
       {alert && (
         <p role="alert" className="alert">
           {alert}
@@ -361,25 +368,8 @@ export function ConnectionsScreen() {
         {notice}
       </p>
 
-      <Section id="handle-heading" title="My handle">
-        {data.handle && (
-          <p>
-            Your handle is <strong>@{data.handle.handle}</strong>
-            {data.handle.discoverable ? " (discoverable)" : " (not discoverable)"}.
-          </p>
-        )}
-        <HandleForm
-          key={`${data.handle?.handle ?? ""}:${data.handle?.discoverable ?? ""}`}
-          current={data.handle}
-          onSaved={(h) => {
-            setNotice(`Handle saved: @${h.handle}.`);
-            setAlert(null);
-            reload();
-          }}
-        />
-      </Section>
-
       <Section id="incoming-heading" title="Incoming requests">
+        <p className="hint">Approval shares your eligible profile details with them. Access to their profile requires a separate approval.</p>
         {data.incoming.length === 0 ? (
           <p>No pending requests.</p>
         ) : (
@@ -417,9 +407,67 @@ export function ConnectionsScreen() {
                   <ConfirmButton
                     label="Block"
                     confirmLabel="Confirm block"
+                    successFocusId="incoming-heading"
                     disabled={busy}
                     onConfirm={() =>
-                      void act(() => connectionsApi.block(r.id), `Blocked ${personName(r.requester)}.`)
+                      act(() => connectionsApi.block(r.id), `Blocked ${personName(r.requester)}.`)
+                    }
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section id="people-heading" title="People who can see my profile">
+        <p className="hint">Connections can see details shared with Connections. Trusted Circle can also see details reserved for that circle. Revoking access stops future access through this connection.</p>
+        {data.connections.length === 0 ? (
+          <p>No connections yet.</p>
+        ) : (
+          <ul className="rows">
+            {data.connections.map((c) => (
+              <li key={c.request_id} className="row">
+                <p>
+                  <PersonView person={c.person} />{" "}
+                  <span className="badge">{tierLabel(c.tier)}</span>
+                  {c.since && <span className="hint"> since {formatTime(c.since)}</span>}
+                </p>
+                <TierForm
+                  key={c.tier}
+                  entry={c}
+                  tierLabel={tierLabel}
+                  busy={busy}
+                  onChange={(tier) =>
+                    void act(
+                      () => connectionsApi.setTier(c.request_id, tier),
+                      `${personName(c.person)} is now ${tierLabel(tier)}.`,
+                    )
+                  }
+                />
+                <div className="actions">
+                  <ConfirmButton
+                    label="Revoke"
+                    confirmLabel="Confirm revoke"
+                    successFocusId="people-heading"
+                    disabled={busy}
+                    onConfirm={() =>
+                      act(
+                        () => connectionsApi.revoke(c.request_id),
+                        `Revoked ${personName(c.person)}.`,
+                      )
+                    }
+                  />
+                  <ConfirmButton
+                    label="Block"
+                    confirmLabel="Confirm block"
+                    successFocusId="people-heading"
+                    disabled={busy}
+                    onConfirm={() =>
+                      act(
+                        () => connectionsApi.block(c.request_id),
+                        `Blocked ${personName(c.person)}.`,
+                      )
                     }
                   />
                 </div>
@@ -430,6 +478,7 @@ export function ConnectionsScreen() {
       </Section>
 
       <Section id="outgoing-heading" title="My requests">
+        <p className="hint">Request access to someone else’s gifting profile using their exact handle.</p>
         <RequestForm
           onSent={(message) => {
             setNotice(message);
@@ -468,58 +517,23 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
-      <Section id="people-heading" title="People who can see my profile">
-        {data.connections.length === 0 ? (
-          <p>No connections yet.</p>
-        ) : (
-          <ul className="rows">
-            {data.connections.map((c) => (
-              <li key={c.request_id} className="row">
-                <p>
-                  <PersonView person={c.person} />{" "}
-                  <span className="badge">{tierLabel(c.tier)}</span>
-                  {c.since && <span className="hint"> since {formatTime(c.since)}</span>}
-                </p>
-                <TierForm
-                  key={c.tier}
-                  entry={c}
-                  tierLabel={tierLabel}
-                  busy={busy}
-                  onChange={(tier) =>
-                    void act(
-                      () => connectionsApi.setTier(c.request_id, tier),
-                      `${personName(c.person)} is now ${tierLabel(tier)}.`,
-                    )
-                  }
-                />
-                <div className="actions">
-                  <ConfirmButton
-                    label="Revoke"
-                    confirmLabel="Confirm revoke"
-                    disabled={busy}
-                    onConfirm={() =>
-                      void act(
-                        () => connectionsApi.revoke(c.request_id),
-                        `Revoked ${personName(c.person)}.`,
-                      )
-                    }
-                  />
-                  <ConfirmButton
-                    label="Block"
-                    confirmLabel="Confirm block"
-                    disabled={busy}
-                    onConfirm={() =>
-                      void act(
-                        () => connectionsApi.block(c.request_id),
-                        `Blocked ${personName(c.person)}.`,
-                      )
-                    }
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
+      <Section id="handle-heading" title="My handle">
+        <p className="hint">Your handle helps people find your identity. Gifting profile access is managed separately.</p>
+        {data.handle && (
+          <p>
+            Your handle is <strong>@{data.handle.handle}</strong>
+            {data.handle.discoverable ? " (discoverable)" : " (not discoverable)"}.
+          </p>
         )}
+        <HandleForm
+          key={`${data.handle?.handle ?? ""}:${data.handle?.discoverable ?? ""}`}
+          current={data.handle}
+          onSaved={(h) => {
+            setNotice(`Handle saved: @${h.handle}.`);
+            setAlert(null);
+            reload();
+          }}
+        />
       </Section>
 
       <Section id="blocked-heading" title="Blocked">

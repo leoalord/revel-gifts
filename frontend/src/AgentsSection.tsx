@@ -49,13 +49,15 @@ export function AgentsSection() {
     try {
       await agentsApi.disconnect(item.delegation_id);
       setNotice(`Disconnected ${item.agent.label}.`);
+      return true;
     } catch (error) {
-      if (error instanceof UnauthorizedError) return;
+      if (error instanceof UnauthorizedError) return false;
       if (isStatus(error, 404)) {
         setNotice("That assistant was already disconnected. The list has been refreshed.");
-      } else {
-        setAlert(messageFor(error));
+        return true;
       }
+      setAlert(messageFor(error));
+      return false;
     } finally {
       setBusy(false);
       reload();
@@ -67,7 +69,7 @@ export function AgentsSection() {
 
   return (
     <section aria-labelledby="agents-heading" className="panel">
-      <h3 id="agents-heading">Connected assistants</h3>
+      <h3 id="agents-heading" tabIndex={-1}>Connected assistants</h3>
       {loadError ? (
         <div role="alert">
           <p>{loadError}</p>
@@ -99,8 +101,9 @@ export function AgentsSection() {
                     <ConfirmButton
                       label="Disconnect"
                       confirmLabel="Confirm disconnect"
+                      successFocusId="agents-heading"
                       disabled={busy}
-                      onConfirm={() => void disconnect(a)}
+                      onConfirm={() => disconnect(a)}
                     />
                   </div>
                 </li>

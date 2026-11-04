@@ -65,7 +65,7 @@ const FLAG_FIELDS: { flag: Flag; label: string; hint?: string }[] = [
   {
     flag: "public_opt_in",
     label: "Allow Public sharing for eligible categories",
-    hint: "Eligible categories become Public unless you choose a narrower audience below.",
+    hint: "Eligible categories default to Public unless you choose a narrower audience. This setting is separate from handle discoverability.",
   },
 ];
 
@@ -165,8 +165,22 @@ export function PolicyScreen() {
     return () => controller.abort();
   }, [apply]);
 
-  if (loadError) return <p role="alert">{loadError}</p>;
-  if (!data || !draft) return <p role="status">Loading policy…</p>;
+  if (loadError || !data || !draft) {
+    return (
+      <section aria-labelledby="policy-heading">
+        <h2 id="policy-heading">Contribution policy</h2>
+        {loadError ? (
+          <>
+            <p role="alert" className="alert">{loadError}</p>
+            <button type="button" onClick={() => {
+              setLoadError(null);
+              void reload();
+            }}>Try again</button>
+          </>
+        ) : <p role="status">Loading policy…</p>}
+      </section>
+    );
+  }
 
   const firstRun = data.policy === null;
   const label = audienceLabeler(data.audiences);
@@ -248,6 +262,7 @@ export function PolicyScreen() {
       <h2 id="policy-heading">
         {firstRun ? "Review and approve your contribution policy" : "Contribution policy"}
       </h2>
+      <p className="page-intro">Set what your assistants can add and how new details are reviewed and shared.</p>
       {firstRun ? (
         <p>
           These are the default settings. Nothing your assistants add is shared until you approve a
@@ -281,7 +296,7 @@ export function PolicyScreen() {
       )}
 
       <form onSubmit={onSubmit} noValidate>
-        <fieldset>
+        <fieldset className="policy-flags">
           <legend>Sharing</legend>
           {FLAG_FIELDS.map(({ flag, label: text, hint }) => {
             const id = `policy-flag-${flag}`;
@@ -318,96 +333,87 @@ export function PolicyScreen() {
         </fieldset>
 
         <fieldset>
-          <legend>Categories</legend>
-          <table className="categories">
-            <thead>
-              <tr>
-                <th scope="col">Category</th>
-                <th scope="col">
-                  Who can see it
-                  {optInPending && <span className="hint"> (updates after saving)</span>}
-                </th>
-                <th scope="col">Review first</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.categories.map((category: Category) => {
-                const change = draft.changes[category.id] ?? {};
-                const audienceKey = `category_settings.${category.id}.audience`;
-                const rowKey = `category_settings.${category.id}`;
-                const audienceError = errors[audienceKey]
-                  ? audienceKey
-                  : errors[rowKey]
-                    ? rowKey
+          <legend>Category defaults</legend>
+          <p className="hint">
+            These settings guide new contributions. Each detail has its own audience and review status.
+          </p>
+          {optInPending && <p className="hint">Public defaults update after saving.</p>}
+          <ul className="policy-categories">
+            {data.categories.map((category: Category) => {
+              const change = draft.changes[category.id] ?? {};
+              const audienceKey = `category_settings.${category.id}.audience`;
+              const rowKey = `category_settings.${category.id}`;
+              const audienceError = errors[audienceKey]
+                ? audienceKey
+                : errors[rowKey]
+                  ? rowKey
+                  : null;
+              const selectId = `audience-${category.id}`;
+              const markerId = `${selectId}-marker`;
+              const implicit =
+                category.public_eligible &&
+                explicitAudience(data.policy, category.id) === null &&
+                change.audience === undefined;
+              // A saved explicit Public audience is dropped on withdrawal (contract rule).
+              const explicitPublic =
+                explicitAudience(data.policy, category.id) === PUBLIC_AUDIENCE &&
+                change.audience === undefined;
+              const marker =
+                implicit && enabling
+                  ? "Public after saving"
+                  : (implicit || explicitPublic) && withdrawing
+                    ? "No longer Public after saving"
                     : null;
-                const selectId = `audience-${category.id}`;
-                const markerId = `${selectId}-marker`;
-                const implicit =
-                  category.public_eligible &&
-                  explicitAudience(data.policy, category.id) === null &&
-                  change.audience === undefined;
-                // A saved explicit Public audience is dropped on withdrawal (contract rule).
-                const explicitPublic =
-                  explicitAudience(data.policy, category.id) === PUBLIC_AUDIENCE &&
-                  change.audience === undefined;
-                const marker =
-                  implicit && enabling
-                    ? "Public after saving"
-                    : (implicit || explicitPublic) && withdrawing
-                      ? "No longer Public after saving"
-                      : null;
-                const options = [...category.allowed_audiences];
-                if (enabling && category.public_eligible && !options.includes(PUBLIC_AUDIENCE)) {
-                  options.push(PUBLIC_AUDIENCE);
-                }
-                const describedBy = [
-                  marker ? markerId : undefined,
-                  audienceError ? fieldId(audienceError) : undefined,
-                ]
-                  .filter(Boolean)
-                  .join(" ");
-                return (
-                  <tr key={category.id}>
-                    <th scope="row">
-                      <label htmlFor={selectId}>{category.label}</label>
-                    </th>
-                    <td>
-                      <select
-                        id={selectId}
-                        value={change.audience ?? category.effective_audience}
-                        onChange={(e) => setCategory(category.id, { audience: e.target.value })}
-                        aria-invalid={audienceError ? true : undefined}
-                        aria-describedby={describedBy || undefined}
-                      >
-                        {options.map((audience) => (
-                          <option key={audience} value={audience}>
-                            {label(audience)}
-                          </option>
-                        ))}
-                      </select>
-                      {marker && (
-                        <span className="marker" id={markerId}>
-                          {" "}
-                          {marker}
-                        </span>
-                      )}
-                      {audienceError && errorFor(audienceError)}
-                    </td>
-                    <td>
-                      <input
-                        type="checkbox"
-                        aria-label={`Review ${category.label} before sharing`}
-                        checked={change.require_review ?? category.require_review}
-                        onChange={(e) =>
-                          setCategory(category.id, { require_review: e.target.checked })
-                        }
-                      />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+              const options = [...category.allowed_audiences];
+              if (enabling && category.public_eligible && !options.includes(PUBLIC_AUDIENCE)) {
+                options.push(PUBLIC_AUDIENCE);
+              }
+              const describedBy = [
+                marker ? markerId : undefined,
+                audienceError ? fieldId(audienceError) : undefined,
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <li key={category.id}>
+                  <label className="category-name" htmlFor={selectId}>{category.label}</label>
+                  <div className="category-audience">
+                    <select
+                      id={selectId}
+                      value={change.audience ?? category.effective_audience}
+                      onChange={(e) => setCategory(category.id, { audience: e.target.value })}
+                      aria-invalid={audienceError ? true : undefined}
+                      aria-describedby={describedBy || undefined}
+                    >
+                      {options.map((audience) => (
+                        <option key={audience} value={audience}>
+                          {label(audience)}
+                        </option>
+                      ))}
+                    </select>
+                    {marker && (
+                      <span className="marker" id={markerId}>
+                        {" "}
+                        {marker}
+                      </span>
+                    )}
+                    {audienceError && errorFor(audienceError)}
+                  </div>
+                  <label className="category-review">
+                    <input
+                      type="checkbox"
+                      aria-label={`Review ${category.label} before sharing`}
+                      checked={change.require_review ?? category.require_review}
+                      onChange={(e) =>
+                        setCategory(category.id, { require_review: e.target.checked })
+                      }
+                    />
+                    Review first
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
         </fieldset>
 
         <button type="submit" className="primary" disabled={saving}>
