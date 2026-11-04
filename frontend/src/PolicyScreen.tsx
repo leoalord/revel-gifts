@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { UnauthorizedError } from "./api";
+import { groupCategories } from "./categoryGroups";
 import { audienceLabeler } from "./format";
 import {
   PUBLIC_AUDIENCE,
@@ -20,6 +21,21 @@ import type {
   PolicyResponse,
   PolicyUpdate,
 } from "./profileApi";
+
+function AudienceGuide() {
+  return (
+    <details className="audience-guide">
+      <summary><span className="audience-guide-icon" aria-hidden="true">?</span> Who could see it?</summary>
+      <dl>
+        <div><dt>Only me</dt><dd>You and the assistants you’ve authorized for your own profile.</dd></div>
+        <div><dt>Trusted Circle</dt><dd>People you’ve given Trusted Circle access and their authorized assistants.</dd></div>
+        <div><dt>Connections</dt><dd>People you’ve given Connections or Trusted Circle access and their authorized assistants.</dd></div>
+        <div><dt>Public</dt><dd>People without a connection can see eligible details when you enable Public sharing.</dd></div>
+      </dl>
+      <p className="hint">Each detail’s audience and review status determine whether it can be shared.</p>
+    </details>
+  );
+}
 
 type Flag = keyof PolicyFlags;
 
@@ -257,6 +273,83 @@ export function PolicyScreen() {
       !data.categories.some((c) => key.startsWith(`category_settings.${c.id}`)),
   );
 
+  const categoryGroups = groupCategories(data.categories, (category) => category.id);
+
+  const renderCategory = (category: Category) => {
+    const change = draft.changes[category.id] ?? {};
+    const audienceKey = `category_settings.${category.id}.audience`;
+    const rowKey = `category_settings.${category.id}`;
+    const audienceError = errors[audienceKey]
+      ? audienceKey
+      : errors[rowKey]
+        ? rowKey
+        : null;
+    const selectId = `audience-${category.id}`;
+    const markerId = `${selectId}-marker`;
+    const implicit =
+      category.public_eligible &&
+      explicitAudience(data.policy, category.id) === null &&
+      change.audience === undefined;
+    // A saved explicit Public audience is dropped on withdrawal (contract rule).
+    const explicitPublic =
+      explicitAudience(data.policy, category.id) === PUBLIC_AUDIENCE &&
+      change.audience === undefined;
+    const marker =
+      implicit && enabling
+        ? "Public after saving"
+        : (implicit || explicitPublic) && withdrawing
+          ? "No longer Public after saving"
+          : null;
+    const options = [...category.allowed_audiences];
+    if (enabling && category.public_eligible && !options.includes(PUBLIC_AUDIENCE)) {
+      options.push(PUBLIC_AUDIENCE);
+    }
+    const describedBy = [
+      marker ? markerId : undefined,
+      audienceError ? fieldId(audienceError) : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <li key={category.id}>
+        <label className="category-name" htmlFor={selectId}>{category.label}</label>
+        <div className="category-audience">
+          <select
+            id={selectId}
+            value={change.audience ?? category.effective_audience}
+            onChange={(e) => setCategory(category.id, { audience: e.target.value })}
+            aria-invalid={audienceError ? true : undefined}
+            aria-describedby={describedBy || undefined}
+          >
+            {options.map((audience) => (
+              <option key={audience} value={audience}>
+                {label(audience)}
+              </option>
+            ))}
+          </select>
+          {marker && (
+            <span className="marker" id={markerId}>
+              {" "}
+              {marker}
+            </span>
+          )}
+          {audienceError && errorFor(audienceError)}
+        </div>
+        <label className="category-review">
+          <input
+            type="checkbox"
+            aria-label={`Review ${category.label} before sharing`}
+            checked={change.require_review ?? category.require_review}
+            onChange={(e) =>
+              setCategory(category.id, { require_review: e.target.checked })
+            }
+          />
+          Review first
+        </label>
+      </li>
+    );
+  };
+
   return (
     <section aria-labelledby="policy-heading">
       <h2 id="policy-heading">
@@ -338,82 +431,13 @@ export function PolicyScreen() {
             These settings guide new contributions. Each detail has its own audience and review status.
           </p>
           {optInPending && <p className="hint">Public defaults update after saving.</p>}
-          <ul className="policy-categories">
-            {data.categories.map((category: Category) => {
-              const change = draft.changes[category.id] ?? {};
-              const audienceKey = `category_settings.${category.id}.audience`;
-              const rowKey = `category_settings.${category.id}`;
-              const audienceError = errors[audienceKey]
-                ? audienceKey
-                : errors[rowKey]
-                  ? rowKey
-                  : null;
-              const selectId = `audience-${category.id}`;
-              const markerId = `${selectId}-marker`;
-              const implicit =
-                category.public_eligible &&
-                explicitAudience(data.policy, category.id) === null &&
-                change.audience === undefined;
-              // A saved explicit Public audience is dropped on withdrawal (contract rule).
-              const explicitPublic =
-                explicitAudience(data.policy, category.id) === PUBLIC_AUDIENCE &&
-                change.audience === undefined;
-              const marker =
-                implicit && enabling
-                  ? "Public after saving"
-                  : (implicit || explicitPublic) && withdrawing
-                    ? "No longer Public after saving"
-                    : null;
-              const options = [...category.allowed_audiences];
-              if (enabling && category.public_eligible && !options.includes(PUBLIC_AUDIENCE)) {
-                options.push(PUBLIC_AUDIENCE);
-              }
-              const describedBy = [
-                marker ? markerId : undefined,
-                audienceError ? fieldId(audienceError) : undefined,
-              ]
-                .filter(Boolean)
-                .join(" ");
-              return (
-                <li key={category.id}>
-                  <label className="category-name" htmlFor={selectId}>{category.label}</label>
-                  <div className="category-audience">
-                    <select
-                      id={selectId}
-                      value={change.audience ?? category.effective_audience}
-                      onChange={(e) => setCategory(category.id, { audience: e.target.value })}
-                      aria-invalid={audienceError ? true : undefined}
-                      aria-describedby={describedBy || undefined}
-                    >
-                      {options.map((audience) => (
-                        <option key={audience} value={audience}>
-                          {label(audience)}
-                        </option>
-                      ))}
-                    </select>
-                    {marker && (
-                      <span className="marker" id={markerId}>
-                        {" "}
-                        {marker}
-                      </span>
-                    )}
-                    {audienceError && errorFor(audienceError)}
-                  </div>
-                  <label className="category-review">
-                    <input
-                      type="checkbox"
-                      aria-label={`Review ${category.label} before sharing`}
-                      checked={change.require_review ?? category.require_review}
-                      onChange={(e) =>
-                        setCategory(category.id, { require_review: e.target.checked })
-                      }
-                    />
-                    Review first
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
+          <AudienceGuide />
+          {categoryGroups.map(({ title, icon, items }) => items.length > 0 && (
+            <section className="policy-category-group" key={title}>
+              <h3><span aria-hidden="true">{icon}</span> {title}</h3>
+              <ul className="policy-categories">{items.map(renderCategory)}</ul>
+            </section>
+          ))}
         </fieldset>
 
         <button type="submit" className="primary" disabled={saving}>

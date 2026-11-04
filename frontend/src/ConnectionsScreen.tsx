@@ -51,9 +51,13 @@ function personName(p: PublicIdentity): string {
 
 function PersonView({ person }: { person: PublicIdentity | Person }) {
   const assistant = "assistant" in person ? person.assistant : null;
+  const name = personName(person);
+  const initials = (person.display_name || person.handle || "")
+    .trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0] ?? "").join("");
   return (
     <span className="person">
-      <strong>{personName(person)}</strong>
+      <span className="identity-icon" aria-hidden="true">{initials.toLocaleUpperCase() || "?"}</span>
+      <strong>{name}</strong>
       {person.display_name && person.handle && <span className="handle"> (@{person.handle})</span>}
       {assistant && (
         <span className="hint">
@@ -68,10 +72,10 @@ function PersonView({ person }: { person: PublicIdentity | Person }) {
   );
 }
 
-function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+function Section({ id, title, icon, children }: { id: string; title: string; icon: string; children: ReactNode }) {
   return (
-    <section aria-labelledby={id} className="panel">
-      <h3 id={id} tabIndex={-1}>{title}</h3>
+    <section aria-labelledby={id} className="panel connection-panel">
+      <h3 id={id} tabIndex={-1}><span className="connection-icon" aria-hidden="true">{icon}</span> {title}</h3>
       {children}
     </section>
   );
@@ -368,7 +372,7 @@ export function ConnectionsScreen() {
         {notice}
       </p>
 
-      <Section id="incoming-heading" title="Incoming requests">
+      <Section id="incoming-heading" icon="📥" title="Incoming requests">
         <p className="hint">Approval shares your eligible profile details with them. Access to their profile requires a separate approval.</p>
         {data.incoming.length === 0 ? (
           <p>No pending requests.</p>
@@ -420,7 +424,7 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
-      <Section id="people-heading" title="People who can see my profile">
+      <Section id="people-heading" icon="👥" title="People who can see my profile">
         <p className="hint">Connections can see details shared with Connections. Trusted Circle can also see details reserved for that circle. Revoking access stops future access through this connection.</p>
         {data.connections.length === 0 ? (
           <p>No connections yet.</p>
@@ -430,7 +434,7 @@ export function ConnectionsScreen() {
               <li key={c.request_id} className="row">
                 <p>
                   <PersonView person={c.person} />{" "}
-                  <span className="badge">{tierLabel(c.tier)}</span>
+                  <span className={`badge ${c.tier === "trusted_circle" ? "tone-info" : "tone-neutral"}`}>{tierLabel(c.tier)}</span>
                   {c.since && <span className="hint"> since {formatTime(c.since)}</span>}
                 </p>
                 <TierForm
@@ -477,7 +481,7 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
-      <Section id="outgoing-heading" title="My requests">
+      <Section id="outgoing-heading" icon="↗" title="My requests">
         <p className="hint">Request access to someone else’s gifting profile using their exact handle.</p>
         <RequestForm
           onSent={(message) => {
@@ -517,7 +521,7 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
-      <Section id="handle-heading" title="My handle">
+      <Section id="handle-heading" icon="@" title="My handle">
         <p className="hint">Your handle helps people find your identity. Gifting profile access is managed separately.</p>
         {data.handle && (
           <p>
@@ -536,7 +540,7 @@ export function ConnectionsScreen() {
         />
       </Section>
 
-      <Section id="blocked-heading" title="Blocked">
+      <Section id="blocked-heading" icon="⛔" title="Blocked">
         {data.blocked.length === 0 ? (
           <p>Nobody is blocked.</p>
         ) : (

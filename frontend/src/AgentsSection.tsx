@@ -68,8 +68,8 @@ export function AgentsSection() {
   const history = (agents ?? []).filter((a) => a.status !== "active");
 
   return (
-    <section aria-labelledby="agents-heading" className="panel">
-      <h3 id="agents-heading" tabIndex={-1}>Connected assistants</h3>
+    <section aria-labelledby="agents-heading" className="panel connection-panel">
+      <h3 id="agents-heading" tabIndex={-1}><span className="connection-icon" aria-hidden="true">🤖</span> Connected assistants</h3>
       {loadError ? (
         <div role="alert">
           <p>{loadError}</p>
@@ -94,9 +94,14 @@ export function AgentsSection() {
           ) : (
             <ul className="rows" aria-label="Active assistants">
               {active.map((a) => (
-                <li key={a.delegation_id} className="row">
-                  <AgentLabel agent={a.agent} />{" "}
-                  <span className="hint">connected {formatTime(a.connected_at)}</span>
+                <li key={a.delegation_id} className="row assistant-row">
+                  <div className="assistant-identity">
+                    <span className="identity-icon" aria-hidden="true">🤖</span>
+                    <div>
+                      <AgentLabel agent={a.agent} />
+                      <div className="hint">Connected {formatTime(a.connected_at)}</div>
+                    </div>
+                  </div>
                   <div className="actions">
                     <ConfirmButton
                       label="Disconnect"

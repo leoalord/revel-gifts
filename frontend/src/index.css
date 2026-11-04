@@ -359,6 +359,63 @@ button:disabled {
   grid-column: 2;
 }
 
+.audience-guide {
+  margin: 0.85rem 0 1.25rem;
+}
+
+.audience-guide summary {
+  width: fit-content;
+  cursor: pointer;
+  padding-block: 0.3rem;
+  font-weight: 600;
+}
+
+.audience-guide-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25em;
+  height: 1.25em;
+  margin-inline: 0.2em;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  color: var(--accent);
+}
+
+.audience-guide dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 0.65rem;
+  margin: 0.6rem 0;
+}
+
+.audience-guide dl > div {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.65rem;
+}
+
+.audience-guide dt {
+  font-weight: 600;
+}
+
+.audience-guide dd {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+
+.policy-category-group + .policy-category-group {
+  margin-top: 1.25rem;
+}
+
+.policy-category-group h3 {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  font-size: 1rem;
+}
+
 .policy-categories {
   margin: 0.5rem 0 0;
   padding: 0;
@@ -804,6 +861,57 @@ button.danger {
 
 /* --- connections ----------------------------------------------------------------------- */
 
+.connection-panel {
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  padding: clamp(0.8rem, 2vw, 1.25rem);
+  background: var(--surface);
+}
+
+.connection-panel > h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0;
+}
+
+.connection-icon,
+.identity-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface) 84%, var(--accent));
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.person .identity-icon {
+  margin-inline-end: 0.5rem;
+  vertical-align: middle;
+}
+
+.assistant-row,
+.assistant-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.assistant-row {
+  justify-content: space-between;
+}
+
+.assistant-identity {
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .request-card {
   border: 2px solid var(--accent);
   background: var(--surface);
@@ -1076,4 +1184,25 @@ button.danger {
   .footer-actions {
     margin-left: 0;
   }
+}
+
+.facts-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  min-width: 0;
+}
+
+.facts-filters select {
+  max-width: 100%;
+}
+
+.contribution-group {
+  margin-top: 1.15rem;
+}
+
+.contribution-group > h4 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
 }

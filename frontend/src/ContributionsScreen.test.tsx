@@ -65,7 +65,11 @@ describe("ContributionsScreen at a glance", () => {
     render(<ContributionsScreen />);
     expect(await screen.findByRole("heading", { name: "At a glance" })).toBeInTheDocument();
     expect(screen.getByText("Facts by assigned audience")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Category group"), "tastes");
+    expect(screen.getByText("Enjoys bouldering")).toBeInTheDocument();
+    expect(screen.queryByText("Wears a medium jacket")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Review pending facts" }));
+    expect(screen.getByLabelText("Category group")).toHaveValue("");
     await waitFor(() =>
       expect(calls.some((c) => c.url === "/api/ui/profile?status=pending_review")).toBe(true),
     );

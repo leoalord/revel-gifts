@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { CATEGORY_GROUPS, OTHER_CATEGORY_GROUP, groupCategories } from "./categoryGroups";
 import { UnauthorizedError } from "./api";
 import { ActorName } from "./ActorName";
 import { FactItem } from "./FactItem";
@@ -209,6 +210,7 @@ export function ContributionsScreen() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [audiences, setAudiences] = useState<AudienceInfo[] | undefined>(undefined);
+  const [categoryGroup, setCategoryGroup] = useState("");
   const [filter, setFilter] = useState<ClaimStatus | "">("");
   const [loadedFilter, setLoadedFilter] = useState<ClaimStatus | "" | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -298,6 +300,9 @@ export function ContributionsScreen() {
     );
   }
 
+  const visibleGroups = groupCategories(profile.facts, (fact) => fact.category)
+    .filter(({ id, items }) => items.length > 0 && (!categoryGroup || id === categoryGroup));
+
   return (
     <section aria-labelledby="contributions-heading">
       <h2 id="contributions-heading">Contributions</h2>
@@ -317,6 +322,7 @@ export function ContributionsScreen() {
         audienceLabel={audienceLabel}
         onShowPending={() => {
           // Presentation only: the server filters via ?status=.
+          setCategoryGroup("");
           changeFilter("pending_review");
           document.getElementById("status-filter")?.focus();
         }}
@@ -325,20 +331,35 @@ export function ContributionsScreen() {
       <section aria-labelledby="facts-heading" className="facts-section">
         <div className="section-head">
           <h3 id="facts-heading">Facts</h3>
-          <div className="field inline-field">
-            <label htmlFor="status-filter">Show</label>
-            <select
-              id="status-filter"
-              value={filter}
-              onChange={(e) => changeFilter(e.target.value as ClaimStatus | "")}
-            >
-              <option value="">Live and pending review</option>
-              {CLAIM_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {humanize(s)}
-                </option>
-              ))}
-            </select>
+          <div className="facts-filters">
+            <div className="field inline-field">
+              <label htmlFor="category-group-filter">Category group</label>
+              <select
+                id="category-group-filter"
+                value={categoryGroup}
+                onChange={(e) => setCategoryGroup(e.target.value)}
+              >
+                <option value="">All groups</option>
+                {[...CATEGORY_GROUPS, OTHER_CATEGORY_GROUP].map(({ id, title }) => (
+                  <option key={id} value={id}>{title}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field inline-field">
+              <label htmlFor="status-filter">Show</label>
+              <select
+                id="status-filter"
+                value={filter}
+                onChange={(e) => changeFilter(e.target.value as ClaimStatus | "")}
+              >
+                <option value="">Live and pending review</option>
+                {CLAIM_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {humanize(s)}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
         {loadError ? (
@@ -348,23 +369,26 @@ export function ContributionsScreen() {
           </>
         ) : loadedFilter !== filter ? (
           <p role="status">Loading facts…</p>
-        ) : profile.facts.length === 0 ? (
-          <p className="hint">No facts to show.</p>
-        ) : (
-          <ul className="facts">
-            {profile.facts.map((fact) => (
-              <FactItem
-                key={`${fact.id}:${fact.updated_at}:${fact.audience}:${fact.status}`}
-                fact={fact}
-                category={byId.get(fact.category)}
-                actions={ACTIONS}
-                onOutcome={onOutcome}
-                audienceLabel={audienceLabel}
-                audienceIds={audienceIds}
-              />
-            ))}
-          </ul>
-        )}
+        ) : visibleGroups.length === 0 ? (
+          <p className="hint">{categoryGroup ? "No facts match these filters." : "No facts to show."}</p>
+        ) : visibleGroups.map(({ id, title, icon, items }) => (
+          <section className="contribution-group" key={id} aria-labelledby={`facts-group-${id}`}>
+            <h4 id={`facts-group-${id}`}><span aria-hidden="true">{icon}</span> {title}</h4>
+            <ul className="facts">
+              {items.map((fact) => (
+                <FactItem
+                  key={`${fact.id}:${fact.updated_at}:${fact.audience}:${fact.status}`}
+                  fact={fact}
+                  category={byId.get(fact.category)}
+                  actions={ACTIONS}
+                  onOutcome={onOutcome}
+                  audienceLabel={audienceLabel}
+                  audienceIds={audienceIds}
+                />
+              ))}
+            </ul>
+          </section>
+        ))}
       </section>
 
       <RecentActivity summary={profile.summary} labels={labels} audienceLabel={audienceLabel} />
