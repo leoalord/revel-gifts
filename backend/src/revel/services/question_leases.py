@@ -347,6 +347,23 @@ def check_write_expiry(
         raise LeaseExpired()
 
 
+def _check_open_after_lease_write(
+    session: Session, question_id: UUID, lease_expires_at: datetime | None, deps: QuestionDeps
+) -> None:
+    # Match the answer write's lock order: assignment first, question second. Hold a
+    # shared lock until commit so another assignment cannot close the question meanwhile.
+    question = session.execute(
+        select(Question.status, Question.expires_at)
+        .where(Question.id == question_id)
+        .with_for_update(read=True)
+    ).one()
+    if question.status == QuestionStatus.EXPIRED.value:
+        raise QuestionExpired()
+    if question.status != QuestionStatus.OPEN.value:
+        raise QuestionClosed()
+    check_write_expiry(deps.now(), question.expires_at, lease_expires_at)
+
+
 def _lock_outreach(session: Session, question_id: UUID) -> None:
     session.execute(
         select(func.pg_advisory_xact_lock(func.hashtext(f"{_OUTREACH_LOCK_PREFIX}{question_id}")))
@@ -520,12 +537,12 @@ async def claim_assignment(
     ``human_contact`` on a lease already held is ``already_claimed``."""
     await load_own_assignment(principal, assignment_id, deps)
 
-    def _upgrade(session: Session, row: _Row, now: datetime, deadline: datetime) -> LeaseResponse:
+    def _upgrade(session: Session, row: _Row, now: datetime) -> LeaseResponse:
         check_outreach_allowed(session, row.question_id, row.id, now)
         version = _versioned_update(
             session, row, (AssignmentStatus.CLAIMED.value,), now, human_contact=True
         )
-        check_write_expiry(deps.now(), deadline, row.lease_expires_at)
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.flush()  # surfaces the human-contact unique index violation here
         session.add(
             _event(
@@ -575,7 +592,7 @@ async def claim_assignment(
                 and row.status == AssignmentStatus.CLAIMED.value
                 and not row.human_contact
             ):
-                return _upgrade(session, row, now, deadline)
+                return _upgrade(session, row, now)
             if row.status in HELD_LEASE_STATUSES:
                 raise AlreadyClaimed()
             raise QuestionClosed()
@@ -592,7 +609,7 @@ async def claim_assignment(
             lease_expires_at=expires,
             human_contact=request.human_contact,
         )
-        check_write_expiry(deps.now(), deadline, expires)
+        _check_open_after_lease_write(session, row.question_id, expires, deps)
         session.flush()  # surfaces the human-contact unique index violation here
         session.add(
             _event(
@@ -648,7 +665,7 @@ async def renew_assignment(
         version = _versioned_update(
             session, row, HELD_LEASE_STATUSES, now, lease_expires_at=expires
         )
-        check_write_expiry(deps.now(), deadline, row.lease_expires_at)
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.add(_event(principal, row, QuestionEventType.RENEWED, version, now))
         session.commit()
         return _response(
@@ -764,7 +781,7 @@ async def report_user_contact(
                 "lease_expires_at": expires,
             }
         version = _versioned_update(session, row, HELD_LEASE_STATUSES, now, **values)
-        check_write_expiry(deps.now(), deadline, row.lease_expires_at)
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.flush()
         session.add(
             _event(

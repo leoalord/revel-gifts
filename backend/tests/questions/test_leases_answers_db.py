@@ -695,6 +695,73 @@ async def test_active_lease_write_rolls_back_if_old_lease_expires(
     assert "renewed" not in events and "user_contact_reported" not in events
 
 
+@pytest.mark.parametrize("action", ["claim", "upgrade", "renew", "report"])
+async def test_lease_write_rolls_back_when_another_assignment_answers(
+    action, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    first = agent_principal(world.owner_d1)
+    second = agent_principal(world.owner_d2)
+    first_id = ids[world.owner_d1.id]
+    second_id = ids[world.owner_d2.id]
+    d = deps(factory)
+    first_lease = await claim_assignment(first, first_id, ClaimRequest(), deps=d)
+    if action != "claim":
+        await claim_assignment(
+            second, second_id, ClaimRequest(human_contact=action == "report"), deps=d
+        )
+    before = assignment(factory, second_id)
+    events_before = event_types(factory, question_id)
+    update = question_leases._versioned_update
+
+    async def answer():
+        await submit_answer(
+            first, first_id, answer_request(first_lease.lease_version, inline()), deps=d
+        )
+
+    def answer_then_update(session, row, *args, **kwargs):
+        if row.id == second_id:
+            anyio.from_thread.run(answer)
+        return update(session, row, *args, **kwargs)
+
+    monkeypatch.setattr(question_leases, "_versioned_update", answer_then_update)
+    with pytest.raises(QuestionClosed):
+        if action == "renew":
+            await renew_assignment(
+                second,
+                second_id,
+                LeaseVersionRequest(lease_version=before.lease_version),
+                deps=d,
+            )
+        elif action == "report":
+            await report_user_contact(
+                second,
+                second_id,
+                UserContactRequest(lease_version=before.lease_version, delivery_confirmed=True),
+                deps=d,
+            )
+        else:
+            await claim_assignment(
+                second,
+                second_id,
+                ClaimRequest(
+                    human_contact=True,
+                    lease_version=before.lease_version if action == "upgrade" else None,
+                ),
+                deps=d,
+            )
+    after = assignment(factory, second_id)
+    assert (after.status, after.lease_version, after.lease_expires_at, after.human_contact) == (
+        before.status,
+        before.lease_version,
+        before.lease_expires_at,
+        before.human_contact,
+    )
+    assert question(factory, question_id).status == "answered"
+    assert sorted(event_types(factory, question_id)) == sorted([*events_before, "answered"])
+
+
 async def test_renew_on_expired_lease_is_rejected(
     factory: sessionmaker[Session], fga: Any, world_builder: Any
 ) -> None:
