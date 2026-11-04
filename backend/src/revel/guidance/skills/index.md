@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.7.1
+version: 0.7.2
 status: active
 ---
 
@@ -18,7 +18,8 @@ and can ask surprise-safe questions.
   as).
 - Your user's own profile: `get_profile` (no `handle`: facts, summary and contribution
   policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience` and
-  `approve`) and `remove_fact` (removes a fact, or rejects one pending review) (see
+  `approve`) and `remove_fact` (actions `remove` for a live fact and `reject` for pending
+  review) (see
   `revel-manage-profile`).
 - Connections and shared profiles: `set_handle`, `request_connection`, `list_connections`
   (connections and requests), `respond_to_connection_request` (actions `approve`, `decline`,
@@ -90,8 +91,8 @@ without MCP access (bearer token; see "HTTP API" above):
 | Change the owner's contribution policy (widening needs the owner's confirmation) | `set_contribution_policy` | `PUT /api/v1/profile/policy` |
 | Change a fact's audience (widening needs the owner's confirmation) | `update_fact` (action `set_audience`) | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
 | Approve a pending fact (needs the owner's confirmation) | `update_fact` (action `approve`) | `POST /api/v1/profile/facts/{fact_id}/approve` |
-| Reject a pending fact | `remove_fact` (on a pending fact) | `POST /api/v1/profile/facts/{fact_id}/reject` |
-| Remove a fact (not idempotent) | `remove_fact` | `DELETE /api/v1/profile/facts/{fact_id}` |
+| Reject a pending fact | `remove_fact` (action `reject`) | `POST /api/v1/profile/facts/{fact_id}/reject` |
+| Remove a live fact (not idempotent) | `remove_fact` (action `remove`) | `DELETE /api/v1/profile/facts/{fact_id}` |
 | Read a person's shared profile by exact handle | `get_profile` (with `handle`) | `GET /api/v1/profiles/{handle}` |
 | Set your user's handle and discoverability | `set_handle` | MCP only |
 | Request a connection by exact handle | `request_connection` | MCP only |
