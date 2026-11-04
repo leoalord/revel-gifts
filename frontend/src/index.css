@@ -861,6 +861,57 @@ button.danger {
 
 /* --- connections ----------------------------------------------------------------------- */
 
+.connection-panel {
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  padding: clamp(0.8rem, 2vw, 1.25rem);
+  background: var(--surface);
+}
+
+.connection-panel > h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0;
+}
+
+.connection-icon,
+.identity-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface) 84%, var(--accent));
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.person .identity-icon {
+  margin-inline-end: 0.5rem;
+  vertical-align: middle;
+}
+
+.assistant-row,
+.assistant-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.assistant-row {
+  justify-content: space-between;
+}
+
+.assistant-identity {
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .request-card {
   border: 2px solid var(--accent);
   background: var(--surface);
