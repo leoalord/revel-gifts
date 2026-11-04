@@ -79,6 +79,7 @@ from revel.services.question_leases import (
     StaleLease,
     _versioned_update,
     _write,
+    check_write_expiry,
     held_lease,
     load_own_assignment,
     open_question_expiry,
@@ -195,6 +196,11 @@ class QuestionStatusResponse(BaseModel):
     created_at: datetime
     closed_at: datetime | None
     answer_available: bool
+
+
+class GetQuestionResponse(QuestionStatusResponse):
+    result: Literal["answer", "no_shareable_answer", "not_answered"]
+    answer: AnswerOut | None = None
 
 
 # --- submit_answer ----------------------------------------------------------------------------
@@ -314,10 +320,13 @@ async def submit_answer(
         finally:
             session.rollback()
 
+    # Evidence validation can take time. Re-check authorization and sample time again at write.
+    await load_own_assignment(principal, assignment_id, deps)
     answer_id = uuid4()
 
     def work(session: Session) -> SubmitAnswerResponse:
-        open_question_expiry(session, own.question_id, now)
+        now = deps.now()
+        deadline = open_question_expiry(session, own.question_id, now)
         row = held_lease(session, assignment_id, request.lease_version, now)
         version = _versioned_update(
             session,
@@ -338,6 +347,10 @@ async def submit_answer(
         )
         if answered.rowcount != 1:
             raise StaleLease()  # another answer won the race; nothing is written
+        # Both guarded updates may have waited on row locks. If time elapsed while waiting,
+        # fail the submission and roll them both back before writing an answer or event.
+        now = deps.now()
+        check_write_expiry(now, deadline, row.lease_expires_at)
         session.add(
             Answer(
                 id=answer_id,
@@ -421,12 +434,30 @@ class _OwnQuestion:
     expires_at: datetime
     created_at: datetime
     closed_at: datetime | None
+    answer_id: UUID | None
+
+    def response(self) -> QuestionStatusResponse:
+        return QuestionStatusResponse(
+            question_id=self.id,
+            status=self.status,
+            expires_at=self.expires_at,
+            created_at=self.created_at,
+            closed_at=self.closed_at,
+            answer_available=self.answer_id is not None,
+        )
 
 
 def _own_question(
     session: Session, principal: PrincipalLike, question_id: UUID, now: datetime
 ) -> _OwnQuestion:
     """The requester's own question (``not_found`` otherwise), with lazy question expiry."""
+    # Read the accepted answer ID and status in one statement so a concurrent answer
+    # cannot produce a response that mixes the open and answered snapshots.
+    answer_id = (
+        select(Answer.id)
+        .where(Answer.question_id == Question.id, Answer.status == AnswerStatus.ACCEPTED.value)
+        .scalar_subquery()
+    )
     # Explicit columns only: never private_purpose or escalation_context.
     cols = (
         Question.id,
@@ -435,6 +466,7 @@ def _own_question(
         Question.expires_at,
         Question.created_at,
         Question.closed_at,
+        answer_id,
         Question.requester_user_id,
     )
     row = session.execute(select(*cols).where(Question.id == question_id)).first()
@@ -444,7 +476,7 @@ def _own_question(
         expire_question_if_due(session, question_id, now, detected_by="requester")
         session.commit()
         row = session.execute(select(*cols).where(Question.id == question_id)).one()
-    return _OwnQuestion(*row[:6])
+    return _OwnQuestion(*row[:7])
 
 
 @dataclass(frozen=True)
@@ -458,11 +490,9 @@ class _StoredAnswer:
     agent_label: str | None
 
 
-def _stored_answer(session: Session, question_id: UUID) -> _StoredAnswer | None:
+def _stored_answer(session: Session, answer_id: UUID) -> _StoredAnswer | None:
     answer = session.execute(
-        select(Answer).where(
-            Answer.question_id == question_id, Answer.status == AnswerStatus.ACCEPTED.value
-        )
+        select(Answer).where(Answer.id == answer_id, Answer.status == AnswerStatus.ACCEPTED.value)
     ).scalar_one_or_none()
     if answer is None:
         return None
@@ -507,26 +537,9 @@ async def get_question_status(
 
         def read() -> QuestionStatusResponse:
             try:
-                question = _own_question(session, principal, question_id, now)
-                has_answer = (
-                    session.execute(
-                        select(Answer.id).where(
-                            Answer.question_id == question_id,
-                            Answer.status == AnswerStatus.ACCEPTED.value,
-                        )
-                    ).first()
-                    is not None
-                )
+                return _own_question(session, principal, question_id, now).response()
             finally:
                 session.rollback()
-            return QuestionStatusResponse(
-                question_id=question.id,
-                status=question.status,
-                expires_at=question.expires_at,
-                created_at=question.created_at,
-                closed_at=question.closed_at,
-                answer_available=has_answer,
-            )
 
         return await _in_thread(read)
 
@@ -620,31 +633,29 @@ def _effective_audience(stored: _StoredAnswer, labels: list[EvidenceLabel]) -> A
     )
 
 
-async def get_answer(
+async def get_question(
     principal: PrincipalLike, question_id: UUID, *, deps: QuestionDeps
-) -> GetAnswerResponse:
-    """Release the accepted answer to the requester if every re-check passes (module docs)."""
+) -> GetQuestionResponse:
+    """Read one requester status snapshot and release its answer if re-checks pass."""
     now = deps.now()
     with deps.sessionmaker() as session:
         try:
             question = await _in_thread(lambda: _own_question(session, principal, question_id, now))
-            stored = await _in_thread(lambda: _stored_answer(session, question_id))
+            status = question.response().model_dump()
+            if question.answer_id is None:
+                return GetQuestionResponse(**status, result="not_answered")
+            answer_id = question.answer_id
+            stored = await _in_thread(lambda: _stored_answer(session, answer_id))
             session.rollback()
             if stored is None:
-                return GetAnswerResponse(
-                    question_id=question.id, question_status=question.status, result="not_answered"
-                )
+                return GetQuestionResponse(**status, result="no_shareable_answer")
             labels = await _releasable(session, principal, question, stored, deps)
             session.rollback()
         except BaseException:
             session.rollback()
             raise
     if labels is None:
-        return GetAnswerResponse(
-            question_id=question.id,
-            question_status=question.status,
-            result="no_shareable_answer",
-        )
+        return GetQuestionResponse(**status, result="no_shareable_answer")
 
     with deps.sessionmaker() as session:
 
@@ -666,9 +677,8 @@ async def get_answer(
                 raise
 
         await _in_thread(record)
-    return GetAnswerResponse(
-        question_id=question.id,
-        question_status=question.status,
+    return GetQuestionResponse(
+        **status,
         result="answer",
         answer=AnswerOut(
             body=stored.body,
@@ -677,4 +687,17 @@ async def get_answer(
             respondent_agent=AgentRef(name=stored.agent_label) if stored.agent_label else None,
             evidence=labels,
         ),
+    )
+
+
+async def get_answer(
+    principal: PrincipalLike, question_id: UUID, *, deps: QuestionDeps
+) -> GetAnswerResponse:
+    """Release the accepted answer to the requester if every re-check passes (module docs)."""
+    question = await get_question(principal, question_id, deps=deps)
+    return GetAnswerResponse(
+        question_id=question.question_id,
+        question_status=question.status,
+        result=question.result,
+        answer=question.answer,
     )

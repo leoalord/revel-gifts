@@ -68,6 +68,7 @@ from revel.services.questions import (
     _require_agent_principal,
     expire_question_if_due,
     expire_stale_leases,
+    requester_can_ask,
     respond_allowed,
 )
 
@@ -267,18 +268,27 @@ def _load(session: Session, assignment_id: UUID) -> _Row | None:
 async def load_own_assignment(
     principal: PrincipalLike, assignment_id: UUID, deps: QuestionDeps
 ) -> _Row:
-    """The caller's own assignment, after re-checking ``respond`` (outside any transaction)."""
+    """The caller's own assignment, after checking respondent and requester authorization."""
     delegation_id = _require_agent_principal(principal)
     with deps.sessionmaker() as session:
-        row = await _in_thread(lambda: _load(session, assignment_id))
-        session.rollback()
-    if row is None or row.respondent_delegation_id != delegation_id:
-        raise AssignmentNotFound()
+
+        def read() -> tuple[_Row, UUID, UUID]:
+            row = _load(session, assignment_id)
+            if row is None or row.respondent_delegation_id != delegation_id:
+                raise AssignmentNotFound()
+            requester_user_id, profile_id = session.execute(
+                select(Question.requester_user_id, Question.profile_id).where(
+                    Question.id == row.question_id
+                )
+            ).one()
+            return row, requester_user_id, profile_id
+
+        row, requester_user_id, profile_id = await _in_thread(read)
     try:
         allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
     except RespondCheckUnavailable as exc:
         raise _authz_unavailable(exc) from None
-    if not allowed:
+    if not allowed or not await requester_can_ask(requester_user_id, profile_id, fga=deps.fga):
         raise QuestionNotPermitted()
     return row
 
@@ -325,6 +335,33 @@ def held_lease(session: Session, assignment_id: UUID, lease_version: int, now: d
     if row.lease_version != lease_version:
         raise StaleLease()
     return row
+
+
+def check_write_expiry(
+    now: datetime, deadline: datetime, lease_expires_at: datetime | None
+) -> None:
+    """Reject a lease mutation if its guarded SQL write waited past either deadline."""
+    if deadline <= now:
+        raise QuestionExpired()
+    if lease_expires_at is not None and lease_expires_at <= now:
+        raise LeaseExpired()
+
+
+def _check_open_after_lease_write(
+    session: Session, question_id: UUID, lease_expires_at: datetime | None, deps: QuestionDeps
+) -> None:
+    # Match the answer write's lock order: assignment first, question second. Hold a
+    # shared lock until commit so another assignment cannot close the question meanwhile.
+    question = session.execute(
+        select(Question.status, Question.expires_at)
+        .where(Question.id == question_id)
+        .with_for_update(read=True)
+    ).one()
+    if question.status == QuestionStatus.EXPIRED.value:
+        raise QuestionExpired()
+    if question.status != QuestionStatus.OPEN.value:
+        raise QuestionClosed()
+    check_write_expiry(deps.now(), question.expires_at, lease_expires_at)
 
 
 def _lock_outreach(session: Session, question_id: UUID) -> None:
@@ -499,13 +536,13 @@ async def claim_assignment(
     ``lease_expires_at`` and records ``claimed`` with ``upgrade: true``. A claim without
     ``human_contact`` on a lease already held is ``already_claimed``."""
     await load_own_assignment(principal, assignment_id, deps)
-    now = deps.now()
 
-    def _upgrade(session: Session, row: _Row) -> LeaseResponse:
+    def _upgrade(session: Session, row: _Row, now: datetime) -> LeaseResponse:
         check_outreach_allowed(session, row.question_id, row.id, now)
         version = _versioned_update(
             session, row, (AssignmentStatus.CLAIMED.value,), now, human_contact=True
         )
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.flush()  # surfaces the human-contact unique index violation here
         session.add(
             _event(
@@ -536,6 +573,7 @@ async def claim_assignment(
         assert row is not None
         if request.human_contact:
             _lock_outreach(session, row.question_id)
+        now = deps.now()
         deadline = open_question_expiry(session, row.question_id, now)
         if expire_stale_leases(session, row.question_id, now, detected_by="claim"):
             session.commit()
@@ -543,6 +581,8 @@ async def claim_assignment(
             assert row is not None
             if request.human_contact:
                 _lock_outreach(session, row.question_id)
+            now = deps.now()
+            deadline = open_question_expiry(session, row.question_id, now)
         if request.lease_version is not None and request.lease_version != row.lease_version:
             raise StaleLease()
         if row.status not in CLAIMABLE_STATUSES:
@@ -552,7 +592,7 @@ async def claim_assignment(
                 and row.status == AssignmentStatus.CLAIMED.value
                 and not row.human_contact
             ):
-                return _upgrade(session, row)
+                return _upgrade(session, row, now)
             if row.status in HELD_LEASE_STATUSES:
                 raise AlreadyClaimed()
             raise QuestionClosed()
@@ -569,6 +609,7 @@ async def claim_assignment(
             lease_expires_at=expires,
             human_contact=request.human_contact,
         )
+        _check_open_after_lease_write(session, row.question_id, expires, deps)
         session.flush()  # surfaces the human-contact unique index violation here
         session.add(
             _event(
@@ -606,10 +647,10 @@ async def renew_assignment(
     ``HUMAN_RESPONSE_WINDOW`` while ``waiting_for_user``), capped at the question deadline and
     at ``MAX_RENEWALS`` per claim. Stale or expired leases are refused."""
     await load_own_assignment(principal, assignment_id, deps)
-    now = deps.now()
 
     def work(session: Session) -> LeaseResponse:
         question_id = _question_of(session, assignment_id)
+        now = deps.now()
         deadline = open_question_expiry(session, question_id, now)
         row = held_lease(session, assignment_id, request.lease_version, now)
         used = _renewals_since_claim(session, row)
@@ -624,6 +665,7 @@ async def renew_assignment(
         version = _versioned_update(
             session, row, HELD_LEASE_STATUSES, now, lease_expires_at=expires
         )
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.add(_event(principal, row, QuestionEventType.RENEWED, version, now))
         session.commit()
         return _response(
@@ -705,16 +747,18 @@ async def report_user_contact(
     and is recorded with ``re_report: true`` (which never counts toward or resets the
     cooldown)."""
     await load_own_assignment(principal, assignment_id, deps)
-    now = deps.now()
 
     def work(session: Session) -> LeaseResponse:
         row = _load(session, assignment_id)
         assert row is not None
         _lock_outreach(session, row.question_id)
+        now = deps.now()
         deadline = open_question_expiry(session, row.question_id, now)
         if expire_stale_leases(session, row.question_id, now, detected_by="user_contact"):
             session.commit()  # frees lapsed human-contact leases (possibly this one)
             _lock_outreach(session, row.question_id)
+            now = deps.now()
+            deadline = open_question_expiry(session, row.question_id, now)
         row = held_lease(session, assignment_id, request.lease_version, now)
         if not row.human_contact:
             raise HumanContactRequired()
@@ -737,6 +781,7 @@ async def report_user_contact(
                 "lease_expires_at": expires,
             }
         version = _versioned_update(session, row, HELD_LEASE_STATUSES, now, **values)
+        _check_open_after_lease_write(session, row.question_id, row.lease_expires_at, deps)
         session.flush()
         session.add(
             _event(

@@ -21,7 +21,7 @@ from questions_support import (
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from revel.auth.authz import tier_tuple
+from revel.auth.authz import public_tuples, tier_tuple
 from revel.db.enums import Audience, ConnectionTier
 from revel.db.models import (
     Answer,
@@ -32,11 +32,13 @@ from revel.db.models import (
     Question,
     QuestionEvent,
 )
+from revel.services import answers, question_leases
 from revel.services.answers import (
     InvalidEvidence,
     QuestionNotFound,
     SubmitAnswerRequest,
     get_answer,
+    get_question,
     get_question_status,
     submit_answer,
 )
@@ -590,6 +592,176 @@ async def test_late_submission_is_rejected(
     assert assignment(factory, a1).status == "claimed"
 
 
+@pytest.mark.parametrize("cross_question_deadline", [False, True], ids=["lease", "question"])
+async def test_answer_rechecks_expiry_after_evidence_validation(
+    cross_question_deadline, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world, hours=1)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0 + timedelta(minutes=55) if cross_question_deadline else T0)
+    d = deps(factory, clock)
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    validate = answers._validate_evidence
+
+    async def validate_then_advance(*args, **kwargs):
+        result = await validate(*args, **kwargs)
+        clock.advance(LEASE_DURATION)
+        return result
+
+    monkeypatch.setattr(answers, "_validate_evidence", validate_then_advance)
+    with pytest.raises(QuestionExpired if cross_question_deadline else LeaseExpired):
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+    assert "answered" not in event_types(factory, question_id)
+
+
+async def test_contact_claim_rechecks_question_expiry_after_outreach_lock(
+    factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world, hours=1)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0 + timedelta(hours=1, seconds=-1))
+    lock = question_leases._lock_outreach
+
+    def lock_then_advance(*args):
+        lock(*args)
+        clock.advance(timedelta(seconds=2))
+
+    monkeypatch.setattr(question_leases, "_lock_outreach", lock_then_advance)
+    with pytest.raises(QuestionExpired):
+        await claim_assignment(
+            respondent, assignment_id, ClaimRequest(human_contact=True), deps=deps(factory, clock)
+        )
+    assert "claimed" not in event_types(factory, question_id)
+    assert assignment(factory, assignment_id).status == "available"
+
+
+@pytest.mark.parametrize("action", ["renew", "report", "upgrade"])
+async def test_active_lease_write_rolls_back_if_old_lease_expires(
+    action, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0)
+    d = deps(factory, clock)
+    lease = await claim_assignment(
+        respondent, assignment_id, ClaimRequest(human_contact=action == "report"), deps=d
+    )
+    clock.advance(LEASE_DURATION - timedelta(seconds=1))
+    update = question_leases._versioned_update
+
+    def update_then_advance(*args, **kwargs):
+        result = update(*args, **kwargs)
+        clock.advance(timedelta(seconds=2))
+        return result
+
+    monkeypatch.setattr(question_leases, "_versioned_update", update_then_advance)
+    with pytest.raises(LeaseExpired):
+        if action == "renew":
+            await renew_assignment(
+                respondent,
+                assignment_id,
+                LeaseVersionRequest(lease_version=lease.lease_version),
+                deps=d,
+            )
+        elif action == "report":
+            await report_user_contact(
+                respondent,
+                assignment_id,
+                UserContactRequest(lease_version=lease.lease_version, delivery_confirmed=True),
+                deps=d,
+            )
+        else:
+            await claim_assignment(
+                respondent,
+                assignment_id,
+                ClaimRequest(human_contact=True, lease_version=lease.lease_version),
+                deps=d,
+            )
+    unchanged = assignment(factory, assignment_id)
+    assert unchanged.status == "claimed"
+    assert unchanged.lease_version == lease.lease_version
+    assert unchanged.lease_expires_at == lease.lease_expires_at
+    assert unchanged.human_contact == lease.human_contact
+    events = event_types(factory, question_id)
+    assert events.count("claimed") == 1
+    assert "renewed" not in events and "user_contact_reported" not in events
+
+
+@pytest.mark.parametrize("action", ["claim", "upgrade", "renew", "report"])
+async def test_lease_write_rolls_back_when_another_assignment_answers(
+    action, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    first = agent_principal(world.owner_d1)
+    second = agent_principal(world.owner_d2)
+    first_id = ids[world.owner_d1.id]
+    second_id = ids[world.owner_d2.id]
+    d = deps(factory)
+    first_lease = await claim_assignment(first, first_id, ClaimRequest(), deps=d)
+    if action != "claim":
+        await claim_assignment(
+            second, second_id, ClaimRequest(human_contact=action == "report"), deps=d
+        )
+    before = assignment(factory, second_id)
+    events_before = event_types(factory, question_id)
+    update = question_leases._versioned_update
+
+    async def answer():
+        await submit_answer(
+            first, first_id, answer_request(first_lease.lease_version, inline()), deps=d
+        )
+
+    def answer_then_update(session, row, *args, **kwargs):
+        if row.id == second_id:
+            anyio.from_thread.run(answer)
+        return update(session, row, *args, **kwargs)
+
+    monkeypatch.setattr(question_leases, "_versioned_update", answer_then_update)
+    with pytest.raises(QuestionClosed):
+        if action == "renew":
+            await renew_assignment(
+                second,
+                second_id,
+                LeaseVersionRequest(lease_version=before.lease_version),
+                deps=d,
+            )
+        elif action == "report":
+            await report_user_contact(
+                second,
+                second_id,
+                UserContactRequest(lease_version=before.lease_version, delivery_confirmed=True),
+                deps=d,
+            )
+        else:
+            await claim_assignment(
+                second,
+                second_id,
+                ClaimRequest(
+                    human_contact=True,
+                    lease_version=before.lease_version if action == "upgrade" else None,
+                ),
+                deps=d,
+            )
+    after = assignment(factory, second_id)
+    assert (after.status, after.lease_version, after.lease_expires_at, after.human_contact) == (
+        before.status,
+        before.lease_version,
+        before.lease_expires_at,
+        before.human_contact,
+    )
+    assert question(factory, question_id).status == "answered"
+    assert sorted(event_types(factory, question_id)) == sorted([*events_before, "answered"])
+
+
 async def test_renew_on_expired_lease_is_rejected(
     factory: sessionmaker[Session], fga: Any, world_builder: Any
 ) -> None:
@@ -837,6 +1009,15 @@ async def test_evidence_validation(
         d1, a1, answer_request(lease.lease_version, inline(audience="public")), deps=deps(factory)
     )
     assert result.audience == "public"
+    # A finished answer can still be released if its evidence remains Public after revocation.
+    # This does not authorize a new question or further respondent actions.
+    await fga.write_tuples(public_tuples(world.profile.id))
+    await _revoke_requester(factory, world, fga)
+    outcome = await get_question(
+        agent_principal(world.requester_d), question_id, deps=deps(factory)
+    )
+    assert outcome.result == "answer"
+    assert outcome.answer is not None and outcome.answer.audience == "public"
 
 
 async def test_answer_audience_is_the_most_restrictive_evidence(
@@ -897,6 +1078,74 @@ async def _revoke_requester(factory: sessionmaker[Session], world: World, fga: A
     await fga.delete_tuples(
         [tier_tuple(world.profile.id, world.requester.id, ConnectionTier.CONNECTIONS)]
     )
+
+
+@pytest.mark.parametrize("public_profile", [False, True])
+async def test_cached_assignment_is_denied_after_requester_revocation(
+    public_profile, factory, fga, world_builder
+):
+    world = await world_builder()
+    if public_profile:
+        await fga.write_tuples(public_tuples(world.profile.id))
+    _, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    d = deps(factory)
+    assert [item.assignment_id for item in (await get_updates(respondent, deps=d)).items] == [
+        assignment_id
+    ]
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    await _revoke_requester(factory, world, fga)
+    assert (await get_updates(respondent, deps=d)).items == []
+    with pytest.raises(QuestionNotPermitted):
+        await claim_assignment(
+            respondent,
+            assignment_id,
+            ClaimRequest(human_contact=True, lease_version=lease.lease_version),
+            deps=d,
+        )
+    with pytest.raises(QuestionNotPermitted):
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+
+
+async def test_get_question_keeps_snapshot_when_answer_commits_during_read(
+    factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    requester = agent_principal(world.requester_d)
+    assignment_id = ids[world.owner_d1.id]
+    d = deps(factory)
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    read_question = answers._own_question
+
+    async def answer():
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+
+    def read_then_answer(*args):
+        result = read_question(*args)
+        anyio.from_thread.run(answer)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(answers, "_own_question", read_then_answer)
+        before = await get_question(requester, question_id, deps=d)
+    assert (before.status, before.answer_available, before.result, before.answer) == (
+        "open",
+        False,
+        "not_answered",
+        None,
+    )
+    assert "answer_retrieved" not in event_types(factory, question_id)
+    after = await get_question(requester, question_id, deps=d)
+    assert (after.status, after.answer_available, after.result) == ("answered", True, "answer")
+    assert after.answer is not None
+    assert event_types(factory, question_id).count("answer_retrieved") == 1
 
 
 async def _tighten_inline_policy(factory: sessionmaker[Session], world: World, fga: Any) -> None:
