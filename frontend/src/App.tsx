@@ -48,14 +48,6 @@ function displayNameOf(session: WhoAmI): string {
   return session.user.display_name || session.user.email || "your account";
 }
 
-function Footer() {
-  return (
-    <footer className="footer">
-      <small>Synthetic demo data</small>
-    </footer>
-  );
-}
-
 function followAppLink(
   event: MouseEvent<HTMLAnchorElement>,
   path: string,
@@ -277,7 +269,6 @@ export function App() {
       >
         {body}
       </main>
-      <Footer />
     </div>
   );
 }

@@ -42,11 +42,10 @@ afterEach(() => {
 });
 
 describe("session bootstrap", () => {
-  it("shows the synthetic data footer while loading", () => {
+  it("shows the session loading state", () => {
     fetchMock.mockReturnValue(new Promise<Response>(() => {}));
     render(<App />);
     expect(screen.getByRole("status")).toHaveTextContent("Loading");
-    expect(screen.getByText("Synthetic demo data")).toBeInTheDocument();
   });
 
   it("requests /auth/session same-origin and shows the signed-in user", async () => {
@@ -55,7 +54,8 @@ describe("session bootstrap", () => {
 
     expect(await screen.findByText("Signed in as Alex Example")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
-    expect(screen.getByText("Synthetic demo data")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Make it personal." })).toBeInTheDocument();
+    expect(screen.queryByText("Synthetic demo data")).not.toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -93,7 +93,6 @@ describe("session bootstrap", () => {
     expect(alert).toHaveTextContent("Sign-in is temporarily unavailable.");
     expect(alert).toHaveTextContent("Browser sign-in is not configured.");
     expect(assignSpy).not.toHaveBeenCalled();
-    expect(screen.getByText("Synthetic demo data")).toBeInTheDocument();
   });
 
   it("shows a generic unavailable message on other 503s, without server text", async () => {
