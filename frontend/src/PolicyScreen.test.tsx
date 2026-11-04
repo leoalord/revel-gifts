@@ -342,7 +342,7 @@ describe("PolicyScreen opt-in preview", () => {
       name: "Allow Public sharing for eligible categories",
     });
     expect(screen.queryByText(/after you save/)).toBeNull();
-    expect(screen.queryByText("(updates after saving)")).toBeNull();
+    expect(screen.queryByText("Public defaults update after saving.")).toBeNull();
 
     await userEvent.click(optIn);
 
@@ -351,7 +351,7 @@ describe("PolicyScreen opt-in preview", () => {
         "Categories eligible for Public sharing (marked) will be shared publicly after you save, unless you choose a narrower audience.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("(updates after saving)")).toBeInTheDocument();
+    expect(screen.getByText("Public defaults update after saving.")).toBeInTheDocument();
 
     const optionValues = (label: string) =>
       within(screen.getByLabelText(label))
@@ -420,7 +420,7 @@ describe("PolicyScreen opt-in preview", () => {
       await screen.findByRole("checkbox", { name: "Allow Public sharing for eligible categories" }),
     );
     expect(screen.getByText("Public sharing will be withdrawn after you save.")).toBeInTheDocument();
-    expect(screen.getByText("(updates after saving)")).toBeInTheDocument();
+    expect(screen.getByText("Public defaults update after saving.")).toBeInTheDocument();
     expect(screen.getByLabelText("Interests and hobbies")).toHaveAccessibleDescription(
       "No longer Public after saving",
     );

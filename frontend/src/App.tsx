@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 
 import {
@@ -27,8 +27,8 @@ type SessionState =
 // Screens, each over its owning backend contract (F5 profile, F6 connections, F2 agents).
 const SCREENS = [
   { path: "/app/", label: "Home" },
-  { path: "/app/policy", label: "Policy" },
   { path: "/app/contributions", label: "Contributions" },
+  { path: "/app/policy", label: "Policy" },
   { path: "/app/connections", label: "Connections" },
 ] as const;
 
@@ -56,6 +56,19 @@ function Footer() {
   );
 }
 
+function followAppLink(
+  event: MouseEvent<HTMLAnchorElement>,
+  path: string,
+  onNavigate: (path: string) => void,
+) {
+  if (
+    event.defaultPrevented || event.button !== 0 ||
+    event.metaKey || event.ctrlKey || event.shiftKey || event.altKey
+  ) return;
+  event.preventDefault();
+  onNavigate(path);
+}
+
 function Nav({ current, onNavigate }: { current: string; onNavigate: (path: string) => void }) {
   return (
     <nav aria-label="Main">
@@ -65,10 +78,7 @@ function Nav({ current, onNavigate }: { current: string; onNavigate: (path: stri
             <a
               href={screen.path}
               aria-current={normalizePath(screen.path) === current ? "page" : undefined}
-              onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-                event.preventDefault();
-                onNavigate(screen.path);
-              }}
+              onClick={(event) => followAppLink(event, screen.path, onNavigate)}
             >
               {screen.label}
             </a>
@@ -79,10 +89,48 @@ function Nav({ current, onNavigate }: { current: string; onNavigate: (path: stri
   );
 }
 
-function Screen({ path }: { path: string }) {
+const HOME_LINKS = [
+  { path: "/app/contributions", label: "Review contributions", description: "See what your assistants added, what needs review, and who can see each detail." },
+  { path: "/app/policy", label: "Manage sharing policy", description: "Choose what assistants can add and which details can be shared." },
+  { path: "/app/connections", label: "Manage connections", description: "Review requests and manage who can access your shared gifting preferences." },
+];
+
+function Home({ onNavigate }: { onNavigate: (path: string) => void }) {
+  return (
+    <section aria-labelledby="home-heading">
+      <div className="home-hero">
+        <div>
+          <p className="eyebrow">Your gifting dashboard</p>
+          <h2 id="home-heading">Make it personal.</h2>
+          <p>See what your assistants have added for gifting, review anything that needs your attention, and decide who can see it.</p>
+        </div>
+        <svg className="gift-art" viewBox="0 0 230 180" fill="none" aria-hidden="true">
+          <circle cx="116" cy="92" r="75" fill="currentColor" opacity=".08" />
+          <g stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M64 88h104v66H64zM56 67h120v21H56zM105 67v87m22-87v87" />
+            <path d="M116 67c-40 0-53-13-45-25 10-15 31-1 45 25Zm0 0c40 0 53-13 45-25-10-15-31-1-45 25Z" />
+            <path d="M45 43v18m-9-9h18m139 61v16m-8-8h16m-18-82v10m-5-5h10" />
+          </g>
+        </svg>
+      </div>
+      <ul className="home-links">
+        {HOME_LINKS.map(({ path, label, description }) => (
+          <li key={path}>
+            <a href={path} onClick={(event) => followAppLink(event, path, onNavigate)}>
+              <span className="home-link-title">{label} <span aria-hidden="true">→</span></span>
+              <span className="home-link-description">{description}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Screen({ path, onNavigate }: { path: string; onNavigate: (path: string) => void }) {
   const screen = SCREENS.find((s) => normalizePath(s.path) === path);
   if (!screen || screen.path === "/app/") {
-    return <p>Welcome to Revel Gifts.</p>;
+    return <Home onNavigate={onNavigate} />;
   }
   if (screen.path === "/app/policy") return <PolicyScreen />;
   if (screen.path === "/app/contributions") return <ContributionsScreen />;
@@ -93,6 +141,9 @@ export function App() {
   const [state, setState] = useState<SessionState>({ kind: "loading" });
   const [path, setPath] = useState(() => normalizePath(window.location.pathname));
   const [signingOut, setSigningOut] = useState(false);
+  const main = useRef<HTMLElement>(null);
+  const focusOnRouteChange = useRef(false);
+  const routeLabel = SCREENS.find((screen) => normalizePath(screen.path) === path)?.label ?? "Home";
 
   useEffect(() => onSignInLoop(() => setState({ kind: "sign-in-loop" })), []);
 
@@ -122,15 +173,32 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const onPop = () => setPath(normalizePath(window.location.pathname));
+    const onPop = () => {
+      focusOnRouteChange.current = true;
+      setPath(normalizePath(window.location.pathname));
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  useEffect(() => {
+    document.title = `${routeLabel} | Revel Gifts`;
+    if (focusOnRouteChange.current) {
+      focusOnRouteChange.current = false;
+      main.current?.focus();
+    }
+  }, [path, routeLabel]);
+
   const navigate = useCallback((to: string) => {
+    const nextPath = normalizePath(to);
+    if (nextPath === path) {
+      main.current?.focus();
+      return;
+    }
+    focusOnRouteChange.current = true;
     window.history.pushState(null, "", to);
-    setPath(normalizePath(to));
-  }, []);
+    setPath(nextPath);
+  }, [path]);
 
   const signOut = useCallback(async () => {
     setSigningOut(true);
@@ -179,15 +247,14 @@ export function App() {
       break;
     case "signed-in":
       body = (
-        <main>
-          <Screen path={path} />
-        </main>
+        <Screen path={path} onNavigate={navigate} />
       );
       break;
   }
 
   return (
     <div className="shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <header className="app-header">
         <h1 className="brand">Revel Gifts</h1>
         {state.kind === "signed-in" && (
@@ -202,7 +269,14 @@ export function App() {
           </>
         )}
       </header>
-      {body}
+      <main
+        id="main-content"
+        ref={main}
+        tabIndex={-1}
+        aria-label={state.kind === "signed-in" ? routeLabel : undefined}
+      >
+        {body}
+      </main>
       <Footer />
     </div>
   );

@@ -68,8 +68,11 @@ function statusBadge(fact: Fact): { text: string; note?: string } {
   if (fact.status === "pending_review") {
     return { text: "Pending your review", note: "Not shared until you approve it." };
   }
+  if (fact.status === "removed" || fact.status === "superseded") {
+    return { text: humanize(fact.status), note: "This fact is no longer shared." };
+  }
   if (fact.status === "provisional" || fact.provisional) {
-    return { text: "Provisional", note: "Shared with a caveat: not yet confirmed by you." };
+    return { text: "Provisional", note: "Unconfirmed. Shared with a caveat only when your policy and audience allow it." };
   }
   return { text: humanize(fact.status) };
 }
@@ -397,11 +400,11 @@ export function FactItem({
           <dd>{label}</dd>
         </div>
         <div>
-          <dt className="visually-hidden">Audience</dt>
+          <dt>{fact.status === "pending_review" ? "Proposed audience" : "Assigned audience"}</dt>
           <dd>{audienceLabel(fact.audience)}</dd>
         </div>
         <div>
-          <dt className="visually-hidden">Evidence</dt>
+          <dt>Evidence</dt>
           <dd>
             {humanize(fact.evidence_type)}, {fact.confidence} confidence
           </dd>
@@ -414,8 +417,8 @@ export function FactItem({
         )}
         <div>
           <dt>Added by</dt>
-          <dd title={`Contributed via ${fact.contributed_via}, ${formatTime(fact.created_at)}`}>
-            <ActorName name={fact.contributor} />, {formatShortTime(fact.created_at)}
+          <dd title={formatTime(fact.created_at)}>
+            <ActorName name={fact.contributor} /> via {fact.contributed_via.toUpperCase()}, {formatShortTime(fact.created_at)}
           </dd>
         </div>
       </dl>
@@ -431,7 +434,7 @@ export function FactItem({
         <div className="fact-footer">
           {editable && (
             <form className="audience-form" onSubmit={(e) => void changeAudience(e)} noValidate>
-              <label htmlFor={audienceId}>Who can see it</label>
+              <label className="visually-hidden" htmlFor={audienceId}>Change audience for {fact.statement}</label>
               <select
                 id={audienceId}
                 value={audience}

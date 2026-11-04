@@ -3,15 +3,15 @@
 
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --surface: #f6f8fa;
-  --text: #1f2328;
-  --muted: #57606a;
-  --border: #d0d7de;
-  --accent: #0969da;
+  --bg: #faf7f2;
+  --surface: #ffffff;
+  --text: #282320;
+  --muted: #655952;
+  --border: #ded4cb;
+  --accent: #8a3e35;
   --accent-text: #ffffff;
-  --accent-hover: #0757b8;
-  --focus: #0969da;
+  --accent-hover: #713027;
+  --focus: #8a3e35;
   --danger: #b42318;
   --danger-bg: #fef3f2;
   --ok: #116329;
@@ -30,7 +30,7 @@
   --text-secondary: var(--muted);
 
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
@@ -38,15 +38,15 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --text: #e6edf3;
-    --muted: #9da7b3;
-    --border: #30363d;
-    --accent: #4493f8;
-    --accent-text: #0d1117;
-    --accent-hover: #6cabff;
-    --focus: #6cabff;
+    --bg: #1b1716;
+    --surface: #261f1d;
+    --text: #f7eee8;
+    --muted: #c8b8ae;
+    --border: #493c36;
+    --accent: #f1aaa0;
+    --accent-text: #1b1716;
+    --accent-hover: #ffc6bc;
+    --focus: #ffc6bc;
     --danger: #ff8e85;
     --danger-bg: #3d1513;
     --ok: #7ee2a8;
@@ -66,7 +66,7 @@ body {
 }
 
 .shell {
-  max-width: 68rem;
+  max-width: 74rem;
   margin: 0 auto;
   padding: 0 1.5rem 1rem;
   min-height: 100vh;
@@ -77,6 +77,22 @@ body {
 
 .shell main {
   flex: 1;
+  min-width: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: 0.5rem;
+  z-index: 1;
+  padding: 0.5rem 0.75rem;
+  color: var(--accent-text);
+  background: var(--accent);
+  transform: translateY(-150%);
+}
+
+.skip-link:focus {
+  transform: none;
 }
 
 /* --- header -------------------------------------------------------------------------- */
@@ -87,18 +103,21 @@ body {
   align-items: center;
   gap: 0.75rem 2rem;
   padding: 1rem 0;
-  border-bottom: 2px solid var(--border);
-  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: clamp(0.75rem, 3vw, 2rem);
 }
 
 .brand {
-  font-size: 1.6rem;
+  font-family: Georgia, serif;
+  font-size: 1.7rem;
+  letter-spacing: -0.05em;
   margin: 0;
 }
 
 .nav {
   display: flex;
   gap: 0.25rem;
+  flex-wrap: wrap;
   list-style: none;
   padding: 0;
   margin: 0;
@@ -130,10 +149,24 @@ body {
   align-items: center;
 }
 
+.page-intro {
+  max-width: 64ch;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+
+.notice:empty {
+  margin: 0;
+}
+
 /* --- type and sections ----------------------------------------------------------------- */
 
 h2 {
-  font-size: 1.6rem;
+  font-family: Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.12;
+  letter-spacing: -0.035em;
   margin: 0.5rem 0 0.75rem;
 }
 
@@ -175,7 +208,9 @@ h4 {
 
 fieldset {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 12px;
+  background: var(--surface);
+  min-inline-size: 0;
   margin: 0 0 1rem;
   padding: 0.75rem 1rem;
 }
@@ -218,6 +253,8 @@ input[type="date"],
 input[type="number"],
 select,
 textarea {
+  box-sizing: border-box;
+  max-inline-size: 100%;
   padding: 0.3rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -306,6 +343,64 @@ button:disabled {
 
 .inline-form {
   align-items: end;
+}
+
+/* --- policy ----------------------------------------------------------------------------- */
+
+.policy-flags .checkbox-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.2rem 0.45rem;
+  padding: 0.55rem 0;
+}
+
+.policy-flags .checkbox-field + .checkbox-field {
+  border-top: 1px solid var(--border);
+}
+
+.policy-flags .checkbox-field > label {
+  margin: 0;
+}
+
+.policy-flags .checkbox-field > p {
+  grid-column: 2;
+}
+
+.policy-categories {
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-categories li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.category-name {
+  font-weight: 600;
+}
+
+.category-audience .marker {
+  display: block;
+  font-size: var(--fs-secondary);
+}
+
+.category-review {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: var(--fs-secondary);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
 }
 
 /* --- tables ---------------------------------------------------------------------------- */
@@ -442,10 +537,10 @@ thead th {
 .fact,
 .row {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
   margin-bottom: 0.75rem;
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .row p {
@@ -508,7 +603,8 @@ thead th {
 }
 
 .fact-meta {
-  margin: 0.35rem 0 0;
+  margin: 0.45rem 0 0;
+  overflow-wrap: anywhere;
   font-size: var(--fs-secondary);
   color: var(--text-secondary);
 }
@@ -586,6 +682,10 @@ thead th {
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
   margin-left: auto;
+}
+
+.fact-footer button:not(.primary, .danger) {
+  background: transparent;
 }
 
 button.danger {
@@ -733,7 +833,31 @@ button.danger {
 
 @media (max-width: 720px) {
   .glance {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+  }
+
+  .glance-pending {
+    grid-column: 1 / -1;
+  }
+
+  .glance-pending.has-pending {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.8rem;
+  }
+
+  .glance-pending.has-pending p {
+    margin: 0;
+  }
+
+  .policy-categories li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .category-name {
+    grid-column: 1 / -1;
   }
 
   /* Recent activity: each event becomes a compact two-line entry instead of a squeezed table. */
@@ -786,4 +910,149 @@ button.danger {
 
 .account-name {
   font-weight: 600;
+}
+
+/* --- dashboard ------------------------------------------------------------------------ */
+
+.home-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 16rem);
+  align-items: center;
+  gap: 1rem;
+  padding: clamp(1.5rem, 6vw, 4rem);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--surface) 91%, var(--accent));
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.home-hero h2 {
+  font-size: clamp(2.75rem, 8vw, 5.25rem);
+  margin: 0.6rem 0;
+}
+
+.home-hero h2 + p {
+  max-width: 40ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: clamp(1rem, 2vw, 1.125rem);
+}
+
+.gift-art {
+  width: 100%;
+  color: var(--accent);
+}
+
+.home-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+
+.home-links a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.home-links a:hover {
+  border-color: var(--accent);
+}
+
+.home-link-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-weight: 700;
+}
+
+.home-link-title > span {
+  color: var(--accent);
+}
+
+.home-link-description {
+  font-size: var(--fs-secondary);
+  color: var(--muted);
+}
+
+.account-name {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .home-links {
+    grid-template-columns: 1fr;
+  }
+
+  .app-header {
+    gap: 0.45rem 0.75rem;
+    padding: 0.65rem 0;
+  }
+
+  .app-header nav {
+    flex-basis: 100%;
+  }
+
+  .account {
+    font-size: var(--fs-secondary);
+  }
+
+  .account button {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .shell {
+    padding-inline: 1rem;
+  }
+
+  .home-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .gift-art {
+    display: none;
+  }
+
+  .nav {
+    gap: 0.1rem;
+  }
+
+  .nav a {
+    font-size: var(--fs-secondary);
+    padding-inline: 0.4rem;
+  }
+
+  .fact,
+  .row {
+    padding: 0.75rem;
+  }
+
+  .fact-head .statement {
+    flex-basis: 100%;
+  }
+
+  .footer-actions {
+    margin-left: 0;
+  }
 }

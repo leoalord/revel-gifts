@@ -64,7 +64,7 @@ describe("ContributionsScreen at a glance", () => {
     const { calls } = routes();
     render(<ContributionsScreen />);
     expect(await screen.findByRole("heading", { name: "At a glance" })).toBeInTheDocument();
-    expect(screen.getByText("Facts by audience")).toBeInTheDocument();
+    expect(screen.getByText("Facts by assigned audience")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Review pending facts" }));
     await waitFor(() =>
       expect(calls.some((c) => c.url === "/api/ui/profile?status=pending_review")).toBe(true),
@@ -123,7 +123,7 @@ describe("ContributionsScreen", () => {
     render(<ContributionsScreen />);
     await screen.findByText("Enjoys bouldering");
     const li = item("Enjoys bouldering");
-    const select = within(li).getByLabelText("Who can see it");
+    const select = within(li).getByLabelText(/^Change audience for /);
     expect(
       within(select)
         .getAllByRole("option")
@@ -305,7 +305,7 @@ describe("ContributionsScreen", () => {
     for (const statement of ["Old statement", "Removed statement"]) {
       const li = (await screen.findByText(statement)).closest("li")!;
       expect(within(li).queryByRole("button")).toBeNull();
-      expect(within(li).queryByLabelText("Who can see it")).toBeNull();
+      expect(within(li).queryByLabelText(/^Change audience for /)).toBeNull();
     }
   });
 
@@ -371,7 +371,7 @@ describe("ContributionsScreen", () => {
 
   describe("per-fact audience (B3)", () => {
     const optionValues = (li: HTMLElement) =>
-      within(within(li).getByLabelText("Who can see it"))
+      within(within(li).getByLabelText(/^Change audience for /))
         .getAllByRole("option")
         .map((o) => (o as HTMLOptionElement).value);
 
@@ -380,7 +380,7 @@ describe("ContributionsScreen", () => {
       routes();
       render(<ContributionsScreen />);
       const li = (await screen.findByText("Shoe size 42")).closest("li")!;
-      const select = within(li).getByLabelText("Who can see it");
+      const select = within(li).getByLabelText(/^Change audience for /);
       expect(select).toHaveValue("connections");
       expect(within(select).getByRole("option", { selected: true })).toHaveTextContent("Connections");
       // size's allowed_audiences lacks Public: the server's list without Public.
@@ -401,7 +401,7 @@ describe("ContributionsScreen", () => {
       });
       render(<ContributionsScreen />);
       const li = (await screen.findByText("Hat size M")).closest("li")!;
-      await userEvent.selectOptions(within(li).getByLabelText("Who can see it"), to);
+      await userEvent.selectOptions(within(li).getByLabelText(/^Change audience for /), to);
       await userEvent.click(within(li).getByRole("button", { name: "Change audience" }));
       await screen.findByText(/^Audience changed to/);
       expect(calls.filter((c) => c.method === "PATCH").map((c) => c.body)).toEqual([{ audience: to }]);
@@ -430,7 +430,7 @@ describe("ContributionsScreen", () => {
       });
       render(<ContributionsScreen />);
       const li = (await screen.findByText("Shoe size 42")).closest("li")!;
-      expect(within(li).getByLabelText("Who can see it")).toHaveValue("connections");
+      expect(within(li).getByLabelText(/^Change audience for /)).toHaveValue("connections");
       expect(optionValues(li)).toEqual(["only_me", "trusted_circle", "connections"]);
     });
 
@@ -452,7 +452,7 @@ describe("ContributionsScreen", () => {
       });
       render(<ContributionsScreen />);
       const li = (await screen.findByText("Volunteered note")).closest("li")!;
-      const select = within(li).getByLabelText("Who can see it");
+      const select = within(li).getByLabelText(/^Change audience for /);
       // The server's list (minus Public): widening is offered and validated by the server.
       expect(optionValues(li)).toEqual(["only_me", "trusted_circle", "connections"]);
       await userEvent.selectOptions(select, "connections");
@@ -474,10 +474,10 @@ describe("ContributionsScreen", () => {
       });
       render(<ContributionsScreen />);
       const li = (await screen.findByText("Note two")).closest("li")!;
-      await userEvent.selectOptions(within(li).getByLabelText("Who can see it"), "trusted_circle");
+      await userEvent.selectOptions(within(li).getByLabelText(/^Change audience for /), "trusted_circle");
       await userEvent.click(within(li).getByRole("button", { name: "Change audience" }));
       expect(await within(li).findByText("audience not allowed")).toBeInTheDocument();
-      expect(within(li).getByLabelText("Who can see it")).toHaveValue("only_me");
+      expect(within(li).getByLabelText(/^Change audience for /)).toHaveValue("only_me");
     });
   });
 

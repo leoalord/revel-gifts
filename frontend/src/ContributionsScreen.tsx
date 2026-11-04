@@ -95,7 +95,7 @@ function SummaryView({
           )}
         </div>
         <Counts
-          title="Facts by audience"
+          title="Facts by assigned audience"
           counts={summary.counts.by_audience}
           label={audienceLabel}
         />
@@ -210,9 +210,11 @@ export function ContributionsScreen() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [audiences, setAudiences] = useState<AudienceInfo[] | undefined>(undefined);
   const [filter, setFilter] = useState<ClaimStatus | "">("");
+  const [loadedFilter, setLoadedFilter] = useState<ClaimStatus | "" | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const request = useRef(0);
+  const currentFilter = useRef<ClaimStatus | "">("");
 
   const load = useCallback((status: ClaimStatus | "") => {
     const id = ++request.current;
@@ -220,6 +222,7 @@ export function ContributionsScreen() {
       ([nextProfile, policy]) => {
         if (id !== request.current) return;
         setProfile(nextProfile);
+        setLoadedFilter(status);
         setCategories(policy.categories);
         setAudiences(policy.audiences);
         setLoadError(null);
@@ -240,10 +243,17 @@ export function ContributionsScreen() {
   const audienceLabel = useMemo(() => audienceLabeler(audiences), [audiences]);
   const audienceIds = useMemo(() => audiences?.map((a) => a.id), [audiences]);
 
+  const changeFilter = (status: ClaimStatus | "") => {
+    if (status === filter) return;
+    currentFilter.current = status;
+    setLoadError(null);
+    setFilter(status);
+  };
+
   const onOutcome = (outcome: FactOutcome) => {
     if (outcome.kind === "gone") {
       setNotice("That fact is no longer available. The list has been refreshed.");
-      load(filter);
+      load(currentFilter.current);
       return;
     }
     if (outcome.kind === "conflict") {
@@ -266,15 +276,32 @@ export function ContributionsScreen() {
       replacedId ? `${outcome.notice} Replacement: “${fact.statement}”.` : outcome.notice,
     );
     // Re-read so the list and summary reflect the server's view (status filters, counts).
+    load(currentFilter.current);
+  };
+
+  const retry = () => {
+    setLoadError(null);
     load(filter);
   };
 
-  if (loadError) return <p role="alert">{loadError}</p>;
-  if (!profile) return <p role="status">Loading contributions…</p>;
+  if (!profile) {
+    return (
+      <section aria-labelledby="contributions-heading">
+        <h2 id="contributions-heading">Contributions</h2>
+        {loadError ? (
+          <>
+            <p role="alert" className="alert">{loadError}</p>
+            <button type="button" onClick={retry}>Try again</button>
+          </>
+        ) : <p role="status">Loading contributions…</p>}
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="contributions-heading">
       <h2 id="contributions-heading">Contributions</h2>
+      <p className="page-intro">See what was added to your gifting profile and review each detail’s source and audience.</p>
       {profile.policy === null && (
         <p className="alert">
           You have not approved a contribution policy yet, so nothing is shared.{" "}
@@ -290,7 +317,7 @@ export function ContributionsScreen() {
         audienceLabel={audienceLabel}
         onShowPending={() => {
           // Presentation only: the server filters via ?status=.
-          setFilter("pending_review");
+          changeFilter("pending_review");
           document.getElementById("status-filter")?.focus();
         }}
       />
@@ -303,7 +330,7 @@ export function ContributionsScreen() {
             <select
               id="status-filter"
               value={filter}
-              onChange={(e) => setFilter(e.target.value as ClaimStatus | "")}
+              onChange={(e) => changeFilter(e.target.value as ClaimStatus | "")}
             >
               <option value="">Live and pending review</option>
               {CLAIM_STATUSES.map((s) => (
@@ -314,7 +341,14 @@ export function ContributionsScreen() {
             </select>
           </div>
         </div>
-        {profile.facts.length === 0 ? (
+        {loadError ? (
+          <>
+            <p role="alert" className="alert">{loadError}</p>
+            <button type="button" onClick={retry}>Try again</button>
+          </>
+        ) : loadedFilter !== filter ? (
+          <p role="status">Loading facts…</p>
+        ) : profile.facts.length === 0 ? (
           <p className="hint">No facts to show.</p>
         ) : (
           <ul className="facts">

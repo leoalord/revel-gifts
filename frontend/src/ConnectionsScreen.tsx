@@ -337,21 +337,27 @@ export function ConnectionsScreen() {
     }
   };
 
-  if (loadError) {
+  if (loadError || !data) {
     return (
-      <div role="alert">
-        <p>{loadError}</p>
-        <button type="button" onClick={reload}>
-          Retry
-        </button>
-      </div>
+      <section aria-labelledby="connections-heading">
+        <h2 id="connections-heading">Connections</h2>
+        {loadError ? (
+          <>
+            <p role="alert" className="alert">{loadError}</p>
+            <button type="button" onClick={() => {
+              setLoadError(null);
+              reload();
+            }}>Retry</button>
+          </>
+        ) : <p role="status">Loading connections…</p>}
+      </section>
     );
   }
-  if (!data) return <p role="status">Loading connections…</p>;
 
   return (
     <section aria-labelledby="connections-heading" className="connections">
       <h2 id="connections-heading">Connections</h2>
+      <p className="page-intro">Manage who can access your gifting profile and which assistants can act for you.</p>
       {alert && (
         <p role="alert" className="alert">
           {alert}
@@ -361,25 +367,8 @@ export function ConnectionsScreen() {
         {notice}
       </p>
 
-      <Section id="handle-heading" title="My handle">
-        {data.handle && (
-          <p>
-            Your handle is <strong>@{data.handle.handle}</strong>
-            {data.handle.discoverable ? " (discoverable)" : " (not discoverable)"}.
-          </p>
-        )}
-        <HandleForm
-          key={`${data.handle?.handle ?? ""}:${data.handle?.discoverable ?? ""}`}
-          current={data.handle}
-          onSaved={(h) => {
-            setNotice(`Handle saved: @${h.handle}.`);
-            setAlert(null);
-            reload();
-          }}
-        />
-      </Section>
-
       <Section id="incoming-heading" title="Incoming requests">
+        <p className="hint">Approval shares your eligible profile details with them. Access to their profile requires a separate approval.</p>
         {data.incoming.length === 0 ? (
           <p>No pending requests.</p>
         ) : (
@@ -429,46 +418,8 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
-      <Section id="outgoing-heading" title="My requests">
-        <RequestForm
-          onSent={(message) => {
-            setNotice(message);
-            setAlert(null);
-            reload();
-          }}
-        />
-        {data.outgoing.length === 0 ? (
-          <p>No outstanding requests.</p>
-        ) : (
-          <ul className="rows">
-            {data.outgoing.map((r) => (
-              <li key={r.id} className="row">
-                <PersonView person={r.target} />{" "}
-                <span className="badge">{r.status === "pending" ? "Pending" : "Approved"}</span>{" "}
-                <span className="hint">sent {formatTime(r.created_at)}</span>
-                {r.status === "pending" && (
-                  <div className="actions">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        void act(
-                          () => connectionsApi.cancel(r.id),
-                          `Cancelled the request to ${personName(r.target)}.`,
-                        )
-                      }
-                    >
-                      Cancel request
-                    </button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
-
       <Section id="people-heading" title="People who can see my profile">
+        <p className="hint">Connections can see details shared with Connections. Trusted Circle can also see details reserved for that circle. Revoking access stops future access through this connection.</p>
         {data.connections.length === 0 ? (
           <p>No connections yet.</p>
         ) : (
@@ -520,6 +471,65 @@ export function ConnectionsScreen() {
             ))}
           </ul>
         )}
+      </Section>
+
+      <Section id="outgoing-heading" title="My requests">
+        <p className="hint">Request access to someone else’s gifting profile using their exact handle.</p>
+        <RequestForm
+          onSent={(message) => {
+            setNotice(message);
+            setAlert(null);
+            reload();
+          }}
+        />
+        {data.outgoing.length === 0 ? (
+          <p>No outstanding requests.</p>
+        ) : (
+          <ul className="rows">
+            {data.outgoing.map((r) => (
+              <li key={r.id} className="row">
+                <PersonView person={r.target} />{" "}
+                <span className="badge">{r.status === "pending" ? "Pending" : "Approved"}</span>{" "}
+                <span className="hint">sent {formatTime(r.created_at)}</span>
+                {r.status === "pending" && (
+                  <div className="actions">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void act(
+                          () => connectionsApi.cancel(r.id),
+                          `Cancelled the request to ${personName(r.target)}.`,
+                        )
+                      }
+                    >
+                      Cancel request
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section id="handle-heading" title="My handle">
+        <p className="hint">Your handle helps people find your identity. Gifting profile access is managed separately.</p>
+        {data.handle && (
+          <p>
+            Your handle is <strong>@{data.handle.handle}</strong>
+            {data.handle.discoverable ? " (discoverable)" : " (not discoverable)"}.
+          </p>
+        )}
+        <HandleForm
+          key={`${data.handle?.handle ?? ""}:${data.handle?.discoverable ?? ""}`}
+          current={data.handle}
+          onSaved={(h) => {
+            setNotice(`Handle saved: @${h.handle}.`);
+            setAlert(null);
+            reload();
+          }}
+        />
       </Section>
 
       <Section id="blocked-heading" title="Blocked">
