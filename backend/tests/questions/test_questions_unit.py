@@ -510,6 +510,9 @@ def test_resolve_deadline_bounds() -> None:
 
 
 def test_request_validation() -> None:
+    for nonpositive_hours in (-1, 0):
+        with pytest.raises(ValueError):
+            request(expires_in_hours=nonpositive_hours)
     with pytest.raises(ValueError):
         request(expires_at=datetime(2026, 11, 3, 12))  # naive
     with pytest.raises(ValueError):

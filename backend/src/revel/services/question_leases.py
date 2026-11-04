@@ -68,6 +68,7 @@ from revel.services.questions import (
     _require_agent_principal,
     expire_question_if_due,
     expire_stale_leases,
+    requester_can_ask,
     respond_allowed,
 )
 
@@ -267,18 +268,27 @@ def _load(session: Session, assignment_id: UUID) -> _Row | None:
 async def load_own_assignment(
     principal: PrincipalLike, assignment_id: UUID, deps: QuestionDeps
 ) -> _Row:
-    """The caller's own assignment, after re-checking ``respond`` (outside any transaction)."""
+    """The caller's own assignment, after checking respondent and requester authorization."""
     delegation_id = _require_agent_principal(principal)
     with deps.sessionmaker() as session:
-        row = await _in_thread(lambda: _load(session, assignment_id))
-        session.rollback()
-    if row is None or row.respondent_delegation_id != delegation_id:
-        raise AssignmentNotFound()
+
+        def read() -> tuple[_Row, UUID, UUID]:
+            row = _load(session, assignment_id)
+            if row is None or row.respondent_delegation_id != delegation_id:
+                raise AssignmentNotFound()
+            requester_user_id, profile_id = session.execute(
+                select(Question.requester_user_id, Question.profile_id).where(
+                    Question.id == row.question_id
+                )
+            ).one()
+            return row, requester_user_id, profile_id
+
+        row, requester_user_id, profile_id = await _in_thread(read)
     try:
         allowed = await respond_allowed(principal, row.question_id, fga=deps.fga)
     except RespondCheckUnavailable as exc:
         raise _authz_unavailable(exc) from None
-    if not allowed:
+    if not allowed or not await requester_can_ask(requester_user_id, profile_id, fga=deps.fga):
         raise QuestionNotPermitted()
     return row
 

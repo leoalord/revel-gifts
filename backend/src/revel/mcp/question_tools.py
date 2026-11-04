@@ -11,7 +11,7 @@ error text or private purpose values.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
 from mcp.server.mcpserver import MCPServer
@@ -23,9 +23,8 @@ from revel.auth.deps import principal_from_mcp_context
 from revel.auth.runtime import runtime_for
 from revel.services import answers, question_leases, questions
 from revel.services.answers import (
-    AnswerOut,
     EvidenceIn,
-    QuestionStatusResponse,
+    GetQuestionResponse,
     SubmitAnswerRequest,
     SubmitAnswerResponse,
 )
@@ -47,14 +46,16 @@ from revel.services.questions import (
 )
 
 SUBMIT_QUESTION_DESCRIPTION = (
-    "Ask a question about a person you are connected with on Revel (by their exact handle, or "
-    "profile_id). Put ONLY what you want to know in requested_information (e.g. 'What flowers "
-    "does she like?'). Put the occasion, budget, candidate gift ideas and any other planning "
+    "Ask a question about a person you are connected with on Revel. Give exactly one of "
+    "handle (their exact handle) or profile_id. Put ONLY what you want to know in "
+    "requested_information (e.g. 'What flowers does she like?'). Put the occasion, budget, "
+    "candidate gift ideas and any other planning "
     "context in private_purpose: Revel uses it to route and minimize the question and never "
     "shows it to the person or their assistants. Revel returns the profile facts you may "
     "already see, then routes a purpose-minimized question to the person's own assistants; "
-    "their assistants see who is asking. Optional deadline: expires_at (timezone-aware) or "
-    "expires_in_hours (default 72h, 1h to 14 days; out-of-range values are clamped). "
+    "their assistants see who is asking. Give at most one deadline: expires_at (timezone-aware) "
+    "or expires_in_hours (positive and finite). The default is 72h; valid requests are "
+    "clamped to 1h to 14 days. "
     "escalation_permitted/escalation_context are stored for later but not used yet."
 )
 GET_UPDATES_DESCRIPTION = (
@@ -99,10 +100,11 @@ SUBMIT_ANSWER_DESCRIPTION = (
     "sentence or two. evidence (at least one item; cite minimally, only what the answer relies "
     "on): either {claim_id} of a profile fact you cite, or {category, proposed_audience, "
     "evidence_type (explicit/observed/inferred), observed_month (YYYY-MM, optional)} for "
-    "something not on the profile. No quotes, sources or extra personal details. "
-    "proposed_audience may not be more open than the owner's policy for the category. To keep "
-    "a new durable fact on the profile, add it with add_facts first and cite its claim_id. "
-    "Late answers (past the question deadline) are refused."
+    "independently authorized off-profile knowledge. Never relabel a pending, private, removed "
+    "or otherwise unusable claim as inline evidence. No quotes, sources or extra personal "
+    "details. proposed_audience may not be more open than the owner's policy for the category. "
+    "To keep a new durable fact on the profile, add it with add_facts first and cite its "
+    "claim_id if it is usable. Expired leases and late answers are refused."
 )
 GET_QUESTION_DESCRIPTION = (
     "Check a question you asked and retrieve its answer when there is one. Returns the status "
@@ -111,13 +113,6 @@ GET_QUESTION_DESCRIPTION = (
     "(it cannot be shared with you now) or 'not_answered' (no answer yet). Revel re-checks "
     "your current access and the facts the answer relies on every time."
 )
-
-
-class GetQuestionResponse(QuestionStatusResponse):
-    """``get_question_status`` fields plus the ``get_answer`` outcome, both unchanged."""
-
-    result: Literal["answer", "no_shareable_answer", "not_answered"]
-    answer: AnswerOut | None = None
 
 
 # Shared helpers for per-action validation (same wording in the F5/F6 action tools). Codes use
@@ -349,13 +344,7 @@ def register(server: MCPServer, settings: Any) -> None:
         return await _call(answers.submit_answer, assignment_id, request)
 
     async def get_question_tool(question_id: UUID) -> GetQuestionResponse:
-        status = await _call(answers.get_question_status, question_id)
-        # get_answer keeps its re-check and no_shareable_answer semantics; it records an
-        # answer_retrieved event only when it releases an answer.
-        outcome = await _call(answers.get_answer, question_id)
-        return GetQuestionResponse(
-            **status.model_dump(), result=outcome.result, answer=outcome.answer
-        )
+        return await _call(answers.get_question, question_id)
 
     # Not read-only (it changes lease state). Not destructive in MCP's sense: decline and
     # release only end the caller's OWN work item on one assignment; they delete no data, the

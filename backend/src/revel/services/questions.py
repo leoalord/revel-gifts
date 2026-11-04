@@ -361,10 +361,10 @@ async def respond_allowed(
         raise RespondCheckUnavailable() from None
 
 
-async def requester_can_view(
+async def requester_can_ask(
     requester_user_id: UUID, profile_id: UUID, *, fga: FgaClient | None = None
 ) -> bool:
-    """Whether the requester (as a user) still holds any tier on the profile. An OpenFGA
+    """Whether the requester (as a user) still holds a connection tier on the profile. An OpenFGA
     outage raises ``QuestionServiceUnavailable`` (never a silent hide or show)."""
     requester = Principal(user_id=requester_user_id, agent_id=None, delegation_id=None, via="ui")
     try:
@@ -373,7 +373,7 @@ async def requester_can_view(
         return False
     except Exception as exc:
         raise _authz_unavailable(exc) from None
-    return tier is not ViewerTier.none
+    return tier in REQUESTER_TIERS
 
 
 def acting_agent_label(name: str | None, client_id: str | None) -> str:
@@ -1020,11 +1020,9 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
             session.rollback()
             raise
 
-    # Re-check respond at read time, outside any transaction. Then hide items whose requester
-    # can no longer view the profile at all (tier none: revoked, blocked or never connected):
-    # a respondent should not spend effort, or contact its user, for an answer that could never
-    # be released. Checked as the requester USER (not the asking delegation), the subject
-    # ``can_release_answer`` ultimately needs a tier for; cached per (requester, profile).
+    # Re-check respond and the requester's connection tier outside any transaction. Public
+    # visibility alone does not authorize an outstanding question or human outreach. Check the
+    # requester as a user, with one result per (requester, profile).
     permitted: list[_InboxRow] = []
     requester_visible: dict[tuple[UUID, UUID], bool] = {}
     try:
@@ -1039,7 +1037,7 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
                     continue
                 key = (row.requester_user_id, row.profile_id)
                 if key not in requester_visible:
-                    requester_visible[key] = await requester_can_view(
+                    requester_visible[key] = await requester_can_ask(
                         row.requester_user_id, row.profile_id, fga=deps.fga
                     )
                 if requester_visible[key]:

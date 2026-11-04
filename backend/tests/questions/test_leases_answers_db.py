@@ -21,7 +21,7 @@ from questions_support import (
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from revel.auth.authz import tier_tuple
+from revel.auth.authz import public_tuples, tier_tuple
 from revel.db.enums import Audience, ConnectionTier
 from revel.db.models import (
     Answer,
@@ -32,11 +32,13 @@ from revel.db.models import (
     Question,
     QuestionEvent,
 )
+from revel.services import answers
 from revel.services.answers import (
     InvalidEvidence,
     QuestionNotFound,
     SubmitAnswerRequest,
     get_answer,
+    get_question,
     get_question_status,
     submit_answer,
 )
@@ -590,6 +592,32 @@ async def test_late_submission_is_rejected(
     assert assignment(factory, a1).status == "claimed"
 
 
+@pytest.mark.parametrize("cross_question_deadline", [False, True], ids=["lease", "question"])
+async def test_answer_rechecks_expiry_after_evidence_validation(
+    cross_question_deadline, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world, hours=1)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0 + timedelta(minutes=55) if cross_question_deadline else T0)
+    d = deps(factory, clock)
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    validate = answers._validate_evidence
+
+    async def validate_then_advance(*args, **kwargs):
+        result = await validate(*args, **kwargs)
+        clock.advance(LEASE_DURATION)
+        return result
+
+    monkeypatch.setattr(answers, "_validate_evidence", validate_then_advance)
+    with pytest.raises(QuestionExpired if cross_question_deadline else LeaseExpired):
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+    assert "answered" not in event_types(factory, question_id)
+
+
 async def test_renew_on_expired_lease_is_rejected(
     factory: sessionmaker[Session], fga: Any, world_builder: Any
 ) -> None:
@@ -897,6 +925,74 @@ async def _revoke_requester(factory: sessionmaker[Session], world: World, fga: A
     await fga.delete_tuples(
         [tier_tuple(world.profile.id, world.requester.id, ConnectionTier.CONNECTIONS)]
     )
+
+
+@pytest.mark.parametrize("public_profile", [False, True])
+async def test_cached_assignment_is_denied_after_requester_revocation(
+    public_profile, factory, fga, world_builder
+):
+    world = await world_builder()
+    if public_profile:
+        await fga.write_tuples(public_tuples(world.profile.id))
+    _, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    d = deps(factory)
+    assert [item.assignment_id for item in (await get_updates(respondent, deps=d)).items] == [
+        assignment_id
+    ]
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    await _revoke_requester(factory, world, fga)
+    assert (await get_updates(respondent, deps=d)).items == []
+    with pytest.raises(QuestionNotPermitted):
+        await claim_assignment(
+            respondent,
+            assignment_id,
+            ClaimRequest(human_contact=True, lease_version=lease.lease_version),
+            deps=d,
+        )
+    with pytest.raises(QuestionNotPermitted):
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+
+
+async def test_get_question_keeps_snapshot_when_answer_commits_during_read(
+    factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    requester = agent_principal(world.requester_d)
+    assignment_id = ids[world.owner_d1.id]
+    d = deps(factory)
+    lease = await claim_assignment(respondent, assignment_id, ClaimRequest(), deps=d)
+    read_question = answers._own_question
+
+    async def answer():
+        await submit_answer(
+            respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
+        )
+
+    def read_then_answer(*args):
+        result = read_question(*args)
+        anyio.from_thread.run(answer)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(answers, "_own_question", read_then_answer)
+        before = await get_question(requester, question_id, deps=d)
+    assert (before.status, before.answer_available, before.result, before.answer) == (
+        "open",
+        False,
+        "not_answered",
+        None,
+    )
+    assert "answer_retrieved" not in event_types(factory, question_id)
+    after = await get_question(requester, question_id, deps=d)
+    assert (after.status, after.answer_available, after.result) == ("answered", True, "answer")
+    assert after.answer is not None
+    assert event_types(factory, question_id).count("answer_retrieved") == 1
 
 
 async def _tighten_inline_policy(factory: sessionmaker[Session], world: World, fga: Any) -> None:
