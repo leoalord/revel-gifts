@@ -1,0 +1,69 @@
+:root {
+  color-scheme: light dark;
+  --background: #faf5ef;
+  --surface: #fffaf5;
+  --text: #30221d;
+  --muted: #624c43;
+  --accent: #9a3d2d;
+  --on-accent: #fff;
+  --border: #dfcfc4;
+  font: 100%/1.55 system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #201917;
+    --surface: #2a211e;
+    --text: #f7ece4;
+    --muted: #dbc5b8;
+    --accent: #ffab92;
+    --on-accent: #301912;
+    --border: #584339;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background); color: var(--text); }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.wrap { width: min(68rem, calc(100% - 2rem)); margin-inline: auto; }
+.top, .actions { display: flex; align-items: center; justify-content: space-between; gap: 0.9rem; }
+.top { padding-block: 1.1rem; }
+.wordmark { color: var(--text); font: 700 1.45rem Georgia, serif; text-decoration: none; }
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  padding: clamp(1.3rem, 5vw, 4rem);
+  border: 1px solid var(--border);
+  border-radius: 1.15rem;
+  background: var(--surface);
+}
+.eyebrow { margin: 0 0 0.5rem; color: var(--accent); font-weight: 650; }
+h1, h2 { font-family: Georgia, serif; line-height: 1.08; }
+h1 { margin: 0; font-size: clamp(2.6rem, 7vw, 5.4rem); }
+.intro { max-width: 36rem; font-size: 1.12rem; color: var(--muted); }
+.actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 1.5rem; }
+.button {
+  display: inline-block;
+  padding: 0.62rem 0.95rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.55rem;
+  background: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+  font-weight: 650;
+}
+.secondary { background: transparent; color: var(--accent); }
+.gift { width: 100%; color: var(--accent); }
+.how { padding-block: 1.8rem 2.5rem; }
+.how ol { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; padding-left: 1.35rem; }
+.how li { padding-right: 0.5rem; }
+.how li::marker { color: var(--accent); font-weight: 700; }
+.how h3, .how p { margin: 0 0 0.35rem; }
+.how p { color: var(--muted); }
+@media (max-width: 40rem) {
+  .hero, .how ol { grid-template-columns: 1fr; }
+  .gift { width: min(55%, 9rem); justify-self: end; }
+}
