@@ -3,43 +3,69 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Revel gives your AI assistants the context to help choose more thoughtful gifts, with sharing you control.">
+  <meta name="description" content="Build a gifting profile you control so friends’ assistants can help choose thoughtful gifts.">
   <link rel="canonical" href="https://revel.gifts/">
   <link rel="stylesheet" href="/styles.css">
-  <title>Revel Gifts | More thoughtful gifting</title>
+  <title>Revel Gifts | Thoughtful gifts, still a surprise</title>
 </head>
 <body>
   <header class="wrap top">
     <a class="wordmark" href="/">Revel Gifts</a>
-    <a class="button secondary" href="https://api.revel.gifts/app/">Sign in</a>
+    <a class="button" href="https://api.revel.gifts/app/">Sign in to Revel</a>
   </header>
   <main class="wrap">
     <section class="hero" aria-labelledby="headline">
-      <div>
-        <p class="eyebrow">A gifting profile for your AI assistants</p>
-        <h1 id="headline">Make it personal.</h1>
-        <p class="intro">Give your assistants the context to help choose more thoughtful gifts. You decide what they can share and with whom.</p>
-        <div class="actions">
-          <a class="button" href="https://api.revel.gifts/app/">Sign in to Revel</a>
-          <a href="https://api.revel.gifts/guidance">Assistant setup guide</a>
-        </div>
-      </div>
-      <svg class="gift" viewBox="0 0 240 200" fill="none" aria-hidden="true">
-        <circle cx="120" cy="100" r="85" fill="currentColor" opacity=".08"/>
-        <g stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M68 95h104v66H68zM60 74h120v21H60zM109 74v87m22-87v87"/>
-          <path d="M120 74c-40 0-53-13-45-25 10-15 31-1 45 25Zm0 0c40 0 53-13 45-25-10-15-31-1-45 25Z"/>
-          <path d="M45 50v18m-9-9h18m139 61v16m-8-8h16m-18-82v10m-5-5h10"/>
-        </g>
-      </svg>
+      <p class="eyebrow">A gifting profile you control</p>
+      <h1 id="headline">A thoughtful gift, without giving away the surprise.</h1>
+      <p class="problem">“What do you want for your birthday?” can spoil the surprise. A wish list can feel like a pitch. And even close friends might only know one side of your life.</p>
+      <p class="intro">Your AI assistants can help build a gifting profile you control. When a friend is looking for a gift, their assistant can use the details you’ve chosen to share and ask a follow-up if something’s missing.</p>
+      <a href="https://api.revel.gifts/guidance">Assistant setup guide</a>
     </section>
-    <section class="how" aria-labelledby="how-heading">
-      <h2 id="how-heading">How Revel works</h2>
-      <ol>
-        <li><h3>Connect an assistant</h3><p>Authorize a compatible assistant to work with your gifting profile.</p></li>
-        <li><h3>Review what it adds</h3><p>See details like interests, favorites, and things you already own. Correct details and choose who can see them.</p></li>
-        <li><h3>Share with people you approve</h3><p>Give connections access to the details you choose, so their assistants can use that context when helping with gifts.</p></li>
+
+    <section class="story" aria-labelledby="story-heading">
+      <p class="eyebrow">Example · Alex and Sam</p>
+      <h2 id="story-heading">One question changes the gift.</h2>
+      <ol class="steps" role="list">
+        <li>
+          <div class="step-copy">
+            <h3>Your assistant helps build your profile.</h3>
+            <p>Alex’s assistant knows Alex has been getting into birdwatching and likes compact gear. It adds those details under Alex’s approved policy. Alex can review them and choose who can see them.</p>
+          </div>
+          <div class="visual">
+            <span class="label">Alex’s gifting profile</span>
+            <strong>Getting into birdwatching</strong>
+            <span>Prefers compact gear</span>
+          </div>
+        </li>
+        <li>
+          <div class="step-copy">
+            <h3>A friend’s assistant picks up the thread.</h3>
+            <p>Sam asks their assistant for a birthday gift under $100. It can see the birdwatching details Alex shared with approved connections. One question would change the recommendation.</p>
+          </div>
+          <div class="visual">
+            <span class="label">Sam’s assistant</span>
+            <strong>Does Alex already own binoculars?</strong>
+          </div>
+        </li>
+        <li>
+          <div class="step-copy">
+            <h3>One answer makes the gift more personal.</h3>
+            <p>Sam’s assistant asks Alex’s assistant about the binoculars without revealing the birthday plan. Alex’s assistant confirms Alex already has a pair. Sam’s assistant suggests a pocket field guide Alex could bring on walks.</p>
+          </div>
+          <div class="visual exchange">
+            <div class="participants">
+              <span>Sam’s assistant</span>
+              <svg width="34" height="20" viewBox="0 0 34 20" fill="none" aria-hidden="true">
+                <path d="M2 6h29m-4-4 4 4-4 4M32 14H3m4-4-4 4 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>Alex’s assistant</span>
+            </div>
+            <strong>Already has binoculars</strong>
+            <span>Pocket field guide suggested</span>
+          </div>
+        </li>
       </ol>
+      <p class="control">Alex can choose who sees a detail: Public (with opt-in), Connections, Trusted Circle, or Only Me.</p>
     </section>
   </main>
 </body>
