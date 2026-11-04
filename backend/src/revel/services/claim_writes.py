@@ -310,10 +310,13 @@ def remove(
     actor: Actor,
     acceptance: AcceptanceMode,
     policy_version: int | None,
+    allow_pending: bool,
 ) -> Claim:
-    """Remove a live or pending fact (status ``removed``)."""
+    """Remove a live fact, or a pending fact from the browser owner path."""
     claim = lock_claim(session, profile_id, claim_id)
-    if claim.status not in _LIVE and claim.status != ClaimStatus.PENDING_REVIEW.value:
+    if claim.status not in _LIVE and not (
+        allow_pending and claim.status == ClaimStatus.PENDING_REVIEW.value
+    ):
         raise ClaimStateConflict(claim, "fact_not_removable")
     old = claim.status
     claim.status = ClaimStatus.REMOVED.value

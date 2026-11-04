@@ -38,6 +38,7 @@ def _reason_codes() -> frozenset[str]:
     # F5 #29 owner controls and the HTTP error bodies (detail strings and body keys).
     codes.add(profiles.OwnerConfirmationRequired.reason_code)
     codes.add(profile_tools._INVALID_REQUEST)  # RG-59 per-action validation errors
+    codes |= set(re.findall(r'"([a-z_]+): ', inspect.getsource(profile_tools)))
     api_source = inspect.getsource(profiles_api)
     codes |= set(re.findall(r'"detail": "([a-z_]+)"', api_source))
     codes |= set(re.findall(r'"([a-z_]+)": exc\.', api_source))
@@ -84,7 +85,10 @@ def _tool_params() -> frozenset[str]:
         properties = tool.parameters.get("properties", {})
         names |= set(properties)
         # Action values (RG-59 action tools), from each tool's own schema.
-        names |= set(properties.get("action", {}).get("enum", []))
+        action = properties.get("action", {})
+        names |= set(action.get("enum", []))
+        for option in action.get("anyOf", []):
+            names |= set(option.get("enum", []))
     return frozenset(names)
 
 

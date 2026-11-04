@@ -167,8 +167,8 @@ the fact), `PolicyVersionConflict` (409), `PolicyInvalid` / `InvalidRequest` (40
 | Contribution summary | in `get_profile()` | `GET /api/v1/profile/summary?since=` | `GET /api/ui/profile/summary?since=` |
 | Correct (new statement/details) | `add_facts` with `supersedes_id` | same | `PATCH /api/ui/profile/facts/{id}` |
 | Change audience | `update_fact(action="set_audience", audience)` (widening needs `owner_confirmed`) | `PATCH /api/v1/profile/facts/{id}/audience` (same) | `PATCH /api/ui/profile/facts/{id}` |
-| Remove (undo) | `remove_fact` (a pending fact is rejected instead, below) | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
-| Approve/reject pending | `update_fact(action="approve")` (needs `owner_confirmed`); reject: `remove_fact` | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
+| Remove (undo) | `remove_fact` (action=`"remove"`) | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
+| Approve/reject pending | `update_fact(action="approve")` (needs `owner_confirmed`); reject: `remove_fact(action="reject")` | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
 
 ### MCP tools (RG-59, #31)
 
@@ -180,8 +180,8 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
 | `get_profile` | `handle?: str` | no handle: owner view; handle: shared view | `readOnlyHint`, `idempotentHint` |
 | `add_facts` | `facts: [FactInput]` (1-20) | `{"results": [...]}` | write, not destructive, not idempotent |
 | `set_contribution_policy` | `expected_version` (required, nullable), policy fields, `owner_confirmed=false` | the policy response | write, not destructive, not idempotent |
-| `update_fact` | `fact_id`, `action: "set_audience" \| "approve"`, `audience?`, `owner_confirmed=false` | the fact | write, not destructive, not idempotent |
-| `remove_fact` | `fact_id`, `owner_confirmed=false` | the fact (`status: removed`) | `destructiveHint`, not idempotent |
+| `update_fact` | `fact_id`, `action: "set_audience" \| "approve"`, `audience?`, `owner_confirmed=false`, `expected_updated_at?` | the fact | write, not destructive, not idempotent |
+| `remove_fact` | `fact_id`, `action?: "remove" \| "reject"`, `owner_confirmed=false` | the fact (`status: removed`) | `destructiveHint`, not idempotent |
 
 - `get_profile()` (no handle) is the owner read: `get_my_profile` (F4 `owner_claims`) plus
   `get_policy`, as `{"profile_id", "policy_version", "facts", "summary", "policy"}`, where
@@ -193,14 +193,14 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
   unchanged, with the same non-revealing error. The two paths share no service call.
 - `update_fact`: `set_audience` requires `audience` (`public`, `connections`,
   `trusted_circle`, `only_me`) and is `set_fact_audience`; `approve` takes no `audience` and is
-  `approve_fact`. `owner_confirmed` works as before (widening and every approval).
-- `remove_fact`: a fact pending review is rejected through `reject_fact` (audit event
-  `rejected`; `owner_confirmed=true`, meant only for when the owner explicitly asked to reject
-  it, records acceptance `explicit`, else `automatic`). Any other fact goes through
-  `remove_fact` as before (`owner_confirmed` ignored). The adapter calls `reject_fact` first;
-  only its `fact_not_pending` refusal (rolled back, no event) falls back to `remove_fact`. Both
-  decide under the fact's row lock, so there is no stale status read. A fact already removed or
-  replaced is the usual conflict error.
+  `approve_fact`. The confirmed retry must include the fact revision `expected_updated_at`
+  supplied by the preview. A changed fact requires new confirmation.
+- `remove_fact(action="reject")` rejects only a pending fact (audit event `rejected`).
+  `owner_confirmed=true` records explicit acceptance on rejection and does not permit live
+  removal. `remove_fact(action="remove")` removes only a live fact. Legacy calls that omit
+  `action` with `owner_confirmed=true` select `reject`; other calls missing `action` fail with
+  `action_required`. A mismatch is a conflict checked under the fact lock, without falling
+  back to another operation.
 - Per-action validation happens before any service call. Errors are `ToolError`s with the
   `invalid_request` code shared with the F6/F7 tools:
   `invalid_request: Unknown action '<x>' for update_fact; expected one of: set_audience, approve.`,
@@ -208,8 +208,8 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
   `invalid_request: Action 'set_audience' requires audience to be one of: public, connections, trusted_circle, only_me.`,
   `invalid_request: Action 'approve' does not accept audience.` (the SDK prefixes tool errors
   with `Error executing tool <name>: `).
-- `get_profile` output has no fixed `outputSchema` (a plain object), because the owner and
-  shared views differ and a union would wrap the shared view in `{"result": ...}`.
+- `get_profile` publishes both top-level result shapes in `outputSchema`. Neither response is
+  wrapped in an extra `result` field.
 
 Removed in RG-59, not aliased: `get_my_profile`, `get_contribution_policy`,
 `set_fact_audience`, `review_pending_fact`. The HTTP routes are unchanged.
@@ -225,7 +225,7 @@ write still runs after `authz.require_contribute`, with all other validation unc
 
 For an agent principal, a change that **widens** access needs `owner_confirmed: true`:
 
-- the FIRST policy approval (it turns on automatic acceptance within the policy), whatever its flags;
+- the FIRST policy approval, including defaults and policies that disable automatic contributions;
 - `public_opt_in` false -> true;
 - loosening any category's effective audience (compared with the current policy);
 - `require_review_all` true -> false; removing a category's `require_review`;
@@ -255,14 +255,15 @@ Refusal (`reason_code` `owner_confirmation_required`):
 
 - HTTP **403** `{"detail": "owner_confirmation_required", "changes": ["Opt in to Public: ...",
   "Widen the default audience of 'Sizes' from Only me to Trusted Circle"]}`;
-- MCP `ToolError` whose text is `owner_confirmation_required: this widens access. Ask the owner,
-  quoting exactly these changes, and call again with owner_confirmed=true only if they clearly
-  agree:` followed by one `- <change>` line per change (same strings as `changes`).
+- MCP `ToolError` with code `owner_confirmation_required` and one `- <change>` line per
+  change (same strings as HTTP `changes`).
 
-Change strings name categories by label and audiences by label (never statement text); a
-replacement's approval names the fact id it replaces. The tool descriptions tell assistants to
-ask the owner, quote exactly what will change, and set `owner_confirmed` only after the owner
-clearly agrees in this conversation; never infer consent.
+For a fact approval or audience widening, HTTP also returns `expected_updated_at` and MCP
+prints the corresponding retry parameter on its own line. The preview identifies the fact
+by statement and describes its audience change or approval. Ask the owner, quote exactly
+what will change, and submit `owner_confirmed=true` with that same timestamp only after clear
+agreement. The locked fact must still match that revision or Revel returns a fresh preview
+for a widening action. A now-narrowing or no-op request with a stale revision conflicts.
 
 Audit: fact approvals/rejections/audience changes by an agent record `actor_user_id` (owner) and
 `actor_delegation_id` (the agent's delegation) in `claim_events`, with acceptance `explicit`
@@ -320,8 +321,9 @@ eligibility and the opt-in, and `sensitive` facts are always Only Me.
 the same body plus `"owner_confirmed": false` (default); the MCP `set_contribution_policy`
 takes the same fields as arguments (`expected_version` required, nullable) and returns the
 same shape. `POST /api/v1/profile/facts/{id}/approve` and `/reject` take an optional body
-`{"owner_confirmed": false}` → the fact; MCP `update_fact(fact_id, action="approve",
-owner_confirmed=false)` and `remove_fact(fact_id, owner_confirmed=false)` on a pending fact
+`{"owner_confirmed": false}` → the fact; approval also accepts `expected_updated_at` for a
+confirmed retry. MCP equivalents are `update_fact(action="approve")` and
+`remove_fact(action="reject")`
 → the fact. 409 `{"detail": "policy_version_conflict", "policy": {...}, "categories": [...], "provisional_caveat": "..."}` (the current `GET .../policy` shape plus `detail`).
 
 `POST .../facts` body `{"facts": [FactInput, ...]}` →
@@ -353,15 +355,17 @@ latest 50 events (`audience` is the new audience of an audience change, else nul
 changes create a replacement; audience-only changes update in place. Fact-level 409 bodies are
 `{"detail": "<reason>", "fact": {...current fact...}}` (reasons: `fact_not_editable`,
 `fact_not_removable`, `fact_not_pending`, `fact_not_live`, `superseded_fact_not_live`,
-`audience_not_allowed`). `PATCH /api/v1/profile/facts/{id}/audience` body `{"audience": ..., "owner_confirmed"?: false}`
-(MCP `update_fact(fact_id, action="set_audience", audience, owner_confirmed=false)`).
+`audience_not_allowed`, `fact_audience_changed`). `PATCH /api/v1/profile/facts/{id}/audience`
+accepts `audience`, `owner_confirmed`, and `expected_updated_at` (MCP
+`update_fact(action="set_audience")` uses the same fields).
 PATCH field errors are 400 with field-level locations, e.g.
 `{"detail": [{"loc": ["body", "statement"], "msg": "..."}]}` (also `["body", "details"]`,
 `["body", "observed_at"]`, `["body", "audience"]`); the audience message names the actual rule
 ("Sensitive facts are always Only Me", "This category can never be Public", "Public needs the
 owner's Public opt-in").
 
-`DELETE .../facts/{id}` → **200** with the removed fact (`"status": "removed"`). Removing it
+`DELETE /api/v1/profile/facts/{id}` removes a live fact. The browser owner can also remove a
+pending fact. Successful removal returns **200** with the removed fact (`"status": "removed"`). Removing it
 again (or a superseded fact) is **409** `{"detail": "fact_not_removable", "fact": {...}}`. The MCP
 `remove_fact` tool is therefore annotated `idempotentHint: false` (a repeat is a tool error).
 

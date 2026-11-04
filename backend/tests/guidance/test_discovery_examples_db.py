@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from revel.db.enums import Audience
-from revel.mcp import profile_tools
 from revel.services import profiles
 from revel.services.profiles import PolicyUpdate
 
@@ -144,25 +143,25 @@ async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
     assert len(refused.value.changes) == 1
     assert refused.value.changes[0].startswith("Approve the pending")
     approve2 = _owner_example("update_fact", "2", action="approve")
+    assert refused.value.expected_updated_at is not None
     approved_fact = await profiles.approve_fact(
-        session, agent, first_fact.claim_id, owner_confirmed=approve2["owner_confirmed"]
+        session,
+        agent,
+        first_fact.claim_id,
+        owner_confirmed=approve2["owner_confirmed"],
+        expected_updated_at=refused.value.expected_updated_at,
     )
     assert approved_fact.status.value == "active"
-    # The documented rejection: remove_fact on a pending fact, through F5's adapter path.
-    reject = _owner_example("remove_fact", None)
-    rejected = await profile_tools._remove_or_reject(
-        session, agent, second_fact.claim_id, owner_confirmed=reject["owner_confirmed"]
-    )
+    # The documented rejection and live removal are distinct one-call actions.
+    reject = _owner_example("remove_fact", None, action="reject")
+    assert "owner_confirmed" not in reject
+    rejected = await profiles.reject_fact(session, agent, second_fact.claim_id)
     assert rejected.status.value not in ("pending_review", "active")
-    # Repeating it is a conflict (documented: do not retry blindly; re-read the profile).
     with pytest.raises(profiles.FactConflict):
-        await profile_tools._remove_or_reject(
-            session, agent, second_fact.claim_id, owner_confirmed=reject["owner_confirmed"]
-        )
-    # remove_fact on a live fact removes it (the approved one), with no confirmation.
-    removed = await profile_tools._remove_or_reject(
-        session, agent, approved_fact.id, owner_confirmed=False
-    )
+        await profiles.reject_fact(session, agent, second_fact.claim_id)
+    remove = _owner_example("remove_fact", None, action="remove")
+    assert "owner_confirmed" not in remove
+    removed = await profiles.remove_fact(session, agent, approved_fact.id)
     assert removed.status.value == "removed"
 
     # Widening a fact's audience: step 1 refused with one change, step 2 succeeds.
@@ -181,7 +180,13 @@ async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
         )
     assert len(refused.value.changes) == 1 and refused.value.changes[0].startswith("Widen")
     widen2 = _owner_example("update_fact", "2", action="set_audience")
+    assert refused.value.expected_updated_at is not None
     widened = await profiles.set_fact_audience(
-        session, agent, added.claim_id, Audience(widen2["audience"]), owner_confirmed=True
+        session,
+        agent,
+        added.claim_id,
+        Audience(widen2["audience"]),
+        owner_confirmed=widen2["owner_confirmed"],
+        expected_updated_at=refused.value.expected_updated_at,
     )
     assert widened.audience.value == widen2["audience"]
