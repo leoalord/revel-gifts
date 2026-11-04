@@ -196,14 +196,6 @@ h4 {
   font-size: 0.9rem;
 }
 
-.footer {
-  margin-top: 2rem;
-  padding: 0.75rem 0;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-weight: 600;
-}
-
 /* --- forms ----------------------------------------------------------------------------- */
 
 fieldset {
