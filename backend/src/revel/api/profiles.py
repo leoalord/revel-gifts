@@ -25,7 +25,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy.orm import Session
 
 from revel.auth.authz import AuthorizationDenied
@@ -65,9 +65,14 @@ class FactsBody(BaseModel):
     facts: list[FactInput] = Field(min_length=1, max_length=profiles.MAX_FACTS_PER_BATCH)
 
 
-class AudienceBody(BaseModel):
+class FactConfirmation(OwnerConfirmation):
+    expected_updated_at: AwareDatetime | None = Field(
+        default=None, description="The exact fact revision supplied in the confirmation preview."
+    )
+
+
+class AudienceBody(FactConfirmation):
     audience: Audience
-    owner_confirmed: bool = Field(default=False, description=profiles.OWNER_CONFIRMED_DESCRIPTION)
 
 
 async def _call[T](operation: Awaitable[T], response: Response) -> T | JSONResponse:
@@ -78,7 +83,9 @@ async def _call[T](operation: Awaitable[T], response: Response) -> T | JSONRespo
     try:
         return await operation
     except profiles.OwnerConfirmationRequired as exc:
-        body = {"detail": exc.reason_code, "changes": exc.changes}
+        body: dict[str, Any] = {"detail": exc.reason_code, "changes": exc.changes}
+        if exc.expected_updated_at is not None:
+            body["expected_updated_at"] = exc.expected_updated_at.isoformat()
         return _with_cookies(
             JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content=body), response
         )
@@ -162,7 +169,12 @@ async def api_set_audience(
 ) -> Any:
     return await _call(
         profiles.set_fact_audience(
-            session, principal, fact_id, body.audience, owner_confirmed=body.owner_confirmed
+            session,
+            principal,
+            fact_id,
+            body.audience,
+            owner_confirmed=body.owner_confirmed,
+            expected_updated_at=body.expected_updated_at,
         ),
         response,
     )
@@ -176,6 +188,7 @@ async def api_remove_fact(
 
 
 OptionalConfirmation = Annotated[OwnerConfirmation | None, Body()]
+OptionalFactConfirmation = Annotated[FactConfirmation | None, Body()]
 
 
 @api.post("/facts/{fact_id}/approve", response_model=FactOut)
@@ -184,11 +197,18 @@ async def api_approve_fact(
     fact_id: UUID,
     principal: CurrentPrincipal,
     session: DbSession,
-    body: OptionalConfirmation = None,
+    body: OptionalFactConfirmation = None,
 ) -> Any:
     confirmed = body is not None and body.owner_confirmed
     return await _call(
-        profiles.approve_fact(session, principal, fact_id, owner_confirmed=confirmed), response
+        profiles.approve_fact(
+            session,
+            principal,
+            fact_id,
+            owner_confirmed=confirmed,
+            expected_updated_at=body.expected_updated_at if body is not None else None,
+        ),
+        response,
     )
 
 

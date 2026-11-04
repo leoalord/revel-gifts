@@ -170,9 +170,12 @@ class OwnerConfirmationRequired(NotAllowed):
 
     reason_code = "owner_confirmation_required"
 
-    def __init__(self, changes: Sequence[str]) -> None:
+    def __init__(
+        self, changes: Sequence[str], *, expected_updated_at: datetime | None = None
+    ) -> None:
         super().__init__(self.reason_code)
         self.changes = list(changes)
+        self.expected_updated_at = expected_updated_at
 
 
 class PolicyInvalid(ProfileServiceError):
@@ -613,15 +616,19 @@ def _quoted(spec: CategorySpec) -> str:
 
 
 def policy_widening_changes(old: PolicyView, new: PolicyView) -> list[str]:
-    """Every change from ``old`` to ``new`` that widens access, in plain words (empty when the
-    write only narrows or changes nothing). The first approval always widens: it turns on
-    automatic sharing of assistants' facts within the policy."""
+    """List the first approval and each later setting change that widens access."""
     changes: list[str] = []
     if not old.approved:
-        changes.append(
-            "Approve the contribution policy for the first time: facts your assistants add "
-            "within it are then accepted and shared automatically, without your review"
-        )
+        if not new.enrichment_enabled:
+            effect = "assistant contributions are disabled"
+        elif new.require_review_all:
+            effect = "every assistant contribution is held for your review"
+        else:
+            effect = (
+                "routine assistant contributions within the policy can be accepted and "
+                "shared automatically where the policy allows"
+            )
+        changes.append(f"Approve the contribution policy for the first time: {effect}")
     if new.public_opt_in and not old.public_opt_in:
         changes.append("Opt in to Public: eligible categories may be shared with anyone")
     if old.require_review_all and not new.require_review_all:
@@ -1515,6 +1522,19 @@ def _spec_of(claim: Claim) -> CategorySpec:
     return spec
 
 
+def _require_fact_confirmation(
+    principal: PrincipalLike,
+    claim: Claim,
+    owner_confirmed: bool,
+    expected_updated_at: datetime | None,
+    change: str,
+) -> None:
+    if not _is_owner_ui(principal) and (
+        not owner_confirmed or claim.updated_at != expected_updated_at
+    ):
+        raise OwnerConfirmationRequired([change], expected_updated_at=claim.updated_at)
+
+
 async def set_fact_audience(
     session: Session,
     principal: PrincipalLike,
@@ -1522,10 +1542,11 @@ async def set_fact_audience(
     audience: Audience,
     *,
     owner_confirmed: bool = False,
+    expected_updated_at: datetime | None = None,
 ) -> FactOut:
     """Change a fact's audience in place, within the category's allowed audiences. The owner
     in the browser may widen; the owner's agent may narrow freely and widen only with
-    ``owner_confirmed`` (else ``OwnerConfirmationRequired``)."""
+    ``owner_confirmed`` and the fact revision from the preview."""
 
     def change(profile_id: UUID, policy: PolicyView) -> Claim:
         def check(claim: Claim) -> None:
@@ -1536,14 +1557,20 @@ async def set_fact_audience(
                 )
             current = Audience(claim.audience)
             if current.rank > audience.rank:
-                _require_confirmation(
-                    principal,
-                    owner_confirmed,
-                    [
-                        f"Widen who can see this {_quoted(spec)} fact from "
-                        f"{AUDIENCE_LABELS[current]} to {AUDIENCE_LABELS[audience]}"
-                    ],
+                pending = claim.status == ClaimStatus.PENDING_REVIEW.value
+                change = (
+                    f"Widen who can see this {_quoted(spec)} fact ({claim.statement!r}) from "
+                    f"{AUDIENCE_LABELS[current]} to {AUDIENCE_LABELS[audience]}"
                 )
+                if pending:
+                    change += "; the fact stays pending review and is not shared yet"
+                elif claim.status == ClaimStatus.PROVISIONAL.value:
+                    change += "; provisional sharing still depends on your policy"
+                _require_fact_confirmation(
+                    principal, claim, owner_confirmed, expected_updated_at, change
+                )
+            elif expected_updated_at is not None and claim.updated_at != expected_updated_at:
+                raise claim_writes.ClaimStateConflict(claim, "fact_audience_changed")
 
         return claim_writes.set_audience(
             session,
@@ -1560,7 +1587,7 @@ async def set_fact_audience(
 
 
 async def remove_fact(session: Session, principal: PrincipalLike, claim_id: UUID) -> FactOut:
-    """Remove (undo) a live or pending fact; the owner or the owner's agent."""
+    """Remove a live fact. A pending fact needs explicit rejection on agent surfaces."""
     owner_ui = _is_owner_ui(principal)
 
     def change(profile_id: UUID, policy: PolicyView) -> Claim:
@@ -1570,6 +1597,7 @@ async def remove_fact(session: Session, principal: PrincipalLike, claim_id: UUID
             claim_id=claim_id,
             actor=_actor(principal),
             acceptance=AcceptanceMode.EXPLICIT if owner_ui else AcceptanceMode.AUTOMATIC,
+            allow_pending=owner_ui,
             policy_version=policy.version,
         )
 
@@ -1577,11 +1605,16 @@ async def remove_fact(session: Session, principal: PrincipalLike, claim_id: UUID
 
 
 async def approve_fact(
-    session: Session, principal: PrincipalLike, claim_id: UUID, *, owner_confirmed: bool = False
+    session: Session,
+    principal: PrincipalLike,
+    claim_id: UUID,
+    *,
+    owner_confirmed: bool = False,
+    expected_updated_at: datetime | None = None,
 ) -> FactOut:
     """Approve a pending fact (explicit acceptance); a replacement retires its target
     atomically. The owner in the browser, or the owner's agent with ``owner_confirmed``
-    (always widening: the fact starts being shared), else ``OwnerConfirmationRequired``."""
+    and the fact revision from the preview, else ``OwnerConfirmationRequired``."""
 
     def change(profile_id: UUID, policy: PolicyView) -> Claim:
         def check(claim: Claim) -> None:
@@ -1590,12 +1623,13 @@ async def approve_fact(
             if not policy.audience_allowed(spec, audience):
                 raise claim_writes.ClaimStateConflict(claim, "audience_not_allowed")
             what = (
-                f"Approve the pending {_quoted(spec)} fact: it becomes active and visible to "
+                f"Approve the pending {_quoted(spec)} fact ({claim.statement!r}): "
+                f"it becomes active and visible to "
                 f"{AUDIENCE_LABELS[audience]}"
             )
             if claim.supersedes_id is not None:
                 what += f", replacing fact {claim.supersedes_id}"
-            _require_confirmation(principal, owner_confirmed, [what])
+            _require_fact_confirmation(principal, claim, owner_confirmed, expected_updated_at, what)
 
         return claim_writes.approve(
             session,
