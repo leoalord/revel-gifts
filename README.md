@@ -1,23 +1,21 @@
 # Revel Gifts
 
-Agent-first gifting context and collaboration. This repository contains a backend scaffold (FastAPI + MCP), local services, implementation guidance and historical research reports; no verified deployed integration exists yet.
+Agent-first gifting context and collaboration. The repo contains the FastAPI and MCP backend, React interface, OpenFGA model, and local and GCP infrastructure.
 
 Coding agents and orchestrators: read [AGENTS.md](AGENTS.md) for source references, ownership and review gates.
 
 ## Source of truth
 
-[Notion](https://app.notion.com/p/4092bade7f31805191e7c4c884960908) owns product decisions and the agreed stack. The [MVP page](https://app.notion.com/p/40b2bade7f3181ad84f0d14cf641fec7) owns build scope, priorities and acceptance criteria. Repository documentation describes code organization and operation; it does not independently define product requirements. If it conflicts with Notion, follow the owning Notion page and reconcile the repository guidance before implementation. Do not infer new requirements from the historical research reports.
+[Notion](https://app.notion.com/p/4092bade7f31805191e7c4c884960908) owns product decisions and the agreed stack. The [MVP page](https://app.notion.com/p/40b2bade7f3181ad84f0d14cf641fec7) owns build scope, priorities and acceptance criteria. Repository documentation describes code organization and operation; it does not independently define product requirements. If it conflicts with Notion, follow the owning Notion page and reconcile the repository guidance before implementation. Historical research is available in [Notion](https://app.notion.com/p/40b2bade7f3181cf9709deca51417f33).
 
 ## Layout
 
 | Path | Responsibility |
 | --- | --- |
-| `backend/` | Python application, MCP/HTTP adapters, shared services and persistence |
+| `backend/` | Python application, MCP/HTTP adapters, shared services, persistence and [product skills](backend/src/revel/guidance/skills/index.md) |
 | `frontend/` | Human interface |
-| `agent-guidance/` | Versioned agent-facing workflow instructions |
 | `authorization/` | Executable authorization models and permission cases |
-| `infra/` | Infrastructure as code |
-| `dev/` | Local development and synthetic fixtures |
+| `infra/` | Local service setup and GCP infrastructure as code |
 | `docs/` | Implementation and operating guidance |
 
-Keep the remote repository private as directed by Notion. Setup: [backend](backend/README.md), [local services](dev/README.md). See [deployment guidance](docs/deployment.md).
+Keep the remote repository private as directed by Notion. Setup: [backend](backend/README.md), [local services](infra/local/README.md). See [deployment guidance](docs/deployment.md).

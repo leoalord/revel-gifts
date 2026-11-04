@@ -1,4 +1,4 @@
-name: Revel Gifts authorization model v1
+name: Owner and delegation permissions
 model_file: ../model.fga
 # agent:<id> is an agent_delegations.id (one per user and OAuth client pair).
 # Agent connect writes agent:<d>#acts_for@user:<u> and user:<u>#delegate@agent:<d>;

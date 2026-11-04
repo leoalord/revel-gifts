@@ -377,10 +377,6 @@ thead th {
   padding: 0.75rem 1rem;
 }
 
-.glance h4 {
-  margin-top: 0;
-}
-
 .glance-pending {
   color: var(--text-secondary);
 }
@@ -406,6 +402,7 @@ thead th {
 }
 
 .glance h4 {
+  margin-top: 0;
   font-size: var(--fs-small);
   margin-bottom: 0.35rem;
 }

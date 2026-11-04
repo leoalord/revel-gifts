@@ -6,6 +6,9 @@ Applying Terraform, DNS changes and domain verification need explicit user appro
 
 ## Layout
 
+- [`local/`](local/README.md) contains the setup notes and PostgreSQL initialization script for local Compose.
+- `terraform/` contains the GCP configuration described below.
+
 `infra/terraform/` (project `revel-gifts`, region `us-central1`):
 
 | File | Contents |
@@ -83,7 +86,7 @@ A deleted Cloud SQL instance name (`revel-db`) **cannot be reused for up to abou
 
 ## Images
 
-**Application**: the `Dockerfile` at the repository root (build context is the repo root, so `backend/` and `authorization/` are both available). It is a multi-stage uv build (`ghcr.io/astral-sh/uv:0.10.2`, `python:3.12-slim-bookworm`), `uv sync --locked --no-dev --no-editable`, runs as non-root `revel` (uid 10001) with `WORKDIR /app/backend` and the venv on `PATH`, so `uvicorn` and `alembic` resolve from there. It listens on `$PORT` (default 8080) with `--proxy-headers`. `.dockerignore` excludes every `.env`/`.env.*`, `.git`, `.claude/`, `infra/` (state, plans, tfvars) and research notes; settings come only from the environment. The image must be `linux/amd64`:
+**Application**: the `Dockerfile` at the repository root (build context is the repo root, so `backend/` and `authorization/` are both available). It is a multi-stage uv build (`ghcr.io/astral-sh/uv:0.10.2`, `python:3.12-slim-bookworm`), `uv sync --locked --no-dev --no-editable`, runs as non-root `revel` (uid 10001) with `WORKDIR /app/backend` and the venv on `PATH`, so `uvicorn` and `alembic` resolve from there. It listens on `$PORT` (default 8080) with `--proxy-headers`. `.dockerignore` excludes every `.env`/`.env.*`, `.git`, `.claude/`, `infra/` (state, plans, tfvars); settings come only from the environment. The image must be `linux/amd64`:
 
 ```sh
 SHA=$(git rev-parse --short HEAD)
@@ -99,7 +102,6 @@ docker buildx build --platform linux/amd64 --load -t revel-app:test .
 docker run -d --rm --name revel-test -p 18080:8080 \
   -e APP_ENV=development -e PUBLIC_BASE_URL=http://localhost:8080 -e PORT=8080 revel-app:test
 curl -fsS http://localhost:18080/health
-npx -y @modelcontextprotocol/inspector --cli http://localhost:18080/mcp --transport http --method tools/list
 docker stop revel-test
 ```
 
@@ -280,7 +282,7 @@ Non-secret Muse Spark settings are Terraform variables; each sets its env var on
 
 | Env var on `revel-app` | Source | App default when unset |
 | --- | --- | --- |
-| `FIREWORKS_MODEL` | variable `fireworks_model` | none |
+| `FIREWORKS_MODEL` | variable `fireworks_model` | `DEFAULT_FIREWORKS_MODEL` in `services/muse_spark.py` |
 | `META_MODEL` | variable `meta_model` | none |
 | `MUSE_SPARK_PROVIDER` | variable `muse_spark_provider` (`fireworks` or `meta`) | `fireworks` |
 | `MUSE_SPARK_TIMEOUT_SECONDS` | variable `muse_spark_timeout_seconds` (string, e.g. `"8"`) | `8.0` |
@@ -293,7 +295,7 @@ muse_spark_provider = "fireworks"
 app_secret_env      = ["WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD", "FIREWORKS_API_KEY"]
 ```
 
-Add the `FIREWORKS_API_KEY` version first (`add_secret FIREWORKS_API_KEY`). Provider `meta` needs a `META_API_KEY` secret version and `META_API_KEY` in `app_secret_env` (plus `meta_model`) before it works in production. Plan fails validation if a model variable still contains the example `replace-with-...` placeholder.
+Add the `FIREWORKS_API_KEY` version first (`add_secret FIREWORKS_API_KEY`). Direct Meta settings are reserved. The current client supports Fireworks. Plan fails validation if a model variable still contains the example `replace-with-...` placeholder.
 
 ## Custom domain (api.revel.gifts)
 
@@ -349,3 +351,26 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 curl -s -o /dev/null -w '%{http_code}\n' "$(terraform output -raw openfga_url)/stores"    # expect 403
 gcloud run services get-iam-policy revel-openfga --region us-central1                      # only revel-app SA
 ```
+
+## Demo reset
+
+`python -m revel.demo.reset` (F10, [Build Task #23](https://app.notion.com/p/40c2bade7f31816f9d2dd8fbad4ed035)) restores the three demo personas (`leo_walker`, `sam_demo`, `jordan_demo`) to the recording baseline. It is a dry run by default: it prints planned counts, request ids, the seeds and the scope-check result, and writes nothing.
+
+```sh
+# Dev, through the existing job (DATABASE_URL, PUBLIC_BASE_URL and OpenFGA come from the job):
+gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+  --args="-m,revel.demo.reset,--target,dev"                                   # dry run
+gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+  --args="-m,revel.demo.reset,--target,dev,--apply,--no-active-hold"          # apply (seeds)
+gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
+  --args="-m,revel.demo.reset,--target,dev,--apply,--no-active-hold,--no-seed" # live-first
+```
+
+**Live facts, prepared backup.** For the recording, reset with `--no-seed` (the dry run takes it too). Phases A and B run as usual and no prepared facts are added. Leo's profile starts with 0 facts, Leo's Muse adds them live during the demo, and the manifest is empty. Verify then checks that Sam is denied, that Jordan is permitted at trusted_circle, that no demo questions are open and that Leo has 0 active claims. If the live take fails, the fallback is a normal run without `--no-seed`. It clears whatever Muse added and seeds the six prepared facts, with their manifest. No other mode is needed.
+
+- `--target dev` must match `PUBLIC_BASE_URL` (`https://api.revel.gifts`). `--apply` also needs `--no-active-hold`: run it only when no verification hold is announced, because it changes shared test state.
+- It refuses (exit 2, nothing written; the dry run exits 2 too) in these cases: a handle is missing, a handle resolves to a user other than the pinned id in `revel/demo/seed.py`, the Jordan→Leo Trusted Circle baseline is missing or at the wrong tier, or any row in scope names a user outside the three. Connection requests that involve anyone else are left alone and counted.
+- With `--apply` it deletes the demo questions, the demo profiles' facts and every contribution policy version except the earliest. It clears requests among the demo users through the connections service, keeping Jordan's Trusted Circle access to Leo's profile (the baseline is never created). It then runs `fga_reconcile` (window 0, no prune), re-seeds six synthetic "prepared" facts through `add_facts`, and checks access: Sam is denied, and Jordan sees the Trusted Circle fact. Users, agents, delegations, delegation sessions, handles and profiles are never touched.
+- Output carries counts and ids only. The JSON block between `BEGIN/END DEMO DISCLOSURE MANIFEST` lists each prepared fact's seed key, claim id and audience for #23. Facts Muse contributes during the recording are live.
+- Exit codes: 0 success, 1 a phase or check failed (a database error prints only the phase and exception class, and that phase's transaction rolls back), 2 refused (nothing written).
+- Tests: From `backend/`, run `REVEL_TEST_DATABASE_URL=… uv run pytest tests/demo` serially against a [disposable database](../backend/README.md). These tests downgrade and truncate that database. OpenFGA is faked.
