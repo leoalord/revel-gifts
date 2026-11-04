@@ -76,11 +76,10 @@ from revel.services.categories import CategoryError
 from revel.services.profiles import effective_max_audience, validate_category
 from revel.services.question_leases import (
     HELD_LEASE_STATUSES,
-    LeaseExpired,
-    QuestionExpired,
     StaleLease,
     _versioned_update,
     _write,
+    check_write_expiry,
     held_lease,
     load_own_assignment,
     open_question_expiry,
@@ -351,10 +350,7 @@ async def submit_answer(
         # Both guarded updates may have waited on row locks. If time elapsed while waiting,
         # fail the submission and roll them both back before writing an answer or event.
         now = deps.now()
-        if deadline <= now:
-            raise QuestionExpired()
-        if row.lease_expires_at is None or row.lease_expires_at <= now:
-            raise LeaseExpired()
+        check_write_expiry(now, deadline, row.lease_expires_at)
         session.add(
             Answer(
                 id=answer_id,

@@ -32,7 +32,7 @@ from revel.db.models import (
     Question,
     QuestionEvent,
 )
-from revel.services import answers
+from revel.services import answers, question_leases
 from revel.services.answers import (
     InvalidEvidence,
     QuestionNotFound,
@@ -616,6 +616,83 @@ async def test_answer_rechecks_expiry_after_evidence_validation(
             respondent, assignment_id, answer_request(lease.lease_version, inline()), deps=d
         )
     assert "answered" not in event_types(factory, question_id)
+
+
+async def test_contact_claim_rechecks_question_expiry_after_outreach_lock(
+    factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world, hours=1)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0 + timedelta(hours=1, seconds=-1))
+    lock = question_leases._lock_outreach
+
+    def lock_then_advance(*args):
+        lock(*args)
+        clock.advance(timedelta(seconds=2))
+
+    monkeypatch.setattr(question_leases, "_lock_outreach", lock_then_advance)
+    with pytest.raises(QuestionExpired):
+        await claim_assignment(
+            respondent, assignment_id, ClaimRequest(human_contact=True), deps=deps(factory, clock)
+        )
+    assert "claimed" not in event_types(factory, question_id)
+    assert assignment(factory, assignment_id).status == "available"
+
+
+@pytest.mark.parametrize("action", ["renew", "report", "upgrade"])
+async def test_active_lease_write_rolls_back_if_old_lease_expires(
+    action, factory, fga, world_builder, monkeypatch
+):
+    world = await world_builder()
+    question_id, ids = await ask(factory, world)
+    respondent = agent_principal(world.owner_d1)
+    assignment_id = ids[world.owner_d1.id]
+    clock = Clock(T0)
+    d = deps(factory, clock)
+    lease = await claim_assignment(
+        respondent, assignment_id, ClaimRequest(human_contact=action == "report"), deps=d
+    )
+    clock.advance(LEASE_DURATION - timedelta(seconds=1))
+    update = question_leases._versioned_update
+
+    def update_then_advance(*args, **kwargs):
+        result = update(*args, **kwargs)
+        clock.advance(timedelta(seconds=2))
+        return result
+
+    monkeypatch.setattr(question_leases, "_versioned_update", update_then_advance)
+    with pytest.raises(LeaseExpired):
+        if action == "renew":
+            await renew_assignment(
+                respondent,
+                assignment_id,
+                LeaseVersionRequest(lease_version=lease.lease_version),
+                deps=d,
+            )
+        elif action == "report":
+            await report_user_contact(
+                respondent,
+                assignment_id,
+                UserContactRequest(lease_version=lease.lease_version, delivery_confirmed=True),
+                deps=d,
+            )
+        else:
+            await claim_assignment(
+                respondent,
+                assignment_id,
+                ClaimRequest(human_contact=True, lease_version=lease.lease_version),
+                deps=d,
+            )
+    unchanged = assignment(factory, assignment_id)
+    assert unchanged.status == "claimed"
+    assert unchanged.lease_version == lease.lease_version
+    assert unchanged.lease_expires_at == lease.lease_expires_at
+    assert unchanged.human_contact == lease.human_contact
+    events = event_types(factory, question_id)
+    assert events.count("claimed") == 1
+    assert "renewed" not in events and "user_contact_reported" not in events
 
 
 async def test_renew_on_expired_lease_is_rejected(
