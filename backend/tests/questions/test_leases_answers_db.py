@@ -869,7 +869,9 @@ async def test_evidence_validation(
     # This does not authorize a new question or further respondent actions.
     await fga.write_tuples(public_tuples(world.profile.id))
     await _revoke_requester(factory, world, fga)
-    outcome = await get_question(agent_principal(world.requester_d), question_id, deps=deps(factory))
+    outcome = await get_question(
+        agent_principal(world.requester_d), question_id, deps=deps(factory)
+    )
     assert outcome.result == "answer"
     assert outcome.answer is not None and outcome.answer.audience == "public"
 
