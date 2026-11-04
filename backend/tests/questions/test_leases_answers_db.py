@@ -865,6 +865,13 @@ async def test_evidence_validation(
         d1, a1, answer_request(lease.lease_version, inline(audience="public")), deps=deps(factory)
     )
     assert result.audience == "public"
+    # A finished answer can still be released if its evidence remains Public after revocation.
+    # This does not authorize a new question or further respondent actions.
+    await fga.write_tuples(public_tuples(world.profile.id))
+    await _revoke_requester(factory, world, fga)
+    outcome = await get_question(agent_principal(world.requester_d), question_id, deps=deps(factory))
+    assert outcome.result == "answer"
+    assert outcome.answer is not None and outcome.answer.audience == "public"
 
 
 async def test_answer_audience_is_the_most_restrictive_evidence(
