@@ -66,7 +66,7 @@ const EDITABLE_STATUSES: readonly Fact["status"][] = ["active", "provisional", "
 
 function statusBadge(fact: Fact): { text: string; note?: string } {
   if (fact.status === "pending_review") {
-    return { text: "Pending your review", note: "Not shared until you approve it." };
+    return { text: "Pending your review" };
   }
   if (fact.status === "removed" || fact.status === "superseded") {
     return { text: humanize(fact.status), note: "This fact is no longer shared." };
@@ -393,15 +393,22 @@ export function FactItem({
         <p className="statement">{fact.statement}</p>
         <span className={`badge badge-${fact.status}`}>{badge.text}</span>
       </div>
-      {/* Secondary metadata: one muted line, labels kept for assistive technology. */}
+      <div className="fact-access">
+        {fact.status === "pending_review" && (
+          <p><strong>Not shared</strong> until you approve it.</p>
+        )}
+        <dl>
+          <div>
+            <dt>{fact.status === "pending_review" ? "Proposed audience" : "Assigned audience"}</dt>
+            <dd>{audienceLabel(fact.audience)}</dd>
+          </div>
+        </dl>
+        {badge.note && <p className="caveat">{badge.note}</p>}
+      </div>
       <dl className="fact-meta">
         <div>
           <dt className="visually-hidden">Category</dt>
           <dd>{label}</dd>
-        </div>
-        <div>
-          <dt>{fact.status === "pending_review" ? "Proposed audience" : "Assigned audience"}</dt>
-          <dd>{audienceLabel(fact.audience)}</dd>
         </div>
         <div>
           <dt>Evidence</dt>
@@ -422,7 +429,6 @@ export function FactItem({
           </dd>
         </div>
       </dl>
-      {badge.note && <p className="caveat">{badge.note}</p>}
 
       {message && (
         <p role="alert" className="alert">

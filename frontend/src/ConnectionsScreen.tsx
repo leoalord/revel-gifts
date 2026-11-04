@@ -71,7 +71,7 @@ function PersonView({ person }: { person: PublicIdentity | Person }) {
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
     <section aria-labelledby={id} className="panel">
-      <h3 id={id}>{title}</h3>
+      <h3 id={id} tabIndex={-1}>{title}</h3>
       {children}
     </section>
   );
@@ -327,9 +327,10 @@ export function ConnectionsScreen() {
     try {
       await action();
       setNotice(success);
+      return true;
     } catch (error) {
-      if (error instanceof UnauthorizedError) return;
-      setAlert(messageFor(error));
+      if (!(error instanceof UnauthorizedError)) setAlert(messageFor(error));
+      return false;
     } finally {
       setBusy(false);
       // Re-read after every action, success or not (e.g. a 404/409 means the list is stale).
@@ -406,9 +407,10 @@ export function ConnectionsScreen() {
                   <ConfirmButton
                     label="Block"
                     confirmLabel="Confirm block"
+                    successFocusId="incoming-heading"
                     disabled={busy}
                     onConfirm={() =>
-                      void act(() => connectionsApi.block(r.id), `Blocked ${personName(r.requester)}.`)
+                      act(() => connectionsApi.block(r.id), `Blocked ${personName(r.requester)}.`)
                     }
                   />
                 </div>
@@ -447,9 +449,10 @@ export function ConnectionsScreen() {
                   <ConfirmButton
                     label="Revoke"
                     confirmLabel="Confirm revoke"
+                    successFocusId="people-heading"
                     disabled={busy}
                     onConfirm={() =>
-                      void act(
+                      act(
                         () => connectionsApi.revoke(c.request_id),
                         `Revoked ${personName(c.person)}.`,
                       )
@@ -458,9 +461,10 @@ export function ConnectionsScreen() {
                   <ConfirmButton
                     label="Block"
                     confirmLabel="Confirm block"
+                    successFocusId="people-heading"
                     disabled={busy}
                     onConfirm={() =>
-                      void act(
+                      act(
                         () => connectionsApi.block(c.request_id),
                         `Blocked ${personName(c.person)}.`,
                       )

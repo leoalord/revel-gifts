@@ -602,6 +602,35 @@ thead th {
   flex: 1 1 16rem;
 }
 
+.fact-access {
+  margin-top: 0.45rem;
+  font-size: var(--fs-secondary);
+}
+
+.fact-access > p,
+.fact-access dl {
+  margin: 0;
+}
+
+.fact-access dt,
+.fact-access dd {
+  display: inline;
+  margin: 0;
+}
+
+.fact-access dt {
+  color: var(--text-secondary);
+  margin-right: 0.35rem;
+}
+
+.fact-access dd {
+  font-weight: 600;
+}
+
+.fact-access > .caveat {
+  margin-top: 0.25rem;
+}
+
 .fact-meta {
   margin: 0.45rem 0 0;
   overflow-wrap: anywhere;
