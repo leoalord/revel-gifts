@@ -118,8 +118,8 @@ UPDATE_FACT_DESCRIPTION = (
 REMOVE_DESCRIPTION = (
     "Remove one of the user's live facts (action='remove'), or reject a fact pending their "
     "review (action='reject'). State mismatch is a conflict: reread and confirm the intended "
-    "operation before retrying. Neither action requires confirmation. For legacy calls "
-    "omitting action, owner_confirmed=true selects reject; otherwise the default is remove."
+    "operation before retrying. Neither action requires confirmation. Pass the action explicitly. "
+    "A legacy call omitting action with owner_confirmed=true can only reject a pending fact."
 )
 REJECT_CONFIRMED_DESCRIPTION = (
     "Reject only: set true only when the owner explicitly told you to reject this pending "
@@ -392,13 +392,21 @@ def register(server: MCPServer, settings: Any) -> None:
         owner_confirmed: Annotated[bool, Field(description=REJECT_CONFIRMED_DESCRIPTION)] = False,
         action: Annotated[
             Literal["remove", "reject"] | None,
-            Field(description="Remove a live fact or reject a pending fact."),
+            Field(
+                description="Required unless a legacy confirmed rejection omits it. "
+                "Remove a live fact or reject a pending fact."
+            ),
         ] = None,
     ) -> FactOut:
         if action == "reject" or (action is None and owner_confirmed):
             return await _run(
                 settings,
                 lambda s, p: profiles.reject_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
+            )
+        if action is None:
+            raise ToolError(
+                "action_required: Pass action='remove' to remove a live fact or "
+                "action='reject' to reject a pending fact."
             )
         if owner_confirmed:
             raise _invalid_request("Action 'remove' does not accept owner_confirmed=true.")

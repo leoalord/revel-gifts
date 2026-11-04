@@ -197,9 +197,10 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
   supplied by the preview. A changed fact requires new confirmation.
 - `remove_fact(action="reject")` rejects only a pending fact (audit event `rejected`).
   `owner_confirmed=true` records explicit acceptance on rejection and does not permit live
-  removal. `remove_fact(action="remove")` removes only a live fact. Omitting `action` selects
-  `reject` with `owner_confirmed=true` and `remove` otherwise. A mismatch is a conflict checked
-  under the fact lock, without falling back to another operation.
+  removal. `remove_fact(action="remove")` removes only a live fact. Legacy calls that omit
+  `action` with `owner_confirmed=true` select `reject`; other calls missing `action` fail with
+  `action_required`. A mismatch is a conflict checked under the fact lock, without falling
+  back to another operation.
 - Per-action validation happens before any service call. Errors are `ToolError`s with the
   `invalid_request` code shared with the F6/F7 tools:
   `invalid_request: Unknown action '<x>' for update_fact; expected one of: set_audience, approve.`,

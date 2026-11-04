@@ -220,13 +220,13 @@ def test_bearer_mcp_and_ui_share_one_profile(
 
         # Removal: MCP and DELETE; unknown ids are 404 / generic tool errors.
         new_id = corrected.json()["id"]
-        removed = mcp_call(client, "remove_fact", {"fact_id": new_id})
+        removed = mcp_call(client, "remove_fact", {"fact_id": new_id, "action": "remove"})
         assert removed["structuredContent"]["status"] == "removed"
         assert client.delete(f"/api/v1/profile/facts/{new_id}").status_code == 409
         missing = "00000000-0000-0000-0000-000000000000"
         assert client.delete(f"/api/v1/profile/facts/{missing}").status_code == 404
         assert ui.delete(f"/api/ui/profile/facts/{missing}", headers=ORIGIN).status_code == 404
-        tool_missing = mcp_call(client, "remove_fact", {"fact_id": missing})
+        tool_missing = mcp_call(client, "remove_fact", {"fact_id": missing, "action": "remove"})
         assert tool_missing["isError"] is True
         assert tool_missing["content"][0]["text"].endswith("Fact not found")
 

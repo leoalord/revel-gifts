@@ -79,6 +79,12 @@ def test_tools_are_listed_with_the_confirmation_rule(
         "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=MCP_HEADERS
     )
     tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
+    profile_schema = tools["get_profile"]["outputSchema"]
+    assert profile_schema["type"] == "object"
+    assert {item["$ref"] for item in profile_schema["anyOf"]} == {
+        "#/$defs/OwnerProfileView",
+        "#/$defs/SharedProfileOut",
+    }
     for name in ("set_contribution_policy", "update_fact"):
         tool = tools[name]
         props = tool["inputSchema"]["properties"]
@@ -569,6 +575,10 @@ def test_confirmed_approval_requires_the_previewed_pending_audience(
         assert "fact_not_pending" in tool_error(
             mcp_call(client, "remove_fact", {"fact_id": fact_id, **args})
         )
+    for args in ({}, {"owner_confirmed": False}):
+        assert "action_required" in tool_error(
+            mcp_call(client, "remove_fact", {"fact_id": fact_id, **args})
+        )
     assert client.get("/api/v1/profile").json()["facts"][0]["status"] == "active"
 
 
@@ -594,7 +604,9 @@ def test_remove_fact_rejects_pending_and_removes_live(
     assert {p["outcome"] for p in pending} == {"pending_review"}
     auto_id, explicit_id = (p["claim_id"] for p in pending)
 
-    assert "fact_not_removable" in tool_error(mcp_call(client, "remove_fact", {"fact_id": auto_id}))
+    assert "fact_not_removable" in tool_error(
+        mcp_call(client, "remove_fact", {"fact_id": auto_id, "action": "remove"})
+    )
     assert client.delete(f"/api/v1/profile/facts/{auto_id}").status_code == 409
     rejected = ok(mcp_call(client, "remove_fact", {"fact_id": auto_id, "action": "reject"}))
     assert rejected["status"] == "removed"
@@ -620,9 +632,11 @@ def test_remove_fact_rejects_pending_and_removes_live(
     assert after[: len(before)] == before and after[len(before) :] == [("removed", "automatic")]
 
     # Repeats are the existing conflict error; nothing new is recorded.
-    for fid in (auto_id, live_id):
+    for fid, action in ((auto_id, "reject"), (live_id, "remove")):
         count = len(_events(factory, fid))
-        assert "changed" in tool_error(mcp_call(client, "remove_fact", {"fact_id": fid}))
+        assert "changed" in tool_error(
+            mcp_call(client, "remove_fact", {"fact_id": fid, "action": action})
+        )
         assert len(_events(factory, fid)) == count
 
     # A pending replacement is rejected and its target stays live.
