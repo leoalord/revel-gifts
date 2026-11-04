@@ -28,8 +28,8 @@ type SessionState =
 const SCREENS = [
   { path: "/app/", label: "Home" },
   { path: "/app/contributions", label: "Contributions" },
-  { path: "/app/policy", label: "Policy" },
   { path: "/app/connections", label: "Connections" },
+  { path: "/app/policy", label: "Policy" },
 ] as const;
 
 // F2's 503 detail when browser sign-in has no configuration (revel.auth.ui).
@@ -83,8 +83,8 @@ function Nav({ current, onNavigate }: { current: string; onNavigate: (path: stri
 
 const HOME_LINKS = [
   { path: "/app/contributions", label: "Review contributions", description: "See what your assistants added, what needs review, and who can see each detail." },
-  { path: "/app/policy", label: "Manage sharing policy", description: "Choose what assistants can add and which details can be shared." },
   { path: "/app/connections", label: "Manage connections", description: "Review requests and manage who can access your shared gifting preferences." },
+  { path: "/app/policy", label: "Manage sharing policy", description: "Choose what assistants can add and which details can be shared." },
 ];
 
 function Home({ onNavigate }: { onNavigate: (path: string) => void }) {
