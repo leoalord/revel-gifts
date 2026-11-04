@@ -148,16 +148,6 @@ export function redirectToLogin(): void {
   startSignIn();
 }
 
-type UnauthorizedHandler = () => void;
-let unauthorizedHandler: UnauthorizedHandler = redirectToLogin;
-
-/** Replace the 401 hook (tests, or a future "session expired" prompt). Returns the previous. */
-export function setUnauthorizedHandler(handler: UnauthorizedHandler): UnauthorizedHandler {
-  const previous = unauthorizedHandler;
-  unauthorizedHandler = handler;
-  return previous;
-}
-
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
@@ -200,7 +190,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const response = await fetch(path, init);
   const body = await readBody(response);
   if (response.status === 401) {
-    unauthorizedHandler();
+    redirectToLogin();
     throw new UnauthorizedError(detailOf(body), body);
   }
   if (!response.ok) {

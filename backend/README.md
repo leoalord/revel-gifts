@@ -10,6 +10,8 @@ mcp/         # MCP adapters (official MCP Python SDK, MCPServer)
 services/    # Shared operations and enforcement
 auth/        # Identity/delegation and authorization integrations (mcp_auth.py, router.py: F2)
 db/          # Models and persistence
+guidance/    # Versioned product skills and delivery
+demo/        # Demo reset and synthetic fixtures
 ```
 
 `migrations/` holds database migrations (owned by F3); `tests/` holds backend checks.
@@ -28,7 +30,7 @@ uv run ruff check . && uv run ruff format --check .
 
 Configuration comes from environment variables, then `backend/.env`, then the repository-root
 `.env` (copy `../.env.example`). Local Postgres and OpenFGA: `docker compose up -d` from the repo
-root (see `../dev/README.md`).
+root (see [local infrastructure setup](../infra/local/README.md)).
 
 `APP_ENV=production` requires an `https://` `PUBLIC_BASE_URL`; `create_app` raises otherwise.
 Deployed checks use `/health`: Cloud Run reserves some paths ending in `z`. The container image
@@ -60,11 +62,7 @@ docker compose -p revel-test exec -T postgres psql -U revel -d revel -c "CREATE 
 REVEL_TEST_DATABASE_URL=postgresql+psycopg://revel:revel@localhost:55433/revel_test uv run pytest tests/db
 ```
 
-Inspect the MCP endpoint with the MCP Inspector CLI:
-
-```sh
-npx -y @modelcontextprotocol/inspector --cli http://localhost:8000/mcp --transport http --method tools/list
-```
+MCP requires a WorkOS bearer token. See the [WorkOS runbook](../infra/README.md#workos-configuration) for setup. Use `/health` for an unauthenticated smoke check.
 
 ## MCP composition notes
 
@@ -80,3 +78,21 @@ npx -y @modelcontextprotocol/inspector --cli http://localhost:8000/mcp --transpo
 Keep transport adapters thin and enforce shared behavior in services. Explicitly protect mounted MCP operations; HTTP route dependencies do not automatically secure them. See [deployment guidance](../docs/deployment.md).
 
 [Notion](https://app.notion.com/p/4092bade7f31805191e7c4c884960908) owns stack choices; [MVP scope](https://app.notion.com/p/40b2bade7f3181ad84f0d14cf641fec7) owns required features and acceptance.
+
+## Product agent guidance
+
+Edit the versioned [skills](src/revel/guidance/skills/index.md) in `src/revel/guidance/skills/`.
+Each skill has a `SKILL.md` with name, description, semantic version and status. Bump its version
+and add a [changelog entry](src/revel/guidance/skills/CHANGELOG.md) for each content change.
+
+The shared renderer serves the same Markdown at `/guidance` and `/guidance/<name>.md`, as a
+no-argument MCP prompt and as the MCP resource `revel://guidance/<name>`. Register renames
+in [`RENAMED_SKILLS`](src/revel/guidance/operations.py). Old website paths redirect with 308,
+and old MCP names are retired. [Content lint](tests/guidance/test_content_lint.py) checks
+operation names. Mark undeployed names with a same-line `<!-- PROVISIONAL ... -->` comment
+until their contract is merged and deployed.
+
+[Agent-Led Onboarding](https://app.notion.com/p/40a2bade7f3181eab40de24dfbe88adb) owns guidance
+requirements and client evidence. [Privacy](https://app.notion.com/p/40b2bade7f31811d8e55d8818e949b31)
+owns contribution rules, and [Questions](https://app.notion.com/p/40a2bade7f3181bf9975f7fa9a1f597d)
+owns routing and lifecycle. Document tested client capabilities and supported operations.

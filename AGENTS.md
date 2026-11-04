@@ -17,7 +17,7 @@ Current user instructions govern the work. Notion owns approved product decision
 | [Research](https://app.notion.com/p/40b2bade7f3181cf9709deca51417f33) | Supporting evidence and historical proposals, not automatic requirements |
 | [Hackathon](https://app.notion.com/p/4092bade7f3180909d7cec4d1b230844) | Event context and submission requirements/uncertainties |
 
-Repository READMEs describe layout and operation; original research files are historical. Neither overrides approved Notion decisions. Task records refine scope without silently changing product policy. If sources conflict materially, identify the conflict, continue unaffected work, and obtain a decision before implementing the disputed behavior. If Notion is unavailable, report the missing source and avoid guessing affected requirements.
+Repository READMEs describe layout and operation. Keep research reports and supporting references on the Notion Research page. Approved product decisions live on their owning Notion pages. Task records refine scope without silently changing product policy. If sources conflict materially, identify the conflict, continue unaffected work, and obtain a decision before implementing the disputed behavior. If Notion is unavailable, report the missing source and avoid guessing affected requirements.
 
 ## Roles
 

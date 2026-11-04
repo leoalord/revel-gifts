@@ -24,7 +24,7 @@
 frontend/node_modules
 frontend/dist
 
-# Infrastructure: Terraform working dir, state, plans and variables
+# Infrastructure: local service setup, Terraform configuration and state
 infra/
 **/.terraform
 **/*.tfstate
@@ -34,11 +34,8 @@ infra/
 **/plan-output.txt
 crash.log
 
-# Root research notes and repository docs not needed at runtime
-/0*-*.md
+# Repository docs and build inputs not needed at runtime
 docs/
-agent-guidance/
-dev/
 docker-compose.yml
 Dockerfile
 .dockerignore

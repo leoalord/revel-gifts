@@ -1,7 +1,6 @@
 # F5 profiles and contributions: operation contract v1 (#9, RG-18; shared reads #28, RG-56; agent-first owner controls #29)
 
-Owner: revel-f5-profiles. Status: **provisional** until #9's reviewed merge (v1 as implemented on the RG-18 branch). Published before
-implementation so F6, F7, F8 (#10) and F9 (#11) can draft against it; changes are announced.
+Owner: revel-f5-profiles. This document describes the implemented v1 contract.
 Product policy lives in Notion (main page "Profile fact data model", Privacy page "Contribution
 policy"); this file is the implementation contract only.
 
@@ -38,9 +37,8 @@ birth year (`forbidden_category` for birth-year categories, `invalid_details` fo
 Sensitive information (health, religion, politics, orientation, finances) is NOT rejected
 outright: it goes in `sensitive`, whose `allowed_audiences` are `[only_me]` only (no setting or
 edit can widen it), which needs `evidence_type = explicit` (otherwise rejected,
-`sensitive_not_explicit`) and is ALWAYS `pending_review` until the owner approves it in the UI,
-even when review is otherwise off and even for the owner's own entry (approved in the UI, or by
-the owner's agent with `owner_confirmed`, #29). A category id naming a
+`sensitive_not_explicit`) and is ALWAYS `pending_review` until approved by the owner in the UI or by the owner's agent with `owner_confirmed` (#29).
+This applies even when review is off and to the owner's own entries. A category id naming a
 sensitive topic (e.g. `health`) is `unknown_category` with a hint to use `sensitive`.
 Health-related diet exclusions stay in `diet_exclusion`, with no reason. Assistants save
 sensitive topics only when the owner volunteers them (`sensitive`, Only Me, owner approval)

@@ -1,4 +1,4 @@
-name: Revel Gifts authorization model v2
+name: Audience tiers and question permissions
 model_file: ../model.fga
 # Synthetic IDs. Each user has one connected agent (an agent_delegations.id), written as on
 # connect: acts_for, user#delegate and platform:revel#connected_agent. B owns profile:b.
