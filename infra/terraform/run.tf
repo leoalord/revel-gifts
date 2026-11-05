@@ -212,6 +212,7 @@ locals {
     var.meta_model == "" ? {} : { META_MODEL = var.meta_model },
     var.muse_spark_provider == "" ? {} : { MUSE_SPARK_PROVIDER = var.muse_spark_provider },
     var.muse_spark_timeout_seconds == "" ? {} : { MUSE_SPARK_TIMEOUT_SECONDS = var.muse_spark_timeout_seconds },
+    var.invitation_background_delivery_ready ? { INVITATION_BACKGROUND_DELIVERY_READY = "true" } : {},
     local.openfga_ids_env,
   )
 
@@ -256,7 +257,7 @@ resource "google_cloud_run_v2_service" "app" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle = true
+        cpu_idle = !var.invitation_background_delivery_ready
       }
 
       dynamic "env" {

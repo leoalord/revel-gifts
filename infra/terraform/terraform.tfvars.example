@@ -55,3 +55,8 @@ app_max_instances     = 2
 deletion_protection   = true
 enable_domain_mapping = false
 domain_name           = "api.revel.gifts"
+
+# Invitation SMTP remains disabled until a provider/sender/test mailbox and infrastructure
+# changes are approved. True allocates CPU between requests (instance-based billing), and
+# passes the application readiness gate; it does not enable SMTP or create credentials.
+invitation_background_delivery_ready = false
