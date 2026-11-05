@@ -47,8 +47,14 @@ def factory():
     engine = create_engine(url)
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE users, agents CASCADE"))
-    yield sessionmaker(engine, expire_on_commit=False)
-    engine.dispose()
+    try:
+        yield sessionmaker(engine, expire_on_commit=False)
+    finally:
+        # Other suites rebuild this disposable schema. Remove this fixture's synthetic
+        # nonexpiring invites before their guarded downgrade; production guard stays intact.
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE users, agents CASCADE"))
+        engine.dispose()
 
 
 @pytest.fixture
@@ -162,7 +168,7 @@ async def test_wrong_or_unverified_email_does_not_consume(people, factory, confi
 
 
 @pytest.mark.anyio
-async def test_cancel_authorization_and_expiry(people, factory, config):
+async def test_cancel_authorization_and_nonexpiring_legacy_pending(people, factory, config):
     info = await make(people, factory, config)
     with pytest.raises(svc.InvitationError):
         await svc.cancel(people[2], info.id, sessions=lambda: factory, settings=config)
@@ -187,22 +193,14 @@ async def test_cancel_authorization_and_expiry(people, factory, config):
                 expires_at=datetime.now(UTC) - timedelta(days=1),
             )
         )
-    with pytest.raises(svc.InvitationError):
-        await svc.redeem(
-            people[1],
-            token=token(info),
-            action="accept",
-            settings=config,
-            sessions=lambda: factory,
-            directory=Directory(),
-        )
-    statuses = {
-        row.id: row.status
-        for row in await svc.list_sent(people[0], sessions=lambda: factory, settings=config)
-    }
-    assert statuses[info.id] == "expired"
-    renewed = await make(people, factory, config)
-    assert renewed.id != info.id
+    joined = await svc.join(
+        people[1],
+        token=token(info),
+        settings=config,
+        sessions=lambda: factory,
+        directory=Directory(),
+    )
+    assert joined.status == "joined" and joined.expires_at is None
 
 
 @pytest.mark.anyio
@@ -744,15 +742,13 @@ async def test_resend_provider_reference_stays_private_and_unknown_never_retries
 
 
 @pytest.mark.anyio
-async def test_mail_uses_fresh_authenticated_inviter_and_actual_row_expiry(
+async def test_mail_uses_fresh_authenticated_inviter_without_expiry(
     people, factory, config, mail_dispatcher
 ):
     info = await make(people, factory, config)
-    actual_expiry = datetime.now(UTC) + timedelta(minutes=37)
     with factory() as session, session.begin():
         session.get(User, people[0].user_id).display_name = "Current authenticated inviter"
         session.get(User, people[1].user_id).display_name = "Never infer this recipient name"
-        session.get(Invitation, info.id).expires_at = actual_expiry
     mailer = Mailer()
     await svc.send(
         people[0],
@@ -766,5 +762,140 @@ async def test_mail_uses_fresh_authenticated_inviter_and_actual_row_expiry(
     await mail_dispatcher.wait_idle()
     assert len(mailer.sent) == 1
     assert mailer.sent[0]["sender_name"] == "Current authenticated inviter"
-    assert mailer.sent[0]["expires_at"] == actual_expiry
+    assert "expires_at" not in mailer.sent[0]
     assert "recipient_name" not in mailer.sent[0]
+
+
+@pytest.mark.anyio
+async def test_join_is_idempotent_concurrent_attribution_without_connections_or_profiles(
+    people, factory, config
+):
+    import asyncio
+
+    from revel.db.models import ContributionPolicy, Profile
+
+    info = await make(people, factory, config)
+    assert info.expires_at is None
+    with factory() as session, session.begin():
+        session.get(Invitation, info.id).created_at = datetime(2000, 1, 1, tzinfo=UTC)
+    preview = await svc.redeem(
+        people[1],
+        token=token(info),
+        action="preview",
+        settings=config,
+        sessions=lambda: factory,
+        directory=Directory(),
+    )
+    assert preview.status == "pending" and preview.expires_at is None
+    with factory() as session:
+        assert session.get(Invitation, info.id).responded_at is None
+    results = await asyncio.gather(
+        *(
+            svc.join(
+                people[1],
+                token=token(info),
+                settings=config,
+                sessions=lambda: factory,
+                directory=Directory(),
+            )
+            for _ in range(4)
+        )
+    )
+    assert all(result.status == "joined" and result.expires_at is None for result in results)
+    assert all(result.connection_request_id is None for result in results)
+    with factory() as session:
+        row = session.get(Invitation, info.id)
+        original_time = row.responded_at
+        assert row.recipient_user_id == people[1].user_id
+        assert session.scalar(select(ConnectionRequest.id)) is None
+        assert session.scalar(select(Profile.id)) is None
+        assert session.scalar(select(ContributionPolicy.profile_id)) is None
+    again = await svc.join(
+        people[1],
+        token=token(info),
+        settings=config,
+        sessions=lambda: factory,
+        directory=Directory(),
+    )
+    joined_preview = await svc.redeem(
+        people[1],
+        token=token(info),
+        action="preview",
+        settings=config,
+        sessions=lambda: factory,
+        directory=Directory(),
+    )
+    assert again.status == joined_preview.status == "joined"
+    with factory() as session:
+        assert session.get(Invitation, info.id).responded_at == original_time
+    with pytest.raises(svc.InvitationError):
+        await svc.join(
+            people[2],
+            token=token(info),
+            settings=config,
+            sessions=lambda: factory,
+            directory=Directory(),
+        )
+    with pytest.raises(svc.InvitationError):
+        await svc.redeem(
+            people[1],
+            token=token(info),
+            action="accept",
+            settings=config,
+            sessions=lambda: factory,
+            directory=Directory(),
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("email", [None, "wrong@example.test"])
+async def test_join_requires_fresh_verified_invited_email(people, factory, config, email):
+    info = await make(people, factory, config)
+    directory = Directory(email)
+    with pytest.raises(svc.EmailVerificationRequired):
+        await svc.join(
+            people[1],
+            token=token(info),
+            settings=config,
+            sessions=lambda: factory,
+            directory=directory,
+        )
+    assert directory.subjects == ["user_recipient"]
+    with factory() as session:
+        row = session.get(Invitation, info.id)
+        assert row.status == "pending" and row.recipient_user_id is None
+        assert row.responded_at is None
+        assert session.scalar(select(ConnectionRequest.id)) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blocked", ["forward", "reverse", "cancelled"])
+async def test_join_enforces_both_block_directions_and_cancellation(
+    people, factory, config, blocked
+):
+    info = await make(people, factory, config)
+    if blocked == "cancelled":
+        await svc.cancel(people[0], info.id, settings=config, sessions=lambda: factory)
+    else:
+        a, b = people[:2]
+        if blocked == "reverse":
+            a, b = b, a
+        with factory() as session, session.begin():
+            session.add(
+                ConnectionRequest(
+                    requester_user_id=a.user_id,
+                    target_user_id=b.user_id,
+                    status="blocked",
+                    responded_at=datetime.now(UTC),
+                )
+            )
+    with pytest.raises(svc.InvitationError):
+        await svc.join(
+            people[1],
+            token=token(info),
+            settings=config,
+            sessions=lambda: factory,
+            directory=Directory(),
+        )
+    with factory() as session:
+        assert session.get(Invitation, info.id).recipient_user_id is None

@@ -1,7 +1,7 @@
 ---
 name: revel-get-started
 description: Resume Revel setup, build a sourced gifting profile with owner consent, and arrange truthful owner-approved inbox checks in a supported assistant host.
-version: 0.8.1
+version: 0.8.2
 status: active
 ---
 
@@ -23,7 +23,7 @@ my profile, approvals, or recurring tasks. Use only tools currently in your tool
 3. If I have not approved a contribution policy, preview the exact proposed settings through
    `set_contribution_policy`, show the returned wording and obtain my explicit approval.
    Use its confirmation protocol. Public sharing needs my policy-level opt-in; do not infer
-   consent from connecting an assistant or accepting an invitation.
+   consent from connecting an assistant or joining through an invitation.
 4. Under the approved policy, contribute supported, useful interests, likes, dislikes,
    constraints and wishes with `add_facts`. Preserve provenance, qualitative confidence,
    evidence dates and uncertainty. Never upload raw conversations, third-party secrets,

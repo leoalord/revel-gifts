@@ -23,7 +23,7 @@ from revel.db.models import ConnectionRequest, User
 from revel.settings import get_settings
 
 RunAlembic = Callable[..., None]
-HEAD = "0008_invitation_provider_message"
+HEAD = "0009_invitation_join"
 PREVIOUS = "0004_delegation_reconnect"
 TABLE = "connection_requests"
 CHECK = "ck_connection_requests_owner_confirmed_at_matches_status"

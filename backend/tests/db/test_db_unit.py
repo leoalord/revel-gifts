@@ -104,8 +104,9 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0008_invitation_provider_message"]
+    assert script.get_heads() == ["0009_invitation_join"]
     assert [rev.revision for rev in script.walk_revisions()] == [
+        "0009_invitation_join",
         "0008_invitation_provider_message",
         "0007_inbox_check_setups",
         "0006_invitations",

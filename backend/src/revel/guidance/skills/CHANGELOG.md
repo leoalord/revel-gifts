@@ -1,11 +1,16 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.8.1
+version: 0.8.2
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.8.2 (2026-11-05)
+
+- Invitations support a single signup path, nonexpiring links and idempotent verified joined
+  attribution without a connection request or profile access.
 
 ## 0.8.1 (2026-11-04)
 

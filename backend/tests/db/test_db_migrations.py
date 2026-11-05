@@ -274,6 +274,5 @@ def test_downgrade_and_reupgrade(migrated_engine: Engine, run_alembic: RunAlembi
     assert set(inspect(migrated_engine).get_table_names()) >= TABLES
     with migrated_engine.connect() as connection:
         assert (
-            MigrationContext.configure(connection).get_current_revision()
-            == "0008_invitation_provider_message"
+            MigrationContext.configure(connection).get_current_revision() == "0009_invitation_join"
         )
