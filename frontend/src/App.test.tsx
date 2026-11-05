@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock, MockInstance } from "vitest";
@@ -24,13 +24,17 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+let agentsFetchMock: Mock<typeof fetch>;
 let fetchMock: Mock<typeof fetch>;
 let assignSpy: MockInstance<(url: string) => void>;
 let reloadSpy: MockInstance<() => void>;
 
 beforeEach(() => {
   fetchMock = vi.fn<typeof fetch>();
-  vi.stubGlobal("fetch", fetchMock);
+  agentsFetchMock = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse(200, []));
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    (input === "/api/agents" ? agentsFetchMock : fetchMock)(input, init),
+  );
   assignSpy = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
   reloadSpy = vi.spyOn(browserNavigation, "reload").mockImplementation(() => {});
   window.history.replaceState(null, "", "/app/");
@@ -63,6 +67,24 @@ describe("session bootstrap", () => {
     expect(init?.credentials).toBe("same-origin");
     expect(init?.method).toBe("GET");
     expect(assignSpy).not.toHaveBeenCalled();
+  });
+
+  it("shows active assistant registrations and prioritizes setup without assuming Cursor identity", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, SESSION));
+    agentsFetchMock.mockResolvedValueOnce(jsonResponse(200, [
+      { delegation_id: "d1", agent: { label: "Cursor" }, status: "active", connected_at: "2026-11-02T00:00:00Z" },
+      { delegation_id: "d2", agent: { label: "Muse" }, status: "revoked", connected_at: "2026-11-02T00:00:00Z" },
+    ]));
+    render(<App />);
+
+    const active = await screen.findByRole("list", { name: "Active assistants" });
+    expect(within(active).getByText("Cursor")).toBeInTheDocument();
+    expect(within(active).queryByText("Muse")).not.toBeInTheDocument();
+    expect(within(active).queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+    const setup = screen.getByRole("heading", { name: "Connect another assistant" }).parentElement!;
+    const summaries = [...setup.querySelectorAll("details summary")].map((element) => element.textContent);
+    expect(summaries[1]).toBe("Muse");
+    expect(summaries.slice(-2)).toEqual(["Grok Bot · Possibly already connected", "Cursor · Possibly already connected"]);
   });
 
   it("falls back to the email when there is no display name", async () => {

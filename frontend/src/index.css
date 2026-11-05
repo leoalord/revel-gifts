@@ -1206,3 +1206,30 @@ button.danger {
   margin: 0 0 0.5rem;
   font-size: 1rem;
 }
+
+.home-assistants {
+  margin-top: 1rem;
+}
+
+.home-assistants .assistant-identity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-setup {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+}
+
+.assistant-setup code {
+  overflow-wrap: anywhere;
+}
+
+.assistant-setup details {
+  border-top: 1px solid var(--border);
+  padding-block: 0.65rem;
+}
+
+.assistant-setup summary {
+  cursor: pointer;
+}
