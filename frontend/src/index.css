@@ -1236,3 +1236,6 @@ fieldset { padding: 1rem 1.25rem; }
 @media (max-width: 640px) { .invite-intro { grid-template-columns: 1fr; padding: 28px 0; } .invite-illustration { display: none; } }
 
 .invite-welcome .app-header .brand { color: var(--text); text-decoration: none; }
+
+.invite-welcome .invite-path-title { font-family: inherit; font-size: clamp(1.4rem, 3vw, 1.75rem); font-weight: 650; line-height: 1.25; margin: 28px 0 16px; letter-spacing: normal; }
+.invite-welcome .assistant-setup .invite-path-title { margin-top: 0; }

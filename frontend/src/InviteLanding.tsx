@@ -79,11 +79,11 @@ export function InviteLanding() {
     <section className="invite-intro" aria-labelledby="invite-title">
       <div><p className="eyebrow">A more thoughtful way to give</p><h1 id="invite-title">You’re invited to Revel.</h1>
         <p className="invite-description">{preview?.sender_name ? `${preview.sender_name} invited you to Revel. ` : ""}Bring together what your assistants know about you, so the people in your life can give gifts that feel like you.</p>
+        <h2 className="invite-path-title">Create your Revel account</h2>
         {loading ? <p role="status">Checking sign-in…</p> : <>
-          {session && <p className="hint">Signed in as {session.user.email ?? session.user.display_name ?? "your Revel account"}.</p>}
           {error && <div className="invite-error"><p role="alert">{error}</p>{session && <><p>You can continue to your account without linking this invitation.</p><p>To use a different account, after signing out, reopen the invitation from your email and sign in with the email that received it.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button></>}</div>}
-          <button className="primary" type="button" disabled={busy} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : session ? "Continue to Revel" : "Create Revel account"}</button>
-          <p className="hint">{session ? "Your profile and sharing stay in your control." : "Already have an account? You can sign in on the next screen."}</p>
+          <button className="primary" type="button" disabled={busy} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : "Create a Revel account"}</button>
+          <p className="hint">{session ? "You’re already signed in, so we’ll open your existing account." : "Already have an account? You can sign in on the next screen."}</p>
         </>}
       </div>
       <img className="invite-illustration" src="/app/revel-context.svg" alt="" />

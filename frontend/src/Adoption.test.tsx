@@ -23,7 +23,7 @@ describe("invitation capabilities and consent", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, { detail: "Sign in" })));
     const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
-    fireEvent.click(await screen.findByRole("button", { name: "Create Revel account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create a Revel account" }));
     expect(assign).toHaveBeenCalledWith("/auth/login?return_to=%2Fapp%2Finvite");
   });
 
@@ -39,7 +39,7 @@ describe("invitation capabilities and consent", () => {
     vi.stubGlobal("fetch", fetchMock);
     const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
-    const next = await screen.findByRole("button", { name: "Continue to Revel" });
+    const next = await screen.findByRole("button", { name: "Create a Revel account" });
     await waitFor(() => expect(next).toBeEnabled());
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/join"))).toBe(false);
     expect(screen.queryByRole("button", { name: "Accept invitation" })).not.toBeInTheDocument();
@@ -86,7 +86,7 @@ describe("invitation capabilities and consent", () => {
     const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
     await screen.findByRole("alert");
-    fireEvent.click(screen.getByRole("button", { name: "Continue to Revel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create a Revel account" }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/app/"));
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/join"))).toBe(false);
     expect(pendingInvitation()).toBeNull();
