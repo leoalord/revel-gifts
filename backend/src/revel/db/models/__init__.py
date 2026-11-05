@@ -2,6 +2,8 @@
 
 from revel.db.models.connections import ConnectionRequest, Handle
 from revel.db.models.identity import Agent, AgentDelegation, AgentDelegationSession, User
+from revel.db.models.inbox_setup import InboxCheckSetup
+from revel.db.models.invitations import Invitation
 from revel.db.models.profile import Claim, ClaimEvent, ContributionPolicy, Profile
 from revel.db.models.questions import (
     Answer,
@@ -23,6 +25,8 @@ __all__ = [
     "ConnectionRequest",
     "ContributionPolicy",
     "Handle",
+    "InboxCheckSetup",
+    "Invitation",
     "Profile",
     "Question",
     "QuestionEvent",
