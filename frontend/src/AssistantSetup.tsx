@@ -37,9 +37,9 @@ export function AssistantSetup({ active, welcome = false }: { active: ConnectedA
 
   return <aside className="assistant-setup" aria-labelledby="connect-assistant-heading">
     <div className="setup-intro">
-      <div><p className="eyebrow">{welcome ? "Or start with your assistant" : "Another perspective"}</p>
-        <h3 id="connect-assistant-heading">{active.length ? "Connect another assistant" : "Connect an assistant"}</h3>
-        <p>Your everyday chats, research and creative projects reveal different sides of you. Bring those perspectives together. You choose what each assistant may contribute and share.</p>
+      <div>{!welcome && <p className="eyebrow">Another perspective</p>}
+        {welcome ? <h2 id="connect-assistant-heading" className="invite-path-title">Start with your assistant</h2> : <h3 id="connect-assistant-heading">{active.length ? "Connect another assistant" : "Connect an assistant"}</h3>}
+        <p>{welcome ? "Choose an assistant you already use. It can help set up your Revel account and build your gifting profile, with your approval." : "Your everyday chats, research and creative projects reveal different sides of you. Bring those perspectives together. You choose what each assistant may contribute and share."}</p>
       </div>
       <img className="setup-illustration" src="/app/revel-context.svg" alt="" />
     </div>
