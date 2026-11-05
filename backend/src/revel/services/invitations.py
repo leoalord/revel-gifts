@@ -11,6 +11,7 @@ import re
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -318,30 +319,10 @@ async def send(
         raise MailUnavailable()
     factory = connections._factory(sessions)
 
-    # Resolve account subjects privately so blocks apply before an external delivery.
-    # Outward delivery state is always submitted, including suppression and uncertain SMTP.
-    if directory is None:
-        from revel.auth.workos_users import WorkOSUserDirectory
+    from revel.services.invitation_mail import dispatcher_for
 
-        if settings.workos_api_key is None:
-            raise Unavailable()
-        directory = WorkOSUserDirectory(settings.workos_api_key.get_secret_value())
-
-    def destination() -> str:
-        with factory() as session:
-            _start(session, principal)
-            row = session.scalar(
-                select(Invitation).where(
-                    Invitation.id == invitation_id, Invitation.sender_user_id == principal.user_id
-                )
-            )
-            if row is None:
-                raise InvitationError()
-            return row.email
-
-    destination_email = await _run(destination)
-    subjects = await directory.subjects_for_email(destination_email)
-    if subjects is None:
+    dispatcher = dispatcher_for(settings)
+    if dispatcher is None or not dispatcher.running:
         raise Unavailable()
 
     def reserve() -> InvitationInfo:
@@ -350,17 +331,6 @@ async def send(
             connections._advisory_lock(
                 session, connections._lock_key("revel.invites.sender", principal.user_id)
             )
-            targets = list(
-                session.scalars(select(User.id).where(User.workos_user_id.in_(subjects)))
-            )
-            for key in sorted(
-                {
-                    connections.pair_lock_key(a, b)
-                    for target in targets
-                    for a, b in ((principal.user_id, target), (target, principal.user_id))
-                }
-            ):
-                connections._advisory_lock(session, key)
             row = session.scalar(
                 select(Invitation)
                 .where(
@@ -383,47 +353,90 @@ async def send(
             )
             if count >= SEND_LIMIT:
                 raise RateLimited()
-            blocked = session.scalar(
-                select(ConnectionRequest.id)
-                .where(
-                    ConnectionRequest.status == "blocked",
-                    or_(
-                        (ConnectionRequest.requester_user_id == principal.user_id)
-                        & ConnectionRequest.target_user_id.in_(targets),
-                        ConnectionRequest.requester_user_id.in_(targets)
-                        & (ConnectionRequest.target_user_id == principal.user_id),
-                    ),
-                )
-                .limit(1)
-            )
             row.sent_at = now
-            if blocked or principal.user_id in targets:
-                row.delivery_status = "unknown"
-                return _info(row, settings)
             row.delivery_status = "sending"
             return _info(row, settings, link=True)
 
     reserved = await _run(reserve)
     if reserved.invite_url is None:
         return reserved
+    dispatcher.enqueue(
+        partial(_deliver_reserved, principal, reserved, factory, settings, mailer, directory)
+    )
+    # The public response never waits for directory lookup, block suppression or SMTP.
+    return reserved.model_copy(update={"invite_url": None})
+
+
+async def _deliver_reserved(principal, reserved, factory, settings, mailer, directory) -> None:
+    """Private worker: recheck revocation, invitation state, expiry and blocks before mail."""
+    outcome = "unknown"
     try:
-        await mailer.send_invitation(
-            destination=reserved.email,
-            invite_url=reserved.invite_url,
-            idempotency_key=str(invitation_id),
-        )
-        outcome = "sent"
+        if directory is None:
+            from revel.auth.workos_users import WorkOSUserDirectory
+
+            if settings.workos_api_key is None:
+                raise Unavailable()
+            directory = WorkOSUserDirectory(settings.workos_api_key.get_secret_value())
+        subjects = await directory.subjects_for_email(reserved.email)
+        if subjects is None:
+            raise Unavailable()
+
+        def permitted() -> bool:
+            with factory() as session, session.begin():
+                _start(session, principal)
+                targets = list(
+                    session.scalars(select(User.id).where(User.workos_user_id.in_(subjects)))
+                )
+                for key in sorted(
+                    {
+                        connections.pair_lock_key(a, b)
+                        for target in targets
+                        for a, b in ((principal.user_id, target), (target, principal.user_id))
+                    }
+                ):
+                    connections._advisory_lock(session, key)
+                row = session.get(Invitation, reserved.id, with_for_update=True)
+                now = session.scalar(select(func.now()))
+                if (
+                    row is None
+                    or row.status != "pending"
+                    or row.expires_at <= now
+                    or row.delivery_status != "sending"
+                ):
+                    return False
+                blocked = session.scalar(
+                    select(ConnectionRequest.id)
+                    .where(
+                        ConnectionRequest.status == "blocked",
+                        or_(
+                            (ConnectionRequest.requester_user_id == principal.user_id)
+                            & ConnectionRequest.target_user_id.in_(targets),
+                            ConnectionRequest.requester_user_id.in_(targets)
+                            & (ConnectionRequest.target_user_id == principal.user_id),
+                        ),
+                    )
+                    .limit(1)
+                )
+                return not blocked and principal.user_id not in targets
+
+        if await _run(permitted):
+            await mailer.send_invitation(
+                destination=reserved.email,
+                invite_url=reserved.invite_url,
+                idempotency_key=str(reserved.id),
+            )
+            outcome = "sent"
     except Exception:
-        # A timeout may have delivered. Never automatically resend this record.
+        # Includes uncertain SMTP outcomes: never retry this durable reservation.
         outcome = "unknown"
 
-    def finish() -> InvitationInfo:
+    def finish() -> None:
         with factory() as session, session.begin():
-            row = session.get(Invitation, invitation_id, with_for_update=True)
-            row.delivery_status = outcome
-            return _info(row, settings)
+            row = session.get(Invitation, reserved.id, with_for_update=True)
+            if row is not None and row.delivery_status == "sending":
+                row.delivery_status = outcome
 
-    return await _run(finish)
+    await _run(finish)
 
 
 async def _verified_email(

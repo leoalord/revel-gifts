@@ -31,6 +31,14 @@ def config():
     )
 
 
+@pytest.fixture(autouse=True)
+async def mail_dispatcher(config):
+    from revel.services.invitation_mail import dispatcher_lifespan
+
+    async with dispatcher_lifespan(config) as dispatcher:
+        yield dispatcher
+
+
 @pytest.fixture
 def factory():
     url = os.environ.get("REVEL_TEST_DATABASE_URL")
@@ -275,6 +283,9 @@ async def test_create_dedupe_and_send_confirmation(people, factory, config):
         settings=config,
         sessions=lambda: factory,
     )
+    from revel.services.invitation_mail import dispatcher_for
+
+    await dispatcher_for(config).wait_idle()
     assert len(mailer.sent) == 1
     assert mailer.sent[0]["destination"] == "friend@example.test"
     with factory() as session:
@@ -306,6 +317,9 @@ async def test_unknown_mail_outcome_never_resends(people, factory, config):
         settings=config,
         sessions=lambda: factory,
     )
+    from revel.services.invitation_mail import dispatcher_for
+
+    await dispatcher_for(config).wait_idle()
     assert len(mailer.sent) == 1
 
 
@@ -405,6 +419,9 @@ async def test_concurrent_send_reserves_once(people, factory, config):
             for _ in range(4)
         )
     )
+    from revel.services.invitation_mail import dispatcher_for
+
+    await dispatcher_for(config).wait_idle()
     assert len(mailer.sent) == 1
 
 
@@ -449,6 +466,9 @@ async def test_delivery_block_is_private_and_prevents_external_send(people, fact
         sessions=lambda: factory,
     )
     assert result.delivery_status == "submitted"
+    from revel.services.invitation_mail import dispatcher_for
+
+    await dispatcher_for(config).wait_idle()
     assert not mailer.sent
     with factory() as session:
         assert session.get(Invitation, info.id).delivery_status == "unknown"
@@ -512,6 +532,9 @@ async def test_send_rate_limit_is_exact(people, factory, config, monkeypatch):
             settings=config,
             sessions=lambda: factory,
         )
+    from revel.services.invitation_mail import dispatcher_for
+
+    await dispatcher_for(config).wait_idle()
     assert len(mailer.sent) == 1
 
 
@@ -539,3 +562,124 @@ async def test_concurrent_accept_cancel_one_wins(people, factory, config):
         assert (row.status == "accepted" and len(requests) == 1) or (
             row.status == "cancelled" and not requests
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("transport", ["http", "mcp"])
+@pytest.mark.parametrize("blocked", [False, True])
+@pytest.mark.parametrize("fail_transport", [False, True])
+async def test_send_response_never_waits_for_private_lookup_or_transport(
+    people, factory, config, monkeypatch, transport, blocked, fail_transport, mail_dispatcher
+):
+    import anyio
+    from fastapi import FastAPI
+    from mcp.server.mcpserver import MCPServer
+
+    from revel.api.invitations import router
+    from revel.auth.ui import current_ui_principal
+    from revel.mcp import invitation_tools
+    from revel.services import connections, invitation_mail
+
+    config.workos_api_key = SecretStr("test-key")
+    config.workos_client_id = "client_test"
+    config.workos_authkit_domain = "test.authkit.app"
+    info = await make(people, factory, config)
+    if blocked:
+        with factory() as session, session.begin():
+            session.add(
+                ConnectionRequest(
+                    requester_user_id=people[0].user_id,
+                    target_user_id=people[1].user_id,
+                    status="blocked",
+                    responded_at=datetime.now(UTC),
+                )
+            )
+
+    lookup_started, lookup_release = anyio.Event(), anyio.Event()
+    mail_started, mail_release = anyio.Event(), anyio.Event()
+    calls = []
+
+    class GatedDirectory:
+        async def subjects_for_email(self, email):
+            lookup_started.set()
+            await lookup_release.wait()
+            return ["user_recipient"]
+
+    class GatedMailer:
+        async def send_invitation(self, **kwargs):
+            calls.append(kwargs)
+            mail_started.set()
+            await mail_release.wait()
+            if fail_transport:
+                raise TimeoutError("synthetic private failure")
+
+    monkeypatch.setattr(invitation_mail, "configured_mailer", lambda _: GatedMailer())
+    monkeypatch.setattr("revel.auth.workos_users.WorkOSUserDirectory", lambda _: GatedDirectory())
+    monkeypatch.setattr(connections, "_default_sessionmaker", lambda: factory)
+    principal_calls = []
+
+    async def authenticated(_):
+        principal_calls.append(True)
+        return people[0]
+
+    if transport == "http":
+        app = FastAPI()
+        app.state.settings = config
+        app.include_router(router)
+        app.dependency_overrides[current_ui_principal] = lambda: people[0]
+
+        async def request_send():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://revel.example"
+            ) as client:
+                result = await client.post(
+                    f"/api/invitations/{info.id}/send",
+                    json={"owner_confirmed": True},
+                    headers={"Origin": "https://revel.example"},
+                )
+            assert result.status_code == 200
+            return result.json()
+    else:
+        server = MCPServer(name="send-timing-regression")
+        invitation_tools.register(server, config)
+        monkeypatch.setattr(invitation_tools, "principal_from_mcp_context", authenticated)
+
+        async def request_send():
+            result = await server.call_tool(
+                "manage_invitations",
+                {"action": "send", "invitation_id": str(info.id), "owner_confirmed": True},
+            )
+            assert not result.is_error
+            import json
+
+            return result.structured_content or json.loads(result.content[0].text)
+
+    try:
+        # A gated directory cannot finish. A public response that awaits it fails this check.
+        with anyio.fail_after(1):
+            response = await request_send()
+        assert response["delivery_status"] == "submitted"
+        assert response["invite_url"] is None
+        with anyio.fail_after(1):
+            await lookup_started.wait()
+        assert not lookup_release.is_set()
+        lookup_release.set()
+        if not blocked:
+            with anyio.fail_after(1):
+                await mail_started.wait()
+            assert not mail_release.is_set()
+        mail_release.set()
+        with anyio.fail_after(1):
+            await mail_dispatcher.wait_idle()
+        # Provider errors and suppression have the same response as a completed transport.
+        repeated = await request_send()
+        assert repeated == response
+        assert len(calls) == (0 if blocked else 1)
+        if transport == "mcp":
+            assert len(principal_calls) == 2
+        with factory() as session:
+            expected = "unknown" if blocked or fail_transport else "sent"
+            assert session.get(Invitation, info.id).delivery_status == expected
+    finally:
+        lookup_release.set()
+        mail_release.set()

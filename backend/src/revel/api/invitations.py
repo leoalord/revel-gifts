@@ -3,7 +3,7 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -51,30 +51,44 @@ async def _call(fn, *args, **kwargs):
 
 
 @router.get("")
-async def list_sent(principal: CurrentUIPrincipal):
-    return await _call(svc.list_sent, principal)
+async def list_sent(principal: CurrentUIPrincipal, request: Request):
+    return await _call(svc.list_sent, principal, settings=request.app.state.settings)
 
 
 @router.post("")
-async def create(principal: SameOriginUIPrincipal, body: CreateBody):
-    return await _call(svc.create, principal, **body.model_dump())
+async def create(principal: SameOriginUIPrincipal, body: CreateBody, request: Request):
+    return await _call(
+        svc.create, principal, settings=request.app.state.settings, **body.model_dump()
+    )
 
 
 @router.post("/preview")
-async def preview(principal: SameOriginUIPrincipal, body: TokenBody):
-    return await _call(svc.redeem, principal, token=body.token, action="preview")
+async def preview(principal: SameOriginUIPrincipal, body: TokenBody, request: Request):
+    return await _call(
+        svc.redeem,
+        principal,
+        token=body.token,
+        action="preview",
+        settings=request.app.state.settings,
+    )
 
 
 @router.post("/respond")
-async def respond(principal: SameOriginUIPrincipal, body: RespondBody):
-    return await _call(svc.redeem, principal, **body.model_dump())
+async def respond(principal: SameOriginUIPrincipal, body: RespondBody, request: Request):
+    return await _call(
+        svc.redeem, principal, settings=request.app.state.settings, **body.model_dump()
+    )
 
 
 @router.post("/{invitation_id}/send")
-async def send(principal: SameOriginUIPrincipal, invitation_id: UUID, body: ConfirmBody):
-    return await _call(svc.send, principal, invitation_id, **body.model_dump())
+async def send(
+    principal: SameOriginUIPrincipal, invitation_id: UUID, body: ConfirmBody, request: Request
+):
+    return await _call(
+        svc.send, principal, invitation_id, settings=request.app.state.settings, **body.model_dump()
+    )
 
 
 @router.post("/{invitation_id}/cancel")
-async def cancel(principal: SameOriginUIPrincipal, invitation_id: UUID):
-    return await _call(svc.cancel, principal, invitation_id)
+async def cancel(principal: SameOriginUIPrincipal, invitation_id: UUID, request: Request):
+    return await _call(svc.cancel, principal, invitation_id, settings=request.app.state.settings)

@@ -42,3 +42,20 @@ invalidates redemption even if an already reserved email subsequently arrives. I
 URL fragments; do not put tokens in server path/query strings, logs, prompts or third-party
 analytics. Verify actual mailbox delivery, WorkOS verified-email binding, new/existing-account
 browser/MCP continuity and recipient acceptance separately before declaring adoption ready.
+
+
+SMTP enablement also requires `INVITATION_BACKGROUND_DELIVERY_READY=true`, which defaults to
+false and is an explicit operator attestation after approved runtime configuration. Read-only
+inspection of development `revel-app` found `run.googleapis.com/cpu-throttling=true` and
+`minScale=0`; that configuration must not enable detached SMTP delivery. Approve and verify
+instance-based CPU (`cpu_idle=false`) or replace the dispatcher with approved durable worker
+infrastructure before setting the gate. Provider/DNS/runtime plans remain approval work.
+
+The application lifespan owns the in-process mail task group and drains jobs on graceful
+shutdown. HTTP and MCP return `submitted` after a durable once-only reservation, before any
+private WorkOS lookup, block suppression or SMTP. Both blocked and unblocked requests take
+the same response path. The worker rechecks current delegation, cancellation, expiry and
+blocks before starting an attempt. Once an attempt starts, a later block or cancellation
+cannot recall it. Process crashes or suspended CPU may leave `sending`/`unknown`; no automatic
+replay occurs. This is not a durable delivery queue and never proves mailbox delivery. The
+runtime gate and real approved-mailbox acceptance are required before enabling email.

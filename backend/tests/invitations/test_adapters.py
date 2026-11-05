@@ -180,3 +180,43 @@ def test_supported_mailbox_has_exact_smtp_envelope(email):
 
     canonical = svc.normalize_email(email)
     assert quoteaddr(canonical) == f"<{canonical}>"
+
+
+def test_application_owns_and_releases_mail_dispatcher(config):
+    from revel.app import create_app
+    from revel.services.invitation_mail import dispatcher_for
+
+    assert dispatcher_for(config) is None
+    with TestClient(create_app(config)):
+        assert dispatcher_for(config).running
+    assert dispatcher_for(config) is None
+
+
+@pytest.mark.anyio
+async def test_dispatcher_observes_worker_errors_and_drains():
+    from revel.services.invitation_mail import MailDispatcher
+
+    dispatcher = MailDispatcher()
+    calls = []
+
+    async def fails():
+        calls.append(True)
+        raise RuntimeError("synthetic worker failure")
+
+    async with dispatcher.run():
+        dispatcher.enqueue(fails)
+        await dispatcher.wait_idle()
+    assert calls == [True]
+    assert not dispatcher.running
+
+
+def test_smtp_requires_explicit_background_runtime_gate(config):
+    config.invitation_mail_provider = "smtp"
+    config.invitation_smtp_host = "smtp.example.test"
+    config.invitation_smtp_username = "test-user"
+    config.invitation_smtp_password = SecretStr("test-password")
+    config.invitation_from_email = "invites@example.test"
+    with pytest.raises(svc.MailUnavailable):
+        configured_mailer(config)
+    config.invitation_background_delivery_ready = True
+    assert isinstance(configured_mailer(config), SMTPInvitationMailer)

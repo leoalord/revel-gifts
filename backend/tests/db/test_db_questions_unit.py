@@ -44,16 +44,20 @@ NEW_TABLES = {
     "answers",
     "answer_evidence",
 }
-ALL_TABLES = {
-    "users",
-    "agents",
-    "agent_delegations",
-    "agent_delegation_sessions",
-    "profiles",
-    "contribution_policies",
-    "claims",
-    "claim_events",
-} | NEW_TABLES | {"invitations", "inbox_check_setups"}
+ALL_TABLES = (
+    {
+        "users",
+        "agents",
+        "agent_delegations",
+        "agent_delegation_sessions",
+        "profiles",
+        "contribution_policies",
+        "claims",
+        "claim_events",
+    }
+    | NEW_TABLES
+    | {"invitations", "inbox_check_setups"}
+)
 MIGRATION_0003 = (
     Path(__file__).resolve().parents[2]
     / "migrations"

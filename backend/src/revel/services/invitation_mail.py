@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import smtplib
 import ssl
+from contextlib import asynccontextmanager
 from email.message import EmailMessage
 from functools import partial
 from urllib.parse import urlsplit
 
+import anyio
 import anyio.to_thread
 
 from revel.settings import Settings
@@ -55,7 +57,7 @@ class SMTPInvitationMailer:
             "Open the link, sign in with this email through WorkOS, then accept or decline:\n"
             + invite_url
             + "\n\n"
-            "This invitation expires in seven days. Accepting grants no profile access. "
+            "The invitation page shows the link expiry. Accepting grants no profile access. "
             "Sharing permissions are approved separately. If you weren't expecting this "
             "invitation, you can ignore it.\n"
         )
@@ -77,5 +79,77 @@ def configured_mailer(settings: Settings):
     from revel.services.invitations import DisabledMailer
 
     if settings.invitation_mail_provider == "smtp":
+        if not settings.invitation_background_delivery_ready:
+            from revel.services.invitations import MailUnavailable
+
+            raise MailUnavailable()
         return SMTPInvitationMailer(settings)
     return DisabledMailer()
+
+
+class MailDispatcher:
+    """Application-lifespan task group, with observed failures and graceful job drain.
+
+    This is deliberately at-most-once: a process crash leaves a durable `sending`
+    reservation, which is never replayed automatically. It is not a durable mail queue.
+    """
+
+    def __init__(self):
+        self._group = None
+        self._pending = 0
+        self._idle = anyio.Event()
+        self._idle.set()
+
+    @property
+    def running(self) -> bool:
+        return self._group is not None
+
+    @asynccontextmanager
+    async def run(self):
+        async with anyio.create_task_group() as group:
+            self._group = group
+            try:
+                yield self
+            finally:
+                self._group = None
+
+    def enqueue(self, job) -> None:
+        if self._group is None:
+            raise RuntimeError("invitation dispatcher is not running")
+        if self._pending == 0:
+            self._idle = anyio.Event()
+        self._pending += 1
+        self._group.start_soon(self._observe, job)
+
+    async def _observe(self, job) -> None:
+        try:
+            await job()
+        except Exception:
+            # The worker records unknown when possible. Never expose provider errors or
+            # private account/block evidence to a request, logs, or the task-group caller.
+            pass
+        finally:
+            self._pending -= 1
+            if self._pending == 0:
+                self._idle.set()
+
+    async def wait_idle(self) -> None:
+        await self._idle.wait()
+
+
+_dispatchers: dict[int, MailDispatcher] = {}
+
+
+def dispatcher_for(settings: Settings) -> MailDispatcher | None:
+    return _dispatchers.get(id(settings))
+
+
+@asynccontextmanager
+async def dispatcher_lifespan(settings: Settings):
+    dispatcher = MailDispatcher()
+    async with dispatcher.run():
+        _dispatchers[id(settings)] = dispatcher
+        try:
+            yield dispatcher
+        finally:
+            _dispatchers.pop(id(settings), None)

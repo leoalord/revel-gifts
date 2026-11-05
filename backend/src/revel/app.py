@@ -14,6 +14,7 @@ from revel.auth.fga import create_fga_client
 from revel.auth.mcp_auth import mcp_auth_kwargs
 from revel.auth.session_cookie import RefreshedSessionCookieMiddleware
 from revel.mcp.server import build_mcp_asgi_app, create_mcp_server
+from revel.services.invitation_mail import dispatcher_lifespan
 from revel.settings import Settings, get_settings
 
 
@@ -33,7 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         configure_authz(app.state.fga)
         try:
             # The MCP sub-app's own lifespan is not run; the parent owns MCP startup/shutdown.
-            async with mcp_server.session_manager.run():
+            async with dispatcher_lifespan(settings), mcp_server.session_manager.run():
                 yield
         finally:
             reset_authz(app.state.fga)

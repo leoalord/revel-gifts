@@ -72,6 +72,7 @@ class Settings(BaseSettings):
 
     # --- Invitation mail (disabled until provider/sender approval and configuration) ---
     invitation_mail_provider: Literal["disabled", "smtp"] = "disabled"
+    invitation_background_delivery_ready: bool = False
     invitation_smtp_host: str | None = None
     invitation_smtp_port: int = Field(default=465, ge=1, le=65535)
     invitation_smtp_username: str | None = None
