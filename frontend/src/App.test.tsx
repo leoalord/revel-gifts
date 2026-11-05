@@ -84,10 +84,10 @@ describe("session bootstrap", () => {
     expect(within(active).getByText("Cursor")).toBeInTheDocument();
     expect(within(active).queryByText("Muse")).not.toBeInTheDocument();
     expect(within(active).queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
-    const setup = screen.getByRole("heading", { name: "Connect another assistant" }).parentElement!;
-    const summaries = [...setup.querySelectorAll("details summary")].map((element) => element.textContent);
+    const setup = screen.getByRole("heading", { name: "Connect another assistant" }).closest("aside")!;
+    const summaries = [...setup.querySelectorAll("details summary strong")].map((element) => element.textContent);
     expect(summaries[0]).toBe("Muse");
-    expect(summaries.slice(-2)).toEqual(["Grok Bot · Possibly already connected", "Cursor · Possibly already connected"]);
+    expect(summaries.slice(-2)).toEqual(["Grok Bot", "Cursor"]);
   });
 
   it("falls back to the email when there is no display name", async () => {

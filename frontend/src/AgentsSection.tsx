@@ -5,7 +5,8 @@ import { ConfirmButton } from "./ConfirmButton";
 import { agentsApi, isStatus, messageFor } from "./connectionsApi";
 import type { ConnectedAgent } from "./connectionsApi";
 import { formatTime } from "./format";
-import { SetupSection } from "./SetupSection";
+import { AssistantSetup } from "./AssistantSetup";
+import { RegisteredAssistantMark } from "./ProviderMarks";
 
 /** `agent.label` is the app's registered name (F2), not a verified identity: plain text only. */
 function AgentLabel({ agent }: { agent: ConnectedAgent["agent"] }) {
@@ -16,50 +17,6 @@ function AgentLabel({ agent }: { agent: ConnectedAgent["agent"] }) {
         (registered app name)
       </span>
     </span>
-  );
-}
-
-const MCP_URL = "https://api.revel.gifts/mcp";
-const SETUP_GUIDE = "https://revel.gifts/#connect";
-
-const PROVIDERS = [
-  { name: "Muse", labels: ["muse"], steps: "Paste the starter prompt into a Muse chat." },
-  { name: "Grok Bot", labels: ["grok bot", "cursor"], steps: "Paste the starter prompt into a Grok Bot chat." },
-  { name: "OpenAI Dots + ChatGPT", labels: ["chatgpt.com"], steps: "In ChatGPT Desktop, open Settings → Plugins → Add → Add MCP server. Select Streamable HTTP and enter the MCP URL." },
-  { name: "Anthropic Duet + Claude", labels: ["claude.ai", "claude"], steps: "In Claude Desktop, open Settings → Customize → Connectors → + Add → Add custom connector. Enter the MCP URL." },
-  { name: "Perplexity Computer", labels: ["perplexity computer", "www.perplexity.ai"], steps: "Open Plugins → + Add custom → Connector → Add MCP connector. Enter the MCP URL and choose OAuth if prompted." },
-  { name: "Cursor", labels: ["cursor"], steps: "Add Revel Gifts as a remote server using the MCP URL in your Cursor MCP configuration." },
-];
-
-function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
-  // Names are self-reported. Use them only to order setup options, never to verify a provider.
-  // Grok Bot has registered as Cursor, so either setup option may already be covered.
-  const labels = new Set(active.map(({ agent }) => agent.label.trim().toLowerCase()));
-  const hasMatch = (provider: typeof PROVIDERS[number]) =>
-    provider.labels.some((label) => labels.has(label));
-  const ordered = [...PROVIDERS].sort((a, b) => Number(hasMatch(a)) - Number(hasMatch(b)));
-
-  return (
-    <aside className="assistant-setup" aria-labelledby="connect-assistant-heading">
-      <p className="eyebrow">Another perspective</p>
-      <h3 id="connect-assistant-heading">{active.length ? "Connect another assistant" : "Connect an assistant"}</h3>
-      <p>Your everyday chats, research and creative projects can each reveal different preferences. Connect the assistants you use to build a fuller picture. You choose what they may contribute and share.</p>
-      <p className="hint">Choose an assistant for connection steps.</p>
-      {ordered.map((provider) => (
-        <details key={provider.name}>
-          <summary>
-            <strong>{provider.name}</strong>
-            {hasMatch(provider) && <span className="hint"> · Possibly already connected</span>}
-          </summary>
-          <p>{provider.steps}</p>
-          <p className="server-address">Server URL: <code>{MCP_URL}</code></p>
-          <p>Follow the authorization link to sign in to Revel through WorkOS, then return to your assistant to start or update your profile.</p>
-        </details>
-      ))}
-      <p className="hint">Registered app names can differ from the assistant you use. “Possibly already connected” is a name match, not verified provider identity.</p>
-      <SetupSection />
-      <p className="full-guide"><a href={SETUP_GUIDE}>Full connection guide <span aria-hidden="true">↗</span></a></p>
-    </aside>
   );
 }
 
@@ -147,9 +104,10 @@ export function AgentsSection({ home = false }: { home?: boolean }) {
                   {active.map((a) => (
                     <li key={a.delegation_id} className="row assistant-row">
                       <div className="assistant-identity">
-                        <span className="identity-icon" aria-hidden="true">{a.agent.label.trim().slice(0, 1).toLocaleUpperCase() || "A"}</span>
+                        <RegisteredAssistantMark label={a.agent.label} />
                         <div>
                           <AgentLabel agent={a.agent} />
+                          {a.agent.label.trim().toLowerCase() === "cursor" && <div className="hint">Could be Cursor or Grok Bot</div>}
                           <div className="hint">Connected {formatTime(a.connected_at)}</div>
                         </div>
                       </div>
@@ -191,7 +149,7 @@ export function AgentsSection({ home = false }: { home?: boolean }) {
             </>
           )}
         </div>
-      {home && <AssistantSetup active={active} />}
+        {home && <AssistantSetup active={active} />}
       </div>
     </section>
   );
