@@ -60,3 +60,15 @@ domain_name           = "api.revel.gifts"
 # changes are approved. True allocates CPU between requests (instance-based billing), and
 # passes the application readiness gate; it does not enable SMTP or create credentials.
 invitation_background_delivery_ready = false
+
+# Resend setup is two-stage and needs separate explicit approvals. Stage 1 creates only an
+# empty secret and app-only accessor. Add a sending-only, domain-restricted API key securely
+# as a secret version outside Terraform. Stage 2 enables the verified domain/runtime/key.
+enable_resend_secret    = false
+invitation_mail_provider = "disabled"
+invitation_from_email    = ""
+# After approved provisioning + key version + domain verification only:
+# invitation_background_delivery_ready = true
+# invitation_mail_provider = "resend"
+# invitation_from_email = "invites@your-verified-domain.example"
+# app_secret_env = [...existing names..., "RESEND_API_KEY"]

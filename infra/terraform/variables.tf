@@ -182,14 +182,14 @@ variable "app_database_url_scheme" {
 }
 
 variable "app_secret_env" {
-  description = "Placeholder secrets (by secret ID, used as the env var name) to expose to revel-app. Add a name only after a version exists, or the Cloud Run deploy fails. Allowed: WORKOS_API_KEY, WORKOS_COOKIE_PASSWORD, FIREWORKS_API_KEY, META_API_KEY. WORKOS_CLIENT_ID is not a secret; use workos_client_id."
+  description = "Placeholder secrets (by secret ID, used as the env var name) to expose to revel-app. Add a name only after a version exists, or the Cloud Run deploy fails. Allowed: WORKOS_API_KEY, WORKOS_COOKIE_PASSWORD, FIREWORKS_API_KEY, META_API_KEY; RESEND_API_KEY only with enable_resend_secret. WORKOS_CLIENT_ID is not a secret; use workos_client_id."
   type        = list(string)
   default     = []
 
   validation {
     condition = alltrue([for s in var.app_secret_env : contains([
       "WORKOS_API_KEY", "WORKOS_COOKIE_PASSWORD", "FIREWORKS_API_KEY", "META_API_KEY",
-    ], s)])
+    ], s) || (s == "RESEND_API_KEY" && var.enable_resend_secret)])
     error_message = "app_secret_env may only contain the placeholder secret IDs defined in secrets.tf."
   }
 }
@@ -240,4 +240,40 @@ variable "invitation_background_delivery_ready" {
   description = "Opt in to instance-based CPU allocation for invitation dispatch and assert runtime readiness. Requires explicit user approval and deployed verification before true. This does not enable SMTP or provision a mail provider."
   type        = bool
   default     = false
+}
+
+variable "enable_resend_secret" {
+  description = "Provision an empty RESEND_API_KEY secret and app-only accessor grant. Requires explicit infrastructure approval. Add the sending-only API key out of band; Terraform never stores its value."
+  type        = bool
+  default     = false
+}
+
+variable "invitation_mail_provider" {
+  description = "Invitation mail provider; disabled until the approved domain/key/runtime are ready. Enabling Resend requires explicit configuration/apply approval."
+  type        = string
+  default     = "disabled"
+
+  validation {
+    condition     = contains(["disabled", "resend"], var.invitation_mail_provider)
+    error_message = "invitation_mail_provider must be disabled or resend."
+  }
+
+  validation {
+    condition = var.invitation_mail_provider != "resend" || (
+      var.enable_resend_secret && var.invitation_background_delivery_ready &&
+      contains(var.app_secret_env, "RESEND_API_KEY") && var.invitation_from_email != ""
+    )
+    error_message = "Resend requires approved secret provisioning, background CPU readiness, RESEND_API_KEY in app_secret_env after a version exists, and a verified sender."
+  }
+}
+
+variable "invitation_from_email" {
+  description = "Approved email address on the verified Resend sending domain. Empty until approved; no credentials."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.invitation_from_email == "" || can(regex("^[A-Za-z0-9._%+!-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$", var.invitation_from_email))
+    error_message = "Use a plain sender email address on the approved verified domain."
+  }
 }

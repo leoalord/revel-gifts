@@ -2,12 +2,12 @@ locals {
   # Secrets whose values are supplied out of band (gcloud secrets versions add).
   # Terraform creates the containers only; it never holds these values.
   # WORKOS_CLIENT_ID is not a secret; it is a plain env var (var.workos_client_id).
-  placeholder_secrets = [
+  placeholder_secrets = concat([
     "WORKOS_API_KEY",
     "WORKOS_COOKIE_PASSWORD",
     "FIREWORKS_API_KEY",
     "META_API_KEY",
-  ]
+  ], var.enable_resend_secret ? ["RESEND_API_KEY"] : [])
 }
 
 resource "google_secret_manager_secret" "database_url" {
