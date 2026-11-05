@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from "react";
 
 import { UnauthorizedError } from "./api";
 import { AgentsSection } from "./AgentsSection";
+import { InvitationSection } from "./InvitationSection";
 import { ConfirmButton } from "./ConfirmButton";
 import {
   TIERS,
@@ -569,6 +570,7 @@ export function ConnectionsScreen() {
         )}
       </Section>
 
+      <InvitationSection />
       <AgentsSection />
     </section>
   );

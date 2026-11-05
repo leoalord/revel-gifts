@@ -6,6 +6,9 @@ import type { Mock, MockInstance } from "vitest";
 import { App } from "./App";
 import { LOGIN_MARKER_KEY, browserNavigation } from "./api";
 
+// Setup has its own contract/consent tests in Adoption.test.tsx.
+vi.mock("./SetupSection", () => ({ SetupSection: () => null }));
+
 const SESSION = {
   user: {
     id: "00000000-0000-4000-8000-000000000001",
