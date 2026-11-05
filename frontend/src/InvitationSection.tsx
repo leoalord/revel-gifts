@@ -8,7 +8,7 @@ interface Invitation {
   id: string;
   email: string;
   status: string;
-  expires_at: string;
+  expires_at: string | null;
   delivery_status: string;
   invite_url?: string | null;
 }
@@ -43,7 +43,7 @@ export function InvitationSection() {
     setBusy(true); setError(null); setNotice(null);
     try {
       await apiRequest(`/api/invitations/${encodeURIComponent(id)}/cancel`, { method: "POST" });
-      setLink(null); setNotice("Invitation cancelled. Its link can no longer be accepted.");
+      setLink(null); setNotice("Invitation cancelled. Its link can no longer be used.");
       await reload();
     } catch (e) { setError(messageFor(e)); } finally { setBusy(false); }
   }
@@ -61,6 +61,6 @@ export function InvitationSection() {
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {link && <div className="field"><label htmlFor="invite-link">Invitation link (private)</label><input id="invite-link" readOnly value={link} onFocus={(e) => e.target.select()} /><button type="button" onClick={() => { void navigator.clipboard.writeText(link).then(() => setNotice("Invitation link copied."), () => setNotice("Select the link above and copy it.")); }}>Copy invitation link</button></div>}
-    {items.length > 0 && <ul className="rows">{items.map((item) => <li className="row" key={item.id}><strong>{item.email}</strong><span className="badge">{item.status}</span><p className="hint">Expires {formatTime(item.expires_at)} · Email: {item.delivery_status}</p>{item.status === "pending" && <button type="button" disabled={busy} onClick={() => void cancel(item.id)}>Cancel invitation</button>}</li>)}</ul>}
+    {items.length > 0 && <ul className="rows">{items.map((item) => <li className="row" key={item.id}><strong>{item.email}</strong><span className="badge">{item.status === "joined" ? "Joined Revel" : item.status}</span><p className="hint">{item.expires_at ? `Expires ${formatTime(item.expires_at)} · ` : ""}Email: {item.delivery_status}</p>{item.status === "pending" && <button type="button" disabled={busy} onClick={() => void cancel(item.id)}>Cancel invitation</button>}</li>)}</ul>}
   </section>;
 }

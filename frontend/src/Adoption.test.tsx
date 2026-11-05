@@ -10,6 +10,7 @@ import { jsonResponse } from "./test-fixtures";
 beforeEach(() => {
   vi.restoreAllMocks();
   clearInvitation();
+  sessionStorage.removeItem("revel.invitationJoinIntent");
   window.history.replaceState(null, "", "/app/");
 });
 
@@ -22,24 +23,72 @@ describe("invitation capabilities and consent", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, { detail: "Sign in" })));
     const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
-    fireEvent.click(await screen.findByRole("button", { name: "Continue with WorkOS" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Revel account" }));
     expect(assign).toHaveBeenCalledWith("/auth/login?return_to=%2Fapp%2Finvite");
   });
 
-  it("never consumes an invitation merely by loading it", async () => {
+  it("joins only after the primary action and opens the app without a connection decision", async () => {
     window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
     const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
       if (url === "/auth/session") return jsonResponse(200, { user: { email: "alex@example.test" } });
-      if (url.endsWith("/preview")) return jsonResponse(200, { sender_name: "Sam", expires_at: "2026-12-01T12:00:00Z", status: "pending", sharing_notice: "No profile access is granted." });
-      expect(JSON.parse(String(options?.body))).toEqual({ token: "synthetic-private-capability", action: "decline" });
-      return jsonResponse(200, { status: "declined" });
+      if (url.endsWith("/preview")) return jsonResponse(200, { sender_name: "Sam", expires_at: null, status: "pending" });
+      expect(url).toBe("/api/invitations/join");
+      expect(JSON.parse(String(options?.body))).toEqual({ token: "synthetic-private-capability" });
+      return jsonResponse(200, { status: "joined" });
     });
     vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
-    await screen.findByRole("button", { name: "Accept invitation" });
-    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/respond"))).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "Decline invitation" }));
-    await screen.findByText(/Invitation declined/);
+    const next = await screen.findByRole("button", { name: "Continue to Revel" });
+    await waitFor(() => expect(next).toBeEnabled());
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/join"))).toBe(false);
+    expect(screen.queryByRole("button", { name: "Accept invitation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline invitation" })).not.toBeInTheDocument();
+    fireEvent.click(next);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/app/"));
+    expect(pendingInvitation()).toBeNull();
+  });
+
+  it("completes the signup return without a second acceptance screen", async () => {
+    window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
+    sessionStorage.setItem("revel.invitationJoinIntent", "synthetic-private-capability");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => jsonResponse(200,
+      url === "/auth/session" ? { user: { email: "alex@example.test" } } : { status: "joined" })));
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
+    render(<InviteLanding />);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/app/"));
+    expect(pendingInvitation()).toBeNull();
+    expect(sessionStorage.getItem("revel.invitationJoinIntent")).toBeNull();
+  });
+
+  it("keeps the invitation through wrong-account sign-out and explains recovery", async () => {
+    window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url === "/auth/session") return jsonResponse(200, { user: { email: "wrong@example.test" } });
+      if (url === "/auth/logout") return jsonResponse(200, { logout_url: "https://auth.example.test/logout" });
+      return jsonResponse(404, { detail: "Invitation unavailable" });
+    }));
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
+    render(<InviteLanding />);
+    const changeAccount = await screen.findByRole("button", { name: "Use a different account" });
+    expect(screen.getByText(/reopen the invitation from your email/)).toBeInTheDocument();
+    fireEvent.click(changeAccount);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://auth.example.test/logout"));
+    expect(pendingInvitation()).toBe("synthetic-private-capability");
+  });
+
+  it("keeps open signup usable when invitation attribution is unavailable", async () => {
+    window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
+    const fetchMock = vi.fn(async (url: string) => url === "/auth/session"
+      ? jsonResponse(200, { user: { email: "alex@example.test" } })
+      : jsonResponse(404, { detail: "Invitation unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
+    render(<InviteLanding />);
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Continue to Revel" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/app/"));
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/join"))).toBe(false);
     expect(pendingInvitation()).toBeNull();
   });
 

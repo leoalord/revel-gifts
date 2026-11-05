@@ -3,18 +3,18 @@ import { ApiError, browserNavigation, loginUrl, postLogout } from "./api";
 import type { WhoAmI } from "./api";
 import { clearInvitation, pendingInvitation } from "./inviteContext";
 import { messageFor } from "./connectionsApi";
-import { formatTime } from "./format";
+import { AssistantSetup } from "./AssistantSetup";
 
-interface Preview { sender_name: string | null; expires_at: string; status: string; sharing_notice: string }
+interface Preview { sender_name: string | null; status: string }
+const JOIN_INTENT = "revel.invitationJoinIntent";
 
-// This public landing never redirects automatically: the person chooses to sign in.
+// A page view never joins. Only the primary action (including its auth return) does.
 export function InviteLanding() {
   const [session, setSession] = useState<WhoAmI | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<string | null>(null);
   const [token] = useState(pendingInvitation);
 
   useEffect(() => {
@@ -29,22 +29,41 @@ export function InviteLanding() {
         setSession(who);
         if (!token) return;
         const result = await invitePost<Preview>("preview", { token });
-        if (active) setPreview(result);
-      } catch (e) { if (active) setError(e instanceof Error ? e.message : "Unable to open this invitation."); }
-      finally { if (active) setLoading(false); }
+        if (!active) return;
+        setPreview(result);
+        let intended = false;
+        try { intended = sessionStorage.getItem(JOIN_INTENT) === token; } catch { /* Manual continue remains available. */ }
+        if (intended) {
+          setBusy(true);
+          await invitePost("join", { token });
+          clearInvitation();
+          try { sessionStorage.removeItem(JOIN_INTENT); } catch { /* ignore */ }
+          if (active) browserNavigation.assign("/app/");
+        }
+      } catch (e) {
+        if (active) { setError(messageFor(e)); setPreview(null); setBusy(false); }
+        try { sessionStorage.removeItem(JOIN_INTENT); } catch { /* ignore */ }
+      } finally { if (active) setLoading(false); }
     }
     void load();
     return () => { active = false; };
   }, [token]);
 
-  async function respond(action: "accept" | "decline") {
+  async function continueToRevel() {
     setBusy(true); setError(null);
+    if (!session) {
+      if (token) {
+        try { sessionStorage.setItem(JOIN_INTENT, token); } catch { /* Return page offers Continue. */ }
+      }
+      browserNavigation.assign(loginUrl(token ? "/app/invite" : "/app/"));
+      return;
+    }
     try {
-      await invitePost("respond", { token, action });
+      if (token && preview) await invitePost("join", { token });
       clearInvitation();
-      setOutcome(action === "accept" ? "Invitation accepted. Your connection request is ready to review in Connections. No profile access has been granted." : "Invitation declined. No profile access has been granted.");
-      setPreview(null);
-    } catch (e) { setError(messageFor(e)); } finally { setBusy(false); }
+      try { sessionStorage.removeItem(JOIN_INTENT); } catch { /* ignore */ }
+      browserNavigation.assign("/app/");
+    } catch (e) { setError(messageFor(e)); setPreview(null); setBusy(false); }
   }
 
   async function signOut() {
@@ -56,21 +75,20 @@ export function InviteLanding() {
     } catch (e) { setError(messageFor(e)); } finally { setBusy(false); }
   }
 
-  return <div className="shell"><header className="app-header"><h1 className="brand">Revel Gifts</h1></header><main id="main-content">
-    <section className="panel" aria-labelledby="invite-title"><p className="eyebrow">A more thoughtful way to give</p><h2 id="invite-title">You’re invited to Revel.</h2>
-      <p>Build a useful gifting profile with the assistants that already know you. You choose what they can add and who can see it.</p>
-      {!token && !outcome && <p role="alert">Open the complete invitation link from the person who invited you.</p>}
-      {loading ? <p role="status">Checking sign-in…</p> : <>
-        {session && <p>Signed in as {session.user.email ?? session.user.display_name ?? "your Revel account"}.</p>}
-        {!session && token && <><p>Sign in or create an account through WorkOS using the invited email, then explicitly accept or decline.</p><button type="button" onClick={() => browserNavigation.assign(loginUrl("/app/invite"))}>Continue with WorkOS</button></>}
-        {error && <p role="alert">{error}</p>}
-        {session && error && <><p>If this is a different account, sign out and reopen your invitation link with the invited email.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Sign out to change account</button></>}
-        {preview && <><p>{preview.sender_name || "A Revel member"} invited you. Expires {formatTime(preview.expires_at)}.</p><p>{preview.sharing_notice}</p><div className="actions"><button type="button" disabled={busy} onClick={() => void respond("accept")}>Accept invitation</button><button type="button" disabled={busy} onClick={() => void respond("decline")}>Decline invitation</button></div></>}
-        {outcome && <p role="status">{outcome}</p>}
-      </>}
-      <p><a href="/app/">Continue to your Revel account</a> · <a href="/app/connections">Review connections and sharing</a></p>
+  return <div className="shell invite-welcome"><header className="app-header"><a className="brand" href="https://revel.gifts/">Revel Gifts</a></header><main id="main-content">
+    <section className="invite-intro" aria-labelledby="invite-title">
+      <div><p className="eyebrow">A more thoughtful way to give</p><h1 id="invite-title">You’re invited to Revel.</h1>
+        <p className="invite-description">{preview?.sender_name ? `${preview.sender_name} invited you to Revel. ` : ""}Bring together what your assistants know about you, so the people in your life can give gifts that feel like you.</p>
+        {loading ? <p role="status">Checking sign-in…</p> : <>
+          {session && <p className="hint">Signed in as {session.user.email ?? session.user.display_name ?? "your Revel account"}.</p>}
+          {error && <div className="invite-error"><p role="alert">{error}</p>{session && <><p>You can continue to your account without linking this invitation.</p><p>To use a different account, after signing out, reopen the invitation from your email and sign in with the email that received it.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button></>}</div>}
+          <button className="primary" type="button" disabled={busy} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : session ? "Continue to Revel" : "Create Revel account"}</button>
+          <p className="hint">{session ? "Your profile and sharing stay in your control." : "Already have an account? You can sign in on the next screen."}</p>
+        </>}
+      </div>
+      <img className="invite-illustration" src="/app/revel-context.svg" alt="" />
     </section>
-    <section className="panel"><h3>Set up your assistant</h3><p>Connect to <code>https://api.revel.gifts/mcp</code> through a supported assistant. Muse and Claude have verified Revel prompt/resource guidance; Dots and Grok Bot have verified MCP connection evidence. Scheduling support needs a separate check in your host.</p><p>Use the same verified WorkOS account in your browser and assistant. Return here to finish accepting your invitation. Keep the invitation link out of assistant prompts.</p><p><a href="/guidance/revel-get-started.md">Read Revel’s setup guidance</a> · <a href="https://revel-gifts-public.web.app/#connect" rel="noreferrer">Assistant connection instructions</a></p><p>You can set up an assistant later. Your browser account remains usable.</p></section>
+    <AssistantSetup active={[]} welcome />
   </main></div>;
 }
 

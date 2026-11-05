@@ -1225,3 +1225,14 @@ fieldset { padding: 1rem 1.25rem; }
   .account-name { max-width: 7rem; font-size: 0.75rem; }
   .brand { font-size: 1.4rem; }
 }
+
+.invite-intro { display: grid; grid-template-columns: minmax(0, 1fr) 200px; align-items: center; gap: 32px; padding: 40px 0; border-bottom: 1px solid var(--border); }
+.invite-intro h1 { font-family: Georgia, serif; font-size: clamp(32px, 5vw, 48px); line-height: 1.1; margin: 12px 0 20px; }
+.invite-description { max-width: 620px; }
+.invite-illustration { width: 100%; }
+.invite-welcome .assistant-setup { margin-top: 36px; }
+.invite-welcome .setup-illustration { display: none; }
+.invite-error { margin-bottom: 20px; }
+@media (max-width: 640px) { .invite-intro { grid-template-columns: 1fr; padding: 28px 0; } .invite-illustration { display: none; } }
+
+.invite-welcome .app-header .brand { color: var(--text); text-decoration: none; }
