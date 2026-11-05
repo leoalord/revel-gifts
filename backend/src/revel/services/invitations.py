@@ -99,7 +99,7 @@ class InvitationPreview(BaseModel):
 class Mailer(Protocol):
     async def send_invitation(
         self, *, destination: str, invite_url: str, idempotency_key: str
-    ) -> None: ...
+    ) -> str | None: ...
 
 
 class DisabledMailer:
@@ -370,6 +370,7 @@ async def send(
 async def _deliver_reserved(principal, reserved, factory, settings, mailer, directory) -> None:
     """Private worker: recheck revocation, invitation state, expiry and blocks before mail."""
     outcome = "unknown"
+    provider_message_id = None
     try:
         if directory is None:
             from revel.auth.workos_users import WorkOSUserDirectory
@@ -420,7 +421,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                 return not blocked and principal.user_id not in targets
 
         if await _run(permitted):
-            await mailer.send_invitation(
+            provider_message_id = await mailer.send_invitation(
                 destination=reserved.email,
                 invite_url=reserved.invite_url,
                 idempotency_key=str(reserved.id),
@@ -435,6 +436,8 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
             row = session.get(Invitation, reserved.id, with_for_update=True)
             if row is not None and row.delivery_status == "sending":
                 row.delivery_status = outcome
+                if outcome == "sent" and provider_message_id is not None:
+                    row.provider_message_id = provider_message_id
 
     await _run(finish)
 

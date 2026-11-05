@@ -59,3 +59,38 @@ blocks before starting an attempt. Once an attempt starts, a later block or canc
 cannot recall it. Process crashes or suspended CPU may leave `sending`/`unknown`; no automatic
 replay occurs. This is not a durable delivery queue and never proves mailbox delivery. The
 runtime gate and real approved-mailbox acceptance are required before enabling email.
+
+## Selected provider: native Resend API
+
+Leo selected Resend for RG-66. Set `INVITATION_MAIL_PROVIDER=resend`, an approved
+`INVITATION_FROM_EMAIL`, and inject `RESEND_API_KEY` from a managed secret only after approval
+and verified runtime readiness. Provider defaults remain disabled; the existing
+`INVITATION_BACKGROUND_DELIVERY_READY` defaults false and applies to both SMTP and Resend.
+SMTP remains compatible as an alternative. No provider account, key, sending domain, DNS or
+infrastructure has been created by this code.
+
+Use a Resend key with Sending access restricted to the approved verified sending domain;
+full-access keys are unnecessary. Keep keys out of repository files, logs, prompts and PRs.
+The adapter sends one fixed-origin HTTPS request to `https://api.resend.com/emails`, with
+redirects disabled, a bounded timeout and the invitation UUID as `Idempotency-Key`. Resend
+retains idempotency keys for 24 hours; this does not change Revel's stronger once-only
+reservation/no-automatic-retry behavior for failures, timeouts, restarts or uncertain outcomes.
+A validated provider message UUID is stored privately after API acceptance. It never appears
+in public invitation responses, and API acceptance does not prove mailbox delivery. No
+webhooks or RG-65 question-email delivery are included.
+
+Before enabling: approve the provider account/domain/sender and necessary DNS changes; create
+and securely configure the domain-scoped sending key; review the optional secret/environment
+and CPU policy plan; explicitly approve any infrastructure apply; verify runtime readiness;
+then send only to an explicitly approved test mailbox after sender confirmation. Preserve
+WorkOS verified-email redemption and new/existing-account browser/MCP acceptance checks.
+
+Implementation references: [send email](https://resend.com/docs/api-reference/emails/send-email),
+[idempotency keys](https://resend.com/docs/dashboard/emails/idempotency-keys), and
+[API key permissions](https://resend.com/docs/api-reference/api-keys/create-api-key).
+
+Keep domain-level click and open tracking disabled. Tracking can rewrite links; the adapter
+has no per-email override and does not need a domain-administration key. During approved
+mailbox acceptance, inspect the actual received link and verify its original `#token=`
+fragment survives unchanged before redeeming it. Do not give the runtime full-access domain
+administration credentials to manage tracking settings.

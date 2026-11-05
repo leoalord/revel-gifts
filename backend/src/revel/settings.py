@@ -71,8 +71,9 @@ class Settings(BaseSettings):
     workos_token_audience: str | None = None
 
     # --- Invitation mail (disabled until provider/sender approval and configuration) ---
-    invitation_mail_provider: Literal["disabled", "smtp"] = "disabled"
+    invitation_mail_provider: Literal["disabled", "smtp", "resend"] = "disabled"
     invitation_background_delivery_ready: bool = False
+    resend_api_key: SecretStr | None = None
     invitation_smtp_host: str | None = None
     invitation_smtp_port: int = Field(default=465, ge=1, le=65535)
     invitation_smtp_username: str | None = None

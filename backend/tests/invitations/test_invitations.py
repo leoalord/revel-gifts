@@ -683,3 +683,61 @@ async def test_send_response_never_waits_for_private_lookup_or_transport(
     finally:
         lookup_release.set()
         mail_release.set()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("response_kind", ["success", "error", "timeout", "invalid_id"])
+async def test_resend_provider_reference_stays_private_and_unknown_never_retries(
+    people, factory, config, mail_dispatcher, response_kind
+):
+    from revel.services.resend_mail import ResendInvitationMailer
+
+    config.invitation_from_email = "invites@example.test"
+    config.resend_api_key = SecretStr("re_synthetic_private")
+    info = await make(people, factory, config)
+    provider_id = str(uuid4())
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if response_kind == "timeout":
+            raise httpx.ReadTimeout("private synthetic failure", request=request)
+        if response_kind == "error":
+            return httpx.Response(429, json={"message": "private provider response"})
+        return httpx.Response(
+            200, json={"id": provider_id if response_kind == "success" else "bad"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        mailer = ResendInvitationMailer(config, http_client=client)
+        result = await svc.send(
+            people[0],
+            info.id,
+            owner_confirmed=True,
+            settings=config,
+            sessions=lambda: factory,
+            directory=Directory(),
+            mailer=mailer,
+        )
+        assert result.delivery_status == "submitted"
+        assert "provider_message_id" not in result.model_dump()
+        await mail_dispatcher.wait_idle()
+        listed = await svc.list_sent(people[0], settings=config, sessions=lambda: factory)
+        assert listed[0].delivery_status == "submitted"
+        assert provider_id not in listed[0].model_dump_json()
+        await svc.send(
+            people[0],
+            info.id,
+            owner_confirmed=True,
+            settings=config,
+            sessions=lambda: factory,
+            directory=Directory(),
+            mailer=mailer,
+        )
+        await mail_dispatcher.wait_idle()
+    assert len(requests) == 1
+    assert requests[0].headers["Idempotency-Key"] == str(info.id)
+    with factory() as session:
+        row = session.get(Invitation, info.id)
+        assert row.provider_message_id == (provider_id if response_kind == "success" else None)
+        assert row.delivery_status == ("sent" if response_kind == "success" else "unknown")
