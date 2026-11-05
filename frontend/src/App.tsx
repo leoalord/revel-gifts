@@ -12,6 +12,7 @@ import {
   startSignIn,
 } from "./api";
 import type { WhoAmI } from "./api";
+import { SetupSection } from "./SetupSection";
 import { AgentsSection } from "./AgentsSection";
 import { ConnectionsScreen } from "./ConnectionsScreen";
 import { ContributionsScreen } from "./ContributionsScreen";
@@ -116,6 +117,7 @@ function Home({ onNavigate }: { onNavigate: (path: string) => void }) {
           </li>
         ))}
       </ul>
+      <SetupSection />
       <AgentsSection home />
     </section>
   );

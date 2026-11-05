@@ -45,7 +45,7 @@ function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
       <p>MCP server URL: <code>{MCP_URL}</code></p>
       <details>
         <summary>Starter prompt</summary>
-        <p>Help me get started with Revel Gifts using {MCP_URL}. Confirm my Revel account, read Revel’s profile guidance, and check my existing profile before adding useful gifting details you’re authorized to share.</p>
+        <p>Connect me to Revel Gifts using {MCP_URL}, then load and follow the revel-get-started MCP prompt or resource revel://guidance/revel-get-started. If unavailable, read https://api.revel.gifts/guidance/revel-get-started.md. Resume my existing profile setup and ask for my approval before setting up one recurring inbox task in my confirmed local timezone. Keep invitation links out of this chat.</p>
       </details>
       {ordered.map((provider) => (
         <details key={provider.name}>

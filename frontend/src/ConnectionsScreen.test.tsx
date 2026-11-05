@@ -14,6 +14,9 @@ import type {
 import { AUDIENCES, jsonResponse, mockRoutes, policyResponse } from "./test-fixtures";
 import type { Call } from "./test-fixtures";
 
+// Invitations have their own contract/consent tests in Adoption.test.tsx.
+vi.mock("./InvitationSection", () => ({ InvitationSection: () => null }));
+
 const SAM = { display_name: "Sam Example", handle: "sam", avatar_url: null };
 const JO = { display_name: "Jo Example", handle: "jo", avatar_url: null };
 
