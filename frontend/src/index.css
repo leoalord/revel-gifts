@@ -219,6 +219,7 @@ button {
 }
 
 input[type="text"],
+input[type="email"],
 input:not([type]),
 input[type="date"],
 input[type="number"],
@@ -863,7 +864,7 @@ button.danger {
   inline-size: 2rem;
   block-size: 2rem;
   border-radius: 0.55rem;
-  background: color-mix(in srgb, var(--surface) 84%, var(--accent));
+  background: var(--soft);
   color: var(--text);
   font-size: 0.95rem;
   font-weight: 700;
