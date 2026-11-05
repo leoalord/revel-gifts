@@ -1234,3 +1234,5 @@ fieldset { padding: 1rem 1.25rem; }
 .invite-welcome .setup-illustration { display: none; }
 .invite-error { margin-bottom: 20px; }
 @media (max-width: 640px) { .invite-intro { grid-template-columns: 1fr; padding: 28px 0; } .invite-illustration { display: none; } }
+
+.invite-welcome .app-header .brand { color: var(--text); text-decoration: none; }

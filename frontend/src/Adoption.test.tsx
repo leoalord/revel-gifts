@@ -70,9 +70,10 @@ describe("invitation capabilities and consent", () => {
     }));
     const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
     render(<InviteLanding />);
-    fireEvent.click(await screen.findByRole("button", { name: "Use a different account" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://auth.example.test/logout"));
+    const changeAccount = await screen.findByRole("button", { name: "Use a different account" });
     expect(screen.getByText(/reopen the invitation from your email/)).toBeInTheDocument();
+    fireEvent.click(changeAccount);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://auth.example.test/logout"));
     expect(pendingInvitation()).toBe("synthetic-private-capability");
   });
 
