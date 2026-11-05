@@ -640,5 +640,5 @@ def test_downgrade_to_identity_and_reupgrade(
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0007_inbox_check_setups"
+            == "0008_invitation_provider_message"
         )

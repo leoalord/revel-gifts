@@ -78,11 +78,15 @@ class SMTPInvitationMailer:
 def configured_mailer(settings: Settings):
     from revel.services.invitations import DisabledMailer
 
-    if settings.invitation_mail_provider == "smtp":
+    if settings.invitation_mail_provider in ("smtp", "resend"):
         if not settings.invitation_background_delivery_ready:
             from revel.services.invitations import MailUnavailable
 
             raise MailUnavailable()
+        if settings.invitation_mail_provider == "resend":
+            from revel.services.resend_mail import ResendInvitationMailer
+
+            return ResendInvitationMailer(settings)
         return SMTPInvitationMailer(settings)
     return DisabledMailer()
 
