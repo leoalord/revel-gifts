@@ -20,7 +20,7 @@ const PROVIDERS: { id: ProviderId; name: string; labels: string[]; subtitle: str
   { id: "perplexity", name: "Perplexity Computer", labels: ["perplexity computer", "www.perplexity.ai"], subtitle: "Add a custom MCP connection", steps: ["In Perplexity Computer, open Plugins → + Add custom → Connector → Add MCP connector", "Paste the MCP URL and choose OAuth if prompted", "Return to Perplexity and paste the starter prompt"], copy: "url" },
 ];
 
-export function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
+export function AssistantSetup({ active, welcome = false }: { active: ConnectedAgent[]; welcome?: boolean }) {
   const [open, setOpen] = useState<ProviderId | null>(null);
   const labels = new Set(active.map(({ agent }) => agent.label.trim().toLowerCase()));
   const hasMatch = (provider: typeof PROVIDERS[number]) => provider.labels.some((label) => labels.has(label));
@@ -37,7 +37,7 @@ export function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
 
   return <aside className="assistant-setup" aria-labelledby="connect-assistant-heading">
     <div className="setup-intro">
-      <div><p className="eyebrow">Another perspective</p>
+      <div><p className="eyebrow">{welcome ? "Or start with your assistant" : "Another perspective"}</p>
         <h3 id="connect-assistant-heading">{active.length ? "Connect another assistant" : "Connect an assistant"}</h3>
         <p>Your everyday chats, research and creative projects reveal different sides of you. Bring those perspectives together. You choose what each assistant may contribute and share.</p>
       </div>
@@ -58,12 +58,12 @@ export function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
             <li className="authorization-step"><span className="step-number" aria-hidden="true">3</span><strong>Sign in or create a Revel account</strong><span>Open the authorization link from your assistant. Secure sign-in via WorkOS.</span></li>
             <li><span className="step-number" aria-hidden="true">4</span><strong>{provider.steps[2]}</strong>{provider.copy !== "prompt" && <CopyTextButton text={STARTER} label="Copy starter prompt" />}</li>
           </ol>
-          <p className="hint">Use the same Revel account you’re signed into here. Your assistant will ask for permission before contributing or arranging supported inbox checks.</p>
+          <p className="hint">{welcome ? "Sign in using the email that received your invitation." : "Use the same Revel account you’re signed into here."} Your assistant will ask for permission before contributing or arranging supported inbox checks.</p>
         </div>
       </details>)}
     </div>
-    <p className="hint registration-note">“Possibly connected” is based on registered app names, which can differ from the assistant you use. It is not identity verification.</p>
-    <SetupSection />
-    <p className="full-guide"><a href="https://revel.gifts/#connect">Full connection guide <span aria-hidden="true">↗</span></a></p>
+    {!welcome && <p className="hint registration-note">“Possibly connected” is based on registered app names, which can differ from the assistant you use. It is not identity verification.</p>}
+    {!welcome && <SetupSection />}
+    {!welcome && <p className="full-guide"><a href="https://revel.gifts/#connect">Full connection guide <span aria-hidden="true">↗</span></a></p>}
   </aside>;
 }
