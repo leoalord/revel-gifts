@@ -58,20 +58,32 @@ describe("invitation capabilities and consent", () => {
   });
 });
 
-it("keeps host reports and server checks visibly unverified, and requires approval to change schedule", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    if (url === "/api/setup") return jsonResponse(200, { revision: 2, enabled: true, delegation_id: "agent-1", timezone: "America/Los_Angeles", check_hours: [6,10,14,18], host_task_id: "host-task-1", schedule_state: "host_reported", background_verified: false, last_successful_check_at: "2026-11-04T18:00:00Z", last_check_item_count: 0, host_action_required: false });
-    if (url === "/api/agents") return jsonResponse(200, [{ delegation_id: "agent-1", status: "active", agent: { label: "Test assistant" } }]);
-    return new Response("Canonical starter guidance", { status: 200 });
-  }));
+it("keeps onboarding in the assistant and never configures a schedule on the web", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response("Canonical starter guidance", { status: 200 }));
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  vi.stubGlobal("fetch", fetchMock);
   render(<SetupSection />);
-  await screen.findByText("host reported");
-  expect(screen.getByText("not verified")).toBeVisible();
-  expect(screen.getByText(/does not establish that it ran in the background/)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Save approved schedule preference" })).toBeDisabled();
-  fireEvent.click(screen.getByLabelText("I approve this assistant, timezone and check schedule."));
-  expect(screen.getByRole("button", { name: "Save approved schedule preference" })).toBeEnabled();
-  fireEvent.change(screen.getByLabelText("Local timezone (confirm before saving)"), { target: { value: "Europe/London" } });
-  expect(screen.getByRole("button", { name: "Save approved schedule preference" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Record host task" })).toBeDisabled();
+  const copy = screen.getByRole("button", { name: "Copy starter prompt" });
+  await waitFor(() => expect(copy).toBeEnabled());
+  fireEvent.click(copy);
+  await screen.findByRole("status");
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("https://api.revel.gifts/mcp"));
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Canonical starter guidance"));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0]![0]).toBe("/guidance/revel-get-started.md");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Read guidance" })).toHaveAttribute("href", "/guidance/revel-get-started.md");
+  vi.unstubAllGlobals();
+});
+
+it("keeps a readable onboarding link when guidance cannot be fetched", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+  render(<SetupSection />);
+  await waitFor(() => expect(fetch).toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: "Copy starter prompt" })).toBeDisabled();
+  expect(screen.getByRole("link", { name: "Read guidance" })).toBeInTheDocument();
+  vi.unstubAllGlobals();
 });

@@ -61,7 +61,7 @@ describe("session bootstrap", () => {
 
     expect(await screen.findByText("Signed in as Alex Example")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Make it personal." })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Your assistants, working together." })).toBeInTheDocument();
     expect(screen.queryByText("Synthetic demo data")).not.toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -86,7 +86,7 @@ describe("session bootstrap", () => {
     expect(within(active).queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
     const setup = screen.getByRole("heading", { name: "Connect another assistant" }).parentElement!;
     const summaries = [...setup.querySelectorAll("details summary")].map((element) => element.textContent);
-    expect(summaries[1]).toBe("Muse");
+    expect(summaries[0]).toBe("Muse");
     expect(summaries.slice(-2)).toEqual(["Grok Bot · Possibly already connected", "Cursor · Possibly already connected"]);
   });
 

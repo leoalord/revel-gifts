@@ -12,7 +12,6 @@ import {
   startSignIn,
 } from "./api";
 import type { WhoAmI } from "./api";
-import { SetupSection } from "./SetupSection";
 import { AgentsSection } from "./AgentsSection";
 import { ConnectionsScreen } from "./ConnectionsScreen";
 import { ContributionsScreen } from "./ContributionsScreen";
@@ -92,20 +91,15 @@ const HOME_LINKS = [
 function Home({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
     <section aria-labelledby="home-heading">
-      <div className="home-hero">
-        <div>
-          <p className="eyebrow">Your gifting dashboard</p>
-          <h2 id="home-heading">Make it personal.</h2>
-          <p>See what your assistants have added for gifting, review anything that needs your attention, and decide who can see it.</p>
-        </div>
-        <svg className="gift-art" viewBox="0 0 230 180" fill="none" aria-hidden="true">
-          <circle cx="116" cy="92" r="75" fill="currentColor" opacity=".08" />
-          <g stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M64 88h104v66H64zM56 67h120v21H56zM105 67v87m22-87v87" />
-            <path d="M116 67c-40 0-53-13-45-25 10-15 31-1 45 25Zm0 0c40 0 53-13 45-25-10-15-31-1-45 25Z" />
-            <path d="M45 43v18m-9-9h18m139 61v16m-8-8h16m-18-82v10m-5-5h10" />
-          </g>
-        </svg>
+      <div className="home-intro">
+        <p className="eyebrow">Your Revel</p>
+        <h2 id="home-heading">Your assistants, working together.</h2>
+        <p>Each assistant knows a different side of you. Bring those perspectives together for more thoughtful gifts, with you in control of what’s shared.</p>
+      </div>
+      <AgentsSection home />
+      <div className="home-controls-heading">
+        <h3>Your profile. Your choice.</h3>
+        <p className="hint">Review the details your assistants add and choose who can see them.</p>
       </div>
       <ul className="home-links">
         {HOME_LINKS.map(({ path, label, description }) => (
@@ -117,8 +111,6 @@ function Home({ onNavigate }: { onNavigate: (path: string) => void }) {
           </li>
         ))}
       </ul>
-      <SetupSection />
-      <AgentsSection home />
     </section>
   );
 }
@@ -273,6 +265,10 @@ export function App() {
       >
         {body}
       </main>
+      <footer className="app-footer">
+        <a href="https://revel.gifts/">Revel Gifts</a>
+        <span>A little context. A more thoughtful gift.</span>
+      </footer>
     </div>
   );
 }

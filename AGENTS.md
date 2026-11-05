@@ -11,6 +11,7 @@ Current user instructions govern the work. Notion owns approved product decision
 | [Build Tasks](https://app.notion.com/p/c9c3f5bcaf954df1a330e0176b96fe81) | Task records: phase, feature, dependencies, builder/reviewer, revision, review evidence and status |
 | [Features](https://app.notion.com/p/820a5452d5d541cdafeb8c3d4ecb6e95) | Feature records: orchestrator, owned shared contracts, review tier and feature gate results |
 | [Workflows](https://app.notion.com/p/40b2bade7f31810da053cac31d2d9785) | User and agent journeys |
+| [Brand & UI Style Guide](https://app.notion.com/p/40f2bade7f31819b988af36e5e02b78b) | Visual branding, styling, layout, components, copy and accessibility guidance for all web surfaces |
 | [Onboarding](https://app.notion.com/p/40a2bade7f3181eab40de24dfbe88adb) | Guidance for users' assistants and client capability evidence (not build-agent process) |
 | [Privacy](https://app.notion.com/p/40b2bade7f31811d8e55d8818e949b31) | Audiences, contribution policy, connections and access rules |
 | [Questions](https://app.notion.com/p/40a2bade7f3181bf9975f7fa9a1f597d) | Routing, evidence, lifecycle, leases and deadlines |
@@ -118,6 +119,7 @@ Return an explicit **PASS** or **CHANGES REQUIRED** with the reviewed revision, 
 
 ## Implementation conventions
 
+- Before planning, implementing or reviewing any web UI change, read the [Brand & UI Style Guide](https://app.notion.com/p/40f2bade7f31819b988af36e5e02b78b). This applies to the public landing page, signed-in app, setup flows and shared components, including small styling adjustments. Reference the guide in UI task briefs and check the rendered result against its visual and accessibility guidance. Keep brand guidance in that Notion page; product behavior remains governed by its owning specifications.
 - Follow the stack and scope on the main/MVP pages. Keep HTTP and MCP adapters thin, with shared service behavior and enforcement. Consult official documentation for the pinned versions rather than assuming SDK/client capabilities.
 - Follow directory READMEs and `docs/deployment.md` for implementation boundaries. Keep product policy in Notion; runtime instructions, executable authorization models and tests must implement and trace to those decisions.
 - Use the configured project commands and lockfiles. Run targeted tests and relevant lint/type/build checks; broaden checks when integration or risk warrants it. Add/update setup commands as tooling is implemented.
