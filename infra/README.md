@@ -393,3 +393,29 @@ prepare the provider-specific DNS and managed-secret/environment changes in a se
 plan. Never store credentials in tfvars or Git. Apply only approved plans and verify the actual
 Cloud Run CPU annotation before enabling SMTP. A dispatcher crash can leave an unknown delivery
 outcome; do not automatically retry an invitation. A submitted response never proves receipt.
+
+### Resend account and secret setup
+
+Resend is the selected invitation provider. Native HTTPS API configuration is separate from
+SMTP compatibility; `INVITATION_MAIL_PROVIDER=resend` uses a sending-only Resend API key.
+
+1. Approve the provider account, sending domain/address and an actual test mailbox. In Resend,
+   verify the domain using the exact DNS values returned for that account/domain. Keep click
+   and open tracking off for invitation links. Do not replace unrelated MX or website records.
+2. Stage 1: review a plan with `enable_resend_secret=true` and mail still disabled. It creates
+   only the empty `RESEND_API_KEY` Secret Manager container and app service-account accessor.
+   Apply only after explicit approval. Add the key as a secret version out of band through
+   Secret Manager; never paste it into chat, Terraform, Git or logs. Use a sending-only key
+   restricted to the approved domain.
+3. Stage 2: after key version and domain verification, prepare a fresh plan with the existing
+   secrets plus `RESEND_API_KEY` in `app_secret_env`, `invitation_mail_provider="resend"`, the
+   approved `invitation_from_email`, and `invitation_background_delivery_ready=true`. Review
+   the instance-based CPU/billing change and apply only after explicit approval.
+4. Verify the actual CPU annotation, send only to the approved mailbox after destination
+   confirmation, correlate the private provider message ID with Resend, and check mailbox
+   receipt and unchanged invitation fragment. A provider API acknowledgment is not delivery.
+   WorkOS verification and explicit recipient acceptance remain separate checks.
+
+The HTTP adapter uses an invitation-stable idempotency key. Resend retains idempotency keys for
+24 hours; this is extra duplicate protection, not permission to automatically resend an uncertain
+invitation. No webhook or RG-65 question email fallback is enabled by this configuration.

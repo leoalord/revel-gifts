@@ -213,6 +213,10 @@ locals {
     var.muse_spark_provider == "" ? {} : { MUSE_SPARK_PROVIDER = var.muse_spark_provider },
     var.muse_spark_timeout_seconds == "" ? {} : { MUSE_SPARK_TIMEOUT_SECONDS = var.muse_spark_timeout_seconds },
     var.invitation_background_delivery_ready ? { INVITATION_BACKGROUND_DELIVERY_READY = "true" } : {},
+    var.invitation_mail_provider == "resend" ? {
+      INVITATION_MAIL_PROVIDER = "resend"
+      INVITATION_FROM_EMAIL    = var.invitation_from_email
+    } : {},
     local.openfga_ids_env,
   )
 
