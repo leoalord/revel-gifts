@@ -1,11 +1,16 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.7.2
+version: 0.7.3
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.7.3 (2026-11-04)
+
+- Document email-bound invitations, exact destination consent, browser-only redemption,
+  separate sharing approval and truthful asynchronous delivery status.
 
 ## 0.7.2 (2026-11-03)
 

@@ -21,6 +21,7 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "set_handle",
         "request_connection",
         "list_connections",
+        "manage_invitations",
         "respond_to_connection_request",
         "end_connection",
         # F7 #19/#20 (PR #33), consolidated by RG-59: revel/mcp/question_tools.py

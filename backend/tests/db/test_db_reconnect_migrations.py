@@ -25,7 +25,7 @@ RunAlembic = Callable[..., None]
 SESSIONS = "agent_delegation_sessions"
 UQ_ACTIVE = "uq_agent_delegations_user_id_agent_id_active"
 OLD_UQ = "uq_agent_delegations_user_id_agent_id"
-HEAD = "0005_connection_owner_confirmed"
+HEAD = "0007_inbox_check_setups"
 
 
 @pytest.fixture
@@ -370,4 +370,6 @@ def test_offline_sql_sets_lock_timeout_and_guard(
     up_sql, down_sql = up.getvalue(), down.getvalue()
     assert up_sql.index("SET LOCAL lock_timeout = '5s'") < up_sql.index("ALTER TABLE")
     assert down_sql.index("SET LOCAL lock_timeout = '5s'") < down_sql.index("RAISE EXCEPTION")
-    assert down_sql.index("RAISE EXCEPTION") < down_sql.index("DROP TABLE")
+    assert down_sql.index("RAISE EXCEPTION") < down_sql.index(
+        "DROP TABLE agent_delegation_sessions"
+    )

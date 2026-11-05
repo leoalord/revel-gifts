@@ -1,7 +1,7 @@
 ---
 name: revel-find-a-gift
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.7.2
+version: 0.7.3
 status: active
 ---
 
