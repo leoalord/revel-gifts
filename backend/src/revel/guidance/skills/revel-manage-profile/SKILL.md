@@ -1,7 +1,7 @@
 ---
 name: revel-manage-profile
 description: Build, maintain and edit your user's own Revel gifting profile, from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience; and manage its policy, approvals and audiences with the owner's confirmation.
-version: 0.7.2
+version: 0.8.0
 status: active
 ---
 

@@ -1,11 +1,18 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.7.2
+version: 0.8.0
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.8.0 (2026-11-04)
+
+- Add canonical `revel-get-started` onboarding, owner-approved polling preferences and
+  host task reports, with server-observed checks kept separate from background verification.
+- Keep actual recurring task creation, updates and disablement in the host; no email fallback
+  or native MCP Events support is claimed by polling setup.
 
 ## 0.7.2 (2026-11-03)
 

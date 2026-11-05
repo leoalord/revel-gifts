@@ -62,7 +62,8 @@ GET_UPDATES_DESCRIPTION = (
     "Return this assistant's Revel inbox: typed items (type 'question_assignment' for now) "
     "with the purpose-minimized question, who is asking and through which assistant, the "
     "person it is about, the deadline and lease state. Call it at the start of a conversation "
-    "or when the user asks about Revel; Revel cannot wake you up."
+    "or when the user asks about Revel, or from an owner-approved host recurring task. "
+    "Revel cannot wake you up. Scheduled runs call once and finish quietly when empty."
 )
 
 

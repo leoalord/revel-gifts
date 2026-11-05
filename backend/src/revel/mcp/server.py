@@ -12,7 +12,14 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp
 
 from revel import guidance
-from revel.mcp import audit, connection_tools, identity_tools, profile_tools, question_tools
+from revel.mcp import (
+    audit,
+    connection_tools,
+    identity_tools,
+    profile_tools,
+    question_tools,
+    setup_tools,
+)
 from revel.settings import Settings
 
 
@@ -29,6 +36,7 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     profile_tools.register(server, settings)
     question_tools.register(server, settings)
     connection_tools.register(server, settings)
+    setup_tools.register(server, settings)
     guidance.register_mcp(server)
     return server
 
