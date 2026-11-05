@@ -78,6 +78,7 @@ integration path.
 
 | Name | Use when |
 | --- | --- |
+| `revel-get-started` | Resume profile setup and arrange owner-approved host inbox checks |
 | `revel-manage-profile` | Your user wants to build, maintain or edit their own profile, or change who can see it |
 | `revel-connect-and-read` | Your user wants to connect to someone and read their shared profile |
 | `revel-find-a-gift` | Your user wants a gift idea for a connection |
