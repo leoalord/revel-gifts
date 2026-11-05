@@ -76,7 +76,7 @@ def test_deterministic_constraint_names() -> None:
     ):
         assert name in ddl, name
     # every FK (identity 2, profile 13, 0003 20, 0004 1)
-    assert ddl.count("ON DELETE RESTRICT") == 36
+    assert ddl.count("ON DELETE RESTRICT") == 42
     # 0004: (user_id, agent_id) is unique only among active rows (no table-level UNIQUE).
     assert "UNIQUE (user_id, agent_id)" not in ddl
     assert (
@@ -104,8 +104,10 @@ def test_model_columns() -> None:
 
 def test_single_alembic_head(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
-    assert script.get_heads() == ["0005_connection_owner_confirmed"]
+    assert script.get_heads() == ["0007_inbox_check_setups"]
     assert [rev.revision for rev in script.walk_revisions()] == [
+        "0007_inbox_check_setups",
+        "0006_invitations",
         "0005_connection_owner_confirmed",
         "0004_delegation_reconnect",
         "0003_connections_questions",

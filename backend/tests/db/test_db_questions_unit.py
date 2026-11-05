@@ -53,7 +53,7 @@ ALL_TABLES = {
     "contribution_policies",
     "claims",
     "claim_events",
-} | NEW_TABLES
+} | NEW_TABLES | {"invitations", "inbox_check_setups"}
 MIGRATION_0003 = (
     Path(__file__).resolve().parents[2]
     / "migrations"
@@ -148,7 +148,7 @@ def test_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(
         Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     )
-    assert script.get_heads() == ["0005_connection_owner_confirmed"]
+    assert script.get_heads() == ["0007_inbox_check_setups"]
     assert (
         script.get_revision("0005_connection_owner_confirmed").down_revision
         == "0004_delegation_reconnect"

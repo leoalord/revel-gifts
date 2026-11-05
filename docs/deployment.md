@@ -12,3 +12,33 @@
 - Include reconnect/retry, duplicate-write prevention, denied-access and revocation checks in feature acceptance. Use Notion's question lifecycle and contribution rules rather than inventing deployment-specific policy.
 
 Record the deployed revision, configuration and verification results in the owning Notion task.
+
+## Invitation mail (RG-66)
+
+Invitation delivery defaults to disabled. Copyable email-bound invitation links work without a
+mail provider. RG-65 question email fallback is separate and is not enabled by these settings.
+
+The optional adapter uses authenticated SMTP over implicit TLS with certificate verification
+(default port 465). Before enabling it, the user must approve the provider account, sender and
+any necessary DNS/provider/infrastructure changes. Configure `INVITATION_MAIL_PROVIDER=smtp`,
+`INVITATION_SMTP_HOST`, `INVITATION_SMTP_PORT`, `INVITATION_SMTP_USERNAME`, and
+`INVITATION_FROM_EMAIL`; inject `INVITATION_SMTP_PASSWORD` from a managed secret. SMTP credentials
+must belong to an approved transactional sender. `PUBLIC_BASE_URL` must be the HTTPS public
+browser origin. Existing `WORKOS_COOKIE_PASSWORD` seals invitation capabilities at rest;
+rotating it invalidates the ability to copy/resend existing invitations (redemption still uses
+the token hash). Keep it stable through an acceptance hold.
+
+Prepare a plan for those secret/env additions using the normal Terraform workflow; do not apply
+infrastructure, DNS or provider changes without explicit approval. No provider or sender has
+been provisioned or verified by this implementation. Test only an owner-approved mailbox.
+
+The sender confirms the exact destination before sending. A database reservation permits one
+send attempt per invitation, across replicas. SMTP has no delivery idempotency guarantee; after
+a timeout or crash the status is `unknown` or `sending`, and Revel never automatically sends
+again. The public state `submitted` means a delivery request was recorded, not mailbox delivery.
+Internal `sent` means SMTP acceptance; internal suppression and uncertain delivery share the
+same public state so block/account existence cannot be inferred from the send result. Cancellation
+invalidates redemption even if an already reserved email subsequently arrives. Invite links use
+URL fragments; do not put tokens in server path/query strings, logs, prompts or third-party
+analytics. Verify actual mailbox delivery, WorkOS verified-email binding, new/existing-account
+browser/MCP continuity and recipient acceptance separately before declaring adoption ready.
