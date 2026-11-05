@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.7.3
+version: 0.8.0
 status: active
 ---
 
@@ -11,11 +11,20 @@ Revel Gifts keeps a permission-controlled gifting profile for each person. Their
 add what they already know; assistants of people they connect with read only what is shared,
 and can ask surprise-safe questions.
 
+## Start or resume setup
+
+Load `revel-get-started` as a supported MCP prompt/resource, or copy the canonical Markdown
+from https://api.revel.gifts/guidance/revel-get-started.md into your connected assistant.
+It resumes your profile and consent, then helps the host create one owner-approved recurring
+inbox task. Stored preferences and host task reports never prove background operation.
+
 ## What works today
 
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
 - `ping` (connectivity check) and `whoami` (which Revel user and assistant you are connected
   as).
+- Inbox setup: `get_setup` and `configure_inbox_checks` (owner-approved preferences and
+  explicitly unverified host task reports; see `revel-get-started`).
 - Your user's own profile: `get_profile` (no `handle`: facts, summary and contribution
   policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience` and
   `approve`) and `remove_fact` (actions `remove` for a live fact and `reject` for pending
@@ -76,6 +85,7 @@ integration path.
 
 | Name | Use when |
 | --- | --- |
+| `revel-get-started` | Resume profile setup and arrange owner-approved host inbox checks |
 | `revel-manage-profile` | Your user wants to build, maintain or edit their own profile, or change who can see it |
 | `revel-connect-and-read` | Your user wants to connect to someone and read their shared profile |
 | `revel-find-a-gift` | Your user wants a gift idea for a connection |
@@ -145,3 +155,11 @@ item, approving a connection request or upgrading a connection to Trusted Circle
 conversation to the exact changes Revel lists; tightening, declining, blocking, downgrading,
 revoking and cancelling do not, but tell the owner. See `revel-manage-profile` and
 `revel-connect-and-read`. Owners can also do this in the Revel website.
+
+## Inbox setup reference
+
+| Operation | MCP | HTTP |
+| --- | --- | --- |
+| Read polling preferences and evidence | `get_setup` | `GET /api/v1/setup` |
+| Record owner-approved preferences | `configure_inbox_checks` (schedule) | `PUT /api/v1/setup` |
+| Report actual host task state | `configure_inbox_checks` (report_task) | `POST /api/v1/setup/host-task` |

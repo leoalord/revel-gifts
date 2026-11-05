@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.7.3
+version: 0.8.0
 status: active
 ---
 
@@ -36,7 +36,8 @@ returns your lease: `assignment_id`, `status`, `lease_version`, `lease_expires_a
 ## 1. Check for work
 
 - Revel cannot wake you up. Call `get_updates` at the start of a conversation or when your user
-  asks about Revel. Each item in `items` has a `type`; today it is always
+  asks about Revel, or from an owner-approved host task configured with `revel-get-started`.
+  Scheduled runs call once and finish quietly when the inbox is empty. Each item in `items` has a `type`; today it is always
   `question_assignment`.
 - An item has `assignment_id`, `question_id`, `status`, `lease_version`, `minimized_question`,
   `requester`, `acting_agent`, `about`, `expires_at` (the question deadline) and

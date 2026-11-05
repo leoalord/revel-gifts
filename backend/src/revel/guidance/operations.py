@@ -10,6 +10,8 @@ PROVISIONAL_MARKER = "<!-- PROVISIONAL"
 IMPLEMENTED_MCP_TOOLS = frozenset(
     {
         "ping",
+        "get_setup",
+        "configure_inbox_checks",
         "whoami",
         # F5 #9/#28/#29, consolidated by RG-59: revel/mcp/profile_tools.py
         "get_profile",
@@ -72,6 +74,9 @@ IMPLEMENTED_HTTP = frozenset(
         "GET /.well-known/oauth-protected-resource",
         "GET /.well-known/oauth-protected-resource/mcp",
         "GET /guidance",
+        "GET /api/v1/setup",
+        "PUT /api/v1/setup",
+        "POST /api/v1/setup/host-task",
         "GET /openapi.json",
         # F5 #9, merged
         "GET /api/v1/profile/policy",

@@ -1047,6 +1047,9 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
     except TimeoutError as exc:
         raise _authz_unavailable(exc) from None
     if not permitted:
+        from revel.services.inbox_setup import record_successful_check
+
+        await record_successful_check(principal, 0, deps.sessionmaker, now)
         return UpdatesResponse(items=[])
 
     profile_owners: dict[UUID, UUID] = {}
@@ -1104,4 +1107,7 @@ async def get_updates(principal: PrincipalLike, *, deps: QuestionDeps) -> Update
         except BaseException:
             session.rollback()
             raise
+    from revel.services.inbox_setup import record_successful_check
+
+    await record_successful_check(principal, len(items), deps.sessionmaker, now)
     return UpdatesResponse(items=items)

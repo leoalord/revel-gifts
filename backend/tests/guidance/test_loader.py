@@ -7,6 +7,7 @@ from revel.guidance import loader
 from revel.guidance.loader import GuidanceError, load_documents, parse_document
 
 EXPECTED_SKILLS = {
+    "revel-get-started",
     "revel-manage-profile",
     "revel-connect-and-read",
     "revel-find-a-gift",

@@ -19,6 +19,7 @@ from revel.mcp import (
     invitation_tools,
     profile_tools,
     question_tools,
+    setup_tools,
 )
 from revel.settings import Settings
 
@@ -37,6 +38,7 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     question_tools.register(server, settings)
     connection_tools.register(server, settings)
     invitation_tools.register(server, settings)
+    setup_tools.register(server, settings)
     guidance.register_mcp(server)
     return server
 
