@@ -1,5 +1,6 @@
 """Invitation transport guards and disabled-by-default mail configuration."""
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -136,18 +137,47 @@ def test_smtp_uses_verified_tls_and_explicit_envelope(config, monkeypatch):
     monkeypatch.setattr("revel.services.invitation_mail.smtplib.SMTP_SSL", SMTP)
     mailer = SMTPInvitationMailer(config)
     mailer._send(
-        "friend@example.test", "https://revel.example/app/invite#token=synthetic", "test-id"
+        "friend@example.test",
+        "https://revel.example/app/invite#token=synthetic",
+        "test-id",
+        sender_name="Leo",
+        expires_at=datetime(2026, 11, 12, tzinfo=UTC),
     )
     assert calls[0] == ("smtp.example.test", 465, 10)
     message, sender, destinations = calls[-1]
+    from revel.services.invitation_email import render_invitation
+
+    expected = render_invitation(
+        sender_name="Leo",
+        expires_at=datetime(2026, 11, 12, tzinfo=UTC),
+        invite_url="https://revel.example/app/invite#token=synthetic",
+    )
+    assert str(message["From"]) == "Revel Gifts <invites@example.test>"
+    assert str(message["Subject"]) == expected.subject
+    assert (
+        message.get_body(preferencelist=("plain",)).get_content().rstrip() == expected.text.rstrip()
+    )
+    assert (
+        message.get_body(preferencelist=("html",)).get_content().rstrip() == expected.html.rstrip()
+    )
     assert sender == "invites@example.test"
     assert destinations == ["friend@example.test"]
-    assert "#token=synthetic" in message.get_content()
+    assert "#token=synthetic" in message.get_body(preferencelist=("plain",)).get_content()
     with pytest.raises(svc.MailUnavailable):
-        mailer._send("friend@example.test", "https://evil.example/app/invite#token=x", "test-id")
+        mailer._send(
+            "friend@example.test",
+            "https://evil.example/app/invite#token=x",
+            "test-id",
+            sender_name="Leo",
+            expires_at=datetime(2026, 11, 12, tzinfo=UTC),
+        )
     with pytest.raises(svc.InvalidEmail):
         mailer._send(
-            "friend@example.test\r\nBcc: hidden@example.test", "https://revel.example/", "test-id"
+            "friend@example.test\r\nBcc: hidden@example.test",
+            "https://revel.example/",
+            "test-id",
+            sender_name="Leo",
+            expires_at=datetime(2026, 11, 12, tzinfo=UTC),
         )
 
 

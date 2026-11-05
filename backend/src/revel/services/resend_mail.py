@@ -1,10 +1,12 @@
 """Native Resend invitation adapter. Fixed HTTPS origin, no redirects, no automatic retry."""
 
+from datetime import datetime
 from uuid import UUID
 
 import anyio
 import httpx
 
+from revel.services.invitation_email import branded_sender, render_invitation
 from revel.services.invitations import MailUnavailable, normalize_email
 from revel.settings import Settings
 
@@ -30,7 +32,13 @@ class ResendInvitationMailer:
         self._client = http_client
 
     async def send_invitation(
-        self, *, destination: str, invite_url: str, idempotency_key: str
+        self,
+        *,
+        destination: str,
+        invite_url: str,
+        idempotency_key: str,
+        sender_name: str | None,
+        expires_at: datetime,
     ) -> str:
         from urllib.parse import urlsplit
 
@@ -53,17 +61,15 @@ class ResendInvitationMailer:
             "Idempotency-Key": key,
             "Accept": "application/json",
         }
+        content = render_invitation(
+            sender_name=sender_name, expires_at=expires_at, invite_url=invite_url
+        )
         body = {
-            "from": self._sender,
+            "from": branded_sender(self._sender),
             "to": [destination],
-            "subject": "You're invited to Revel Gifts",
-            "text": "Someone invited you to connect on Revel Gifts.\n\n"
-            "Open the link, sign in with this email through WorkOS, then accept or decline:\n"
-            + invite_url
-            + "\n\n"
-            "The invitation page shows the link expiry. Accepting grants no profile access. "
-            "Sharing permissions are approved separately. If you weren't expecting this "
-            "invitation, you can ignore it.\n",
+            "subject": content.subject,
+            "text": content.text,
+            "html": content.html,
         }
         try:
             # Explicit redirect/timeout arguments also override an injected client's defaults.

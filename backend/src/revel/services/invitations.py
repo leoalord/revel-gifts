@@ -98,7 +98,13 @@ class InvitationPreview(BaseModel):
 
 class Mailer(Protocol):
     async def send_invitation(
-        self, *, destination: str, invite_url: str, idempotency_key: str
+        self,
+        *,
+        destination: str,
+        invite_url: str,
+        idempotency_key: str,
+        sender_name: str | None,
+        expires_at: datetime,
     ) -> str | None: ...
 
 
@@ -382,7 +388,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
         if subjects is None:
             raise Unavailable()
 
-        def permitted() -> bool:
+        def permitted() -> tuple[str | None, datetime] | None:
             with factory() as session, session.begin():
                 _start(session, principal)
                 targets = list(
@@ -404,7 +410,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                     or row.expires_at <= now
                     or row.delivery_status != "sending"
                 ):
-                    return False
+                    return None
                 blocked = session.scalar(
                     select(ConnectionRequest.id)
                     .where(
@@ -418,13 +424,19 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                     )
                     .limit(1)
                 )
-                return not blocked and principal.user_id not in targets
+                if blocked or principal.user_id in targets:
+                    return None
+                sender = session.get(User, principal.user_id)
+                return (sender.display_name if sender else None, row.expires_at)
 
-        if await _run(permitted):
+        metadata = await _run(permitted)
+        if metadata is not None:
             provider_message_id = await mailer.send_invitation(
                 destination=reserved.email,
                 invite_url=reserved.invite_url,
                 idempotency_key=str(reserved.id),
+                sender_name=metadata[0],
+                expires_at=metadata[1],
             )
             outcome = "sent"
     except Exception:
