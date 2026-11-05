@@ -244,7 +244,13 @@ async def record_successful_check(
     def record() -> None:
         with factory.begin() as session:
             row = session.get(InboxCheckSetup, principal.user_id, with_for_update=True)
-            if row is not None and _active(session, principal.user_id, principal.delegation_id):
+            if (
+                row is not None
+                and _active(session, principal.user_id, principal.delegation_id)
+                and (row.last_successful_check_at is None or now >= row.last_successful_check_at)
+            ):
+                # Calls may finish out of order. Keep the timestamp and its associated
+                # delegation/count from the newest server observation together.
                 row.last_successful_check_at = now
                 row.last_successful_check_delegation_id = principal.delegation_id
                 row.last_check_item_count = item_count

@@ -1,6 +1,6 @@
 """Polling preference boundaries against real disposable PostgreSQL."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -155,3 +155,19 @@ def test_invalid_schedule_is_refused(changes):
             delegation_id=uuid4(),
             **({"timezone": "UTC"} | changes),
         )
+
+
+@pytest.mark.anyio
+async def test_older_slow_check_cannot_replace_newer_observation(setup_actors):
+    factory, owner, assistant, _ = setup_actors
+    svc.read_status(owner, factory)
+    newer = datetime.now(UTC)
+    older = newer - timedelta(minutes=1)
+    # Deterministically simulate the older request completing after the newer one.
+    await svc.record_successful_check(assistant, 2, factory, newer)
+    await svc.record_successful_check(assistant, 0, factory, older)
+    status = svc.read_status(owner, factory)
+    assert status.last_successful_check_at == newer
+    assert status.last_successful_check_delegation_id == assistant.delegation_id
+    assert status.last_check_item_count == 2
+    assert status.background_verified is False
