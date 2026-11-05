@@ -5,6 +5,7 @@ import { ConfirmButton } from "./ConfirmButton";
 import { agentsApi, isStatus, messageFor } from "./connectionsApi";
 import type { ConnectedAgent } from "./connectionsApi";
 import { formatTime } from "./format";
+import { SetupSection } from "./SetupSection";
 
 /** `agent.label` is the app's registered name (F2), not a verified identity: plain text only. */
 function AgentLabel({ agent }: { agent: ConnectedAgent["agent"] }) {
@@ -19,7 +20,7 @@ function AgentLabel({ agent }: { agent: ConnectedAgent["agent"] }) {
 }
 
 const MCP_URL = "https://api.revel.gifts/mcp";
-const SETUP_GUIDE = "https://revel-gifts-public.web.app/#connect";
+const SETUP_GUIDE = "https://revel.gifts/#connect";
 
 const PROVIDERS = [
   { name: "Muse", labels: ["muse"], steps: "Paste the starter prompt into a Muse chat." },
@@ -39,14 +40,11 @@ function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
   const ordered = [...PROVIDERS].sort((a, b) => Number(hasMatch(a)) - Number(hasMatch(b)));
 
   return (
-    <div className="assistant-setup">
-      <h4>{active.length ? "Connect another assistant" : "Connect an assistant"}</h4>
-      <p>Different assistants may know different details you’ve shared. Connect another to fill useful gaps within the permissions you choose.</p>
-      <p>MCP server URL: <code>{MCP_URL}</code></p>
-      <details>
-        <summary>Starter prompt</summary>
-        <p>Connect me to Revel Gifts using {MCP_URL}, then load and follow the revel-get-started MCP prompt or resource revel://guidance/revel-get-started. If unavailable, read https://api.revel.gifts/guidance/revel-get-started.md. Resume my existing profile setup and ask for my approval before setting up one recurring inbox task in my confirmed local timezone. Keep invitation links out of this chat.</p>
-      </details>
+    <aside className="assistant-setup" aria-labelledby="connect-assistant-heading">
+      <p className="eyebrow">Another perspective</p>
+      <h3 id="connect-assistant-heading">{active.length ? "Connect another assistant" : "Connect an assistant"}</h3>
+      <p>Your everyday chats, research and creative projects can each reveal different preferences. Connect the assistants you use to build a fuller picture. You choose what they may contribute and share.</p>
+      <p className="hint">Choose an assistant for connection steps.</p>
       {ordered.map((provider) => (
         <details key={provider.name}>
           <summary>
@@ -54,11 +52,14 @@ function AssistantSetup({ active }: { active: ConnectedAgent[] }) {
             {hasMatch(provider) && <span className="hint"> · Possibly already connected</span>}
           </summary>
           <p>{provider.steps}</p>
+          <p className="server-address">Server URL: <code>{MCP_URL}</code></p>
           <p>Follow the authorization link to sign in to Revel through WorkOS, then return to your assistant to start or update your profile.</p>
         </details>
       ))}
-      <p><a href={SETUP_GUIDE}>Full setup guide and copyable starter prompt</a></p>
-    </div>
+      <p className="hint">Registered app names can differ from the assistant you use. “Possibly already connected” is a name match, not verified provider identity.</p>
+      <SetupSection />
+      <p className="full-guide"><a href={SETUP_GUIDE}>Full connection guide <span aria-hidden="true">↗</span></a></p>
+    </aside>
   );
 }
 
@@ -116,77 +117,82 @@ export function AgentsSection({ home = false }: { home?: boolean }) {
 
   return (
     <section aria-labelledby="agents-heading" className={home ? "panel connection-panel home-assistants" : "panel connection-panel"}>
-      <h3 id="agents-heading" tabIndex={-1}><span className="connection-icon" aria-hidden="true">🤖</span> Connected assistants</h3>
-      {loadError ? (
-        <div role="alert">
-          <p>{loadError}</p>
-          <button type="button" onClick={reload}>
-            Retry
-          </button>
-        </div>
-      ) : agents === null ? (
-        <p role="status">Loading assistants…</p>
-      ) : (
-        <>
-          {alert && (
-            <p role="alert" className="alert">
-              {alert}
-            </p>
-          )}
-          <p role="status" className="notice">
-            {notice}
-          </p>
-          {active.length === 0 ? (
-            <p>No assistants are connected.</p>
-          ) : (
-            <ul className="rows" aria-label="Active assistants">
-              {active.map((a) => (
-                <li key={a.delegation_id} className="row assistant-row">
-                  <div className="assistant-identity">
-                    <span className="identity-icon" aria-hidden="true">{home ? "✓" : "🤖"}</span>
-                    <div>
-                      <AgentLabel agent={a.agent} />
-                      <div className="hint">Connected {formatTime(a.connected_at)}</div>
-                    </div>
-                  </div>
-                  {!home && <div className="actions">
-                    <ConfirmButton
-                      label="Disconnect"
-                      confirmLabel="Confirm disconnect"
-                      successFocusId="agents-heading"
-                      disabled={busy}
-                      onConfirm={() => disconnect(a)}
-                    />
-                  </div>}
-                </li>
-              ))}
-            </ul>
-          )}
-          {home && (
-            <div className="actions">
-              <button type="button" onClick={reload}>Refresh assistants</button>
-              {active.length > 0 && <a href="/app/connections#agents-heading">Manage connected assistants</a>}
+      <div className={home ? "home-assistant-layout" : undefined}>
+        <div className="assistant-list">
+          <div className="section-head"><h3 id="agents-heading" tabIndex={-1}>Connected assistants</h3></div>
+          {home && <p className="hint">These assistants can contribute within the permissions you approve.</p>}
+          {loadError ? (
+            <div role="alert">
+              <p>{loadError}</p>
+              <button type="button" onClick={reload}>
+                Retry
+              </button>
             </div>
-          )}
-          {home && <AssistantSetup active={active} />}
-          {!home && history.length > 0 && (
+          ) : agents === null ? (
+            <p role="status">Loading assistants…</p>
+          ) : (
             <>
-              <h4>History</h4>
-              <ul className="rows" aria-label="Disconnected assistants">
-                {history.map((a) => (
-                  <li key={a.delegation_id} className="row">
-                    <AgentLabel agent={a.agent} />{" "}
-                    <span className="hint">
-                      connected {formatTime(a.connected_at)}
-                      {a.disconnected_at ? `, disconnected ${formatTime(a.disconnected_at)}` : ""}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              {alert && (
+                <p role="alert" className="alert">
+                  {alert}
+                </p>
+              )}
+              <p role="status" className="notice">
+                {notice}
+              </p>
+              {active.length === 0 ? (
+                <div className="assistant-empty"><p>No assistants are connected.</p><p className="hint">Start with an assistant you already use. It can help build your profile with your permission.</p></div>
+              ) : (
+                <ul className="rows" aria-label="Active assistants">
+                  {active.map((a) => (
+                    <li key={a.delegation_id} className="row assistant-row">
+                      <div className="assistant-identity">
+                        <span className="identity-icon" aria-hidden="true">{a.agent.label.trim().slice(0, 1).toLocaleUpperCase() || "A"}</span>
+                        <div>
+                          <AgentLabel agent={a.agent} />
+                          <div className="hint">Connected {formatTime(a.connected_at)}</div>
+                        </div>
+                      </div>
+                      {!home && <div className="actions">
+                        <ConfirmButton
+                          label="Disconnect"
+                          confirmLabel="Confirm disconnect"
+                          successFocusId="agents-heading"
+                          disabled={busy}
+                          onConfirm={() => disconnect(a)}
+                        />
+                      </div>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {home && (
+                <div className="actions">
+                  <button type="button" onClick={reload}>Refresh assistants</button>
+                  {active.length > 0 && <a href="/app/connections#agents-heading">Manage connected assistants</a>}
+                </div>
+              )}
+              {!home && history.length > 0 && (
+                <>
+                  <h4>History</h4>
+                  <ul className="rows" aria-label="Disconnected assistants">
+                    {history.map((a) => (
+                      <li key={a.delegation_id} className="row">
+                        <AgentLabel agent={a.agent} />{" "}
+                        <span className="hint">
+                          connected {formatTime(a.connected_at)}
+                          {a.disconnected_at ? `, disconnected ${formatTime(a.disconnected_at)}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </>
           )}
-        </>
-      )}
+        </div>
+      {home && <AssistantSetup active={active} />}
+      </div>
     </section>
   );
 }

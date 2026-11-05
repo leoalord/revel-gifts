@@ -1,17 +1,16 @@
-/* Revel Gifts UI: plain CSS with colour tokens (light and dark). Text/background pairs below
-   are chosen for WCAG AA contrast (>= 4.5:1 for body text and badges). */
+/* Visual reference: Notion Brand & UI Style Guide. Shared with revel.gifts. */
 
 :root {
-  color-scheme: light dark;
-  --bg: #faf7f2;
-  --surface: #ffffff;
-  --text: #282320;
-  --muted: #655952;
-  --border: #ded4cb;
-  --accent: #8a3e35;
-  --accent-text: #ffffff;
-  --accent-hover: #713027;
-  --focus: #8a3e35;
+  color-scheme: light;
+  --bg: #f8f4ef;
+  --surface: #fffdfa;
+  --text: #272120;
+  --muted: #61544e;
+  --border: #e4d8d0;
+  --accent: #813c31;
+  --accent-text: #272120;
+  --accent-hover: #ed9e8e;
+  --focus: #813c31;
   --danger: #b42318;
   --danger-bg: #fef3f2;
   --ok: #116329;
@@ -22,8 +21,11 @@
   --info-bg: #e3eeff;
   --neutral-bg: #eef1f4;
 
+  --coral: #f2ac9e;
+  --soft: #f9e5df;
+
   /* Type scale: body, secondary (metadata, table cells) and small (labels, timestamps).
-     Secondary text uses --muted, which keeps >= 4.5:1 on --bg and --surface in both schemes. */
+     Secondary text uses --muted, which keeps >= 4.5:1 on --bg and --surface on the light palette. */
   --fs-body: 1rem;
   --fs-secondary: 0.875rem;
   --fs-small: 0.8rem;
@@ -36,28 +38,6 @@
   background: var(--bg);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b1716;
-    --surface: #261f1d;
-    --text: #f7eee8;
-    --muted: #c8b8ae;
-    --border: #493c36;
-    --accent: #f1aaa0;
-    --accent-text: #1b1716;
-    --accent-hover: #ffc6bc;
-    --focus: #ffc6bc;
-    --danger: #ff8e85;
-    --danger-bg: #3d1513;
-    --ok: #7ee2a8;
-    --ok-bg: #12301d;
-    --warn: #f2cc60;
-    --warn-bg: #3b2a00;
-    --info: #9ecbff;
-    --info-bg: #102a4c;
-    --neutral-bg: #262c36;
-  }
-}
 
 body {
   margin: 0;
@@ -66,7 +46,7 @@ body {
 }
 
 .shell {
-  max-width: 74rem;
+  max-width: 71.75rem;
   margin: 0 auto;
   padding: 0 1.5rem 1rem;
   min-height: 100vh;
@@ -87,7 +67,7 @@ body {
   z-index: 1;
   padding: 0.5rem 0.75rem;
   color: var(--accent-text);
-  background: var(--accent);
+  background: var(--coral);
   transform: translateY(-150%);
 }
 
@@ -101,7 +81,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem 2rem;
+  gap: 0.75rem 1.5rem;
   padding: 1rem 0;
   border-bottom: 1px solid var(--border);
   margin-bottom: clamp(0.75rem, 3vw, 2rem);
@@ -109,7 +89,7 @@ body {
 
 .brand {
   font-family: Georgia, serif;
-  font-size: 1.7rem;
+  font-size: 1.8rem;
   letter-spacing: -0.05em;
   margin: 0;
 }
@@ -125,7 +105,7 @@ body {
 
 .nav a {
   display: inline-block;
-  padding: 0.35rem 0.75rem;
+  padding: 0.6rem 0.75rem;
   border-radius: 6px;
   color: var(--text);
   text-decoration: none;
@@ -137,9 +117,9 @@ body {
 }
 
 .nav a[aria-current="page"] {
-  background: var(--accent);
-  color: var(--accent-text);
-  font-weight: 600;
+  background: var(--soft);
+  color: var(--accent);
+  font-weight: 650;
 }
 
 .account {
@@ -164,7 +144,7 @@ body {
 h2 {
   font-family: Georgia, serif;
   font-weight: 500;
-  font-size: clamp(2rem, 5vw, 3rem);
+  font-size: clamp(1.9rem, 4vw, 2.5rem);
   line-height: 1.12;
   letter-spacing: -0.035em;
   margin: 0.5rem 0 0.75rem;
@@ -179,8 +159,7 @@ h4 {
   font-size: 1rem;
   margin: 0.75rem 0 0.25rem;
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .panel,
@@ -247,10 +226,11 @@ select,
 textarea {
   box-sizing: border-box;
   max-inline-size: 100%;
-  padding: 0.3rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
+  min-height: 44px;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #9e8b80;
+  border-radius: 8px;
+  background: var(--surface);
   color: var(--text);
 }
 
@@ -260,9 +240,10 @@ textarea {
 }
 
 button {
-  padding: 0.35rem 0.9rem;
+  min-height: 44px;
+  padding: 0.55rem 0.9rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 9px;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
@@ -273,8 +254,8 @@ button:hover:not(:disabled) {
 }
 
 button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--coral);
+  border-color: transparent;
   color: var(--accent-text);
   font-weight: 600;
 }
@@ -804,8 +785,7 @@ button.danger {
 .recent th {
   font-size: var(--fs-small);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .recent .when,
@@ -1043,94 +1023,58 @@ button.danger {
 
 /* --- dashboard ------------------------------------------------------------------------ */
 
-.home-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 16rem);
-  align-items: center;
-  gap: 1rem;
-  padding: clamp(1.5rem, 6vw, 4rem);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  background: color-mix(in srgb, var(--surface) 91%, var(--accent));
-}
-
-.eyebrow {
-  margin: 0;
-  color: var(--accent);
-  font-size: var(--fs-small);
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.home-hero h2 {
-  font-size: clamp(2.75rem, 8vw, 5.25rem);
-  margin: 0.6rem 0;
-}
-
-.home-hero h2 + p {
-  max-width: 40ch;
-  margin: 0;
-  color: var(--muted);
-  font-size: clamp(1rem, 2vw, 1.125rem);
-}
-
-.gift-art {
-  width: 100%;
-  color: var(--accent);
-}
-
-.home-links {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  list-style: none;
-  padding: 0;
-  margin: 1rem 0 0;
-}
-
-.home-links a {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  height: 100%;
-  box-sizing: border-box;
-  padding: 1.25rem;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
-  color: var(--text);
-  text-decoration: none;
-}
-
-.home-links a:hover {
-  border-color: var(--accent);
-}
-
-.home-link-title {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
-  font-weight: 700;
-}
-
-.home-link-title > span {
-  color: var(--accent);
-}
-
-.home-link-description {
-  font-size: var(--fs-secondary);
-  color: var(--muted);
-}
+/* The signed-in home leads with assistants, not a marketing hero. */
+.home-intro { padding: 0.5rem 0 1.75rem; max-width: 46rem; }
+.home-intro h2 { margin: 0.5rem 0 0.75rem; }
+.home-intro > p:last-child { color: var(--muted); margin: 0; max-width: 65ch; }
+.eyebrow { margin: 0; color: var(--accent); font-size: 0.75rem; font-weight: 750; letter-spacing: 0.12em; text-transform: uppercase; }
+.home-assistant-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 2.5rem; align-items: start; }
+.home-assistants.connection-panel { padding: 0; margin: 0; border: 0; background: transparent; }
+.assistant-list { min-width: 0; }
+.assistant-list .section-head { margin: 0 0 0.5rem; }
+.home-assistants .rows { margin: 1.25rem 0 0.75rem; }
+.home-assistants .assistant-row { margin: 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 1rem 0; background: transparent; }
+.home-assistants .assistant-row:first-child { border-top: 1px solid var(--border); }
+.home-assistants .assistant-identity { align-items: start; gap: 0.85rem; }
+.home-assistants .identity-icon { width: 2.5rem; height: 2.5rem; background: var(--soft); color: var(--accent); border-radius: 10px; }
+.assistant-identity .hint { font-size: var(--fs-small); }
+.assistant-identity > div { min-width: 0; }
+.home-assistants .actions { gap: 0.65rem 1rem; font-size: var(--fs-secondary); }
+.assistant-empty { padding: 1.5rem 0; border-block: 1px solid var(--border); margin-top: 1.25rem; }
+.assistant-empty > p:first-child { font-weight: 650; margin: 0 0 0.5rem; }
+.assistant-setup { min-width: 0; border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; background: var(--surface); }
+.assistant-setup h3 { margin: 0.4rem 0 0.75rem; }
+.assistant-setup > p:not(.eyebrow) { color: var(--muted); font-size: var(--fs-secondary); }
+.assistant-setup details { border-bottom: 1px solid var(--border); }
+.assistant-setup details:first-of-type { border-top: 1px solid var(--border); margin-top: 0.75rem; }
+.assistant-setup summary { position: relative; padding: 0.8rem 1.25rem 0.8rem 0; list-style: none; cursor: pointer; font-size: var(--fs-secondary); }
+.assistant-setup summary::-webkit-details-marker { display: none; }
+.assistant-setup summary::after { content: "+"; position: absolute; right: 0; top: 0.8rem; color: var(--accent); font-weight: 600; }
+.assistant-setup details[open] summary::after { content: "−"; }
+.assistant-setup details p { font-size: var(--fs-secondary); margin: 0 0 0.85rem; }
+.assistant-setup code { overflow-wrap: anywhere; }
+.starter-guidance { border-top: 1px solid var(--border); margin-top: 1.25rem; padding-top: 0.75rem; }
+.starter-guidance p { color: var(--muted); font-size: var(--fs-secondary); }
+.full-guide { margin-bottom: 0; }
+.home-controls-heading { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+.home-controls-heading h3 { margin: 0; }
+.home-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; list-style: none; padding: 0; margin: 1.25rem 0 2rem; }
+.home-links a { display: flex; flex-direction: column; gap: 0.5rem; color: var(--text); text-decoration: none; padding-block: 0.5rem; }
+.home-link-title { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.95rem; font-weight: 650; }
+.home-link-title > span { color: var(--accent); }
+.home-link-description { color: var(--muted); font-size: var(--fs-secondary); max-width: 35ch; }
+.home-links a:hover .home-link-title { text-decoration: underline; text-underline-offset: 4px; }
+.app-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem 1.5rem; border-top: 1px solid var(--border); padding: 1.25rem 0 0.5rem; margin-top: 2.5rem; color: var(--muted); font-size: var(--fs-small); }
+.app-footer a { font-weight: 650; }
 
 .account-name {
   overflow-wrap: anywhere;
 }
 
 @media (max-width: 720px) {
-  .home-links {
-    grid-template-columns: 1fr;
-  }
+  .home-links { grid-template-columns: 1fr; gap: 0.75rem; }
+  .home-assistant-layout { grid-template-columns: 1fr; gap: 2rem; }
+  .home-intro { padding-bottom: 1.5rem; }
 
   .app-header {
     gap: 0.45rem 0.75rem;
@@ -1155,13 +1099,7 @@ button.danger {
     padding-inline: 1rem;
   }
 
-  .home-hero {
-    grid-template-columns: 1fr;
-  }
-
-  .gift-art {
-    display: none;
-  }
+  .assistant-setup { padding: 1rem; }
 
   .nav {
     gap: 0.1rem;
@@ -1207,29 +1145,32 @@ button.danger {
   font-size: 1rem;
 }
 
-.home-assistants {
-  margin-top: 1rem;
+/* Shared finishing rules across profile, sharing, connections and invitations. */
+*, *::before, *::after { box-sizing: border-box; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+main { padding-bottom: 1rem; }
+main > section { min-width: 0; }
+main p { overflow-wrap: anywhere; }
+.account-name { color: var(--muted); font-size: var(--fs-small); font-weight: 500; }
+.nav a { min-height: 44px; display: flex; align-items: center; font-size: var(--fs-secondary); }
+button { font-weight: 600; }
+fieldset { padding: 1rem 1.25rem; }
+.field { margin-block: 0.75rem; }
+.field > label { margin-bottom: 0.3rem; }
+.checkbox-field { line-height: 1.6; }
+.fact, .row { border-radius: 10px; }
+.radio { min-height: 44px; }
+@media (max-width: 720px) {
+  .app-header .account { margin-left: auto; }
+  .app-header nav { order: 2; }
+  .brand { font-size: 1.6rem; }
+  .account-name { max-width: 10rem; }
+  .facts-filters { align-items: stretch; }
+  .facts-filters .inline-field { flex-wrap: wrap; }
 }
-
-.home-assistants .assistant-identity {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.assistant-setup {
-  border-top: 1px solid var(--border);
-  margin-top: 1rem;
-}
-
-.assistant-setup code {
-  overflow-wrap: anywhere;
-}
-
-.assistant-setup details {
-  border-top: 1px solid var(--border);
-  padding-block: 0.65rem;
-}
-
-.assistant-setup summary {
-  cursor: pointer;
+@media (max-width: 480px) {
+  .account { gap: 0.5rem; }
+  .account-name { max-width: 7rem; font-size: 0.75rem; }
+  .brand { font-size: 1.4rem; }
 }
