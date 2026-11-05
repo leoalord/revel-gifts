@@ -34,6 +34,13 @@ inbox task. Stored preferences and host task reports never prove background oper
   (connections and requests), `respond_to_connection_request` (actions `approve`, `decline`,
   `block` and `change_tier`), `end_connection` (actions `revoke` and `cancel`) and
   `get_profile` with a `handle` (see `revel-connect-and-read`).
+- Invitations: `manage_invitations` (create, list, send or cancel email-bound invitations).
+  Copy links work without email delivery. Before an external email send, show the exact
+  destination and obtain explicit owner consent. Never put invitation tokens into prompts.
+  Recipients redeem only in the browser after WorkOS verifies the invited email; acceptance
+  grants no profile sharing. The submitted state records a request, never confirmed mailbox delivery.
+  Unknown or interrupted sends are never automatically retried. Email delivery stays disabled
+  until an approved provider and sender are configured.
 - Questions, as the asker: `submit_question` and `get_question` (status and answer; see
   `revel-find-a-gift`).
 - Questions, as your user's assistant: `get_updates`, `update_assignment` (actions `claim`,

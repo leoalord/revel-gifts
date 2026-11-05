@@ -1316,5 +1316,5 @@ def test_downgrade_to_profile_and_reupgrade(
     with migrated_engine.connect() as connection:
         assert (
             MigrationContext.configure(connection).get_current_revision()
-            == "0005_connection_owner_confirmed"
+            == "0007_inbox_check_setups"
         )

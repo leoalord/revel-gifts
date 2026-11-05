@@ -14,6 +14,11 @@ status: active
 - Keep actual recurring task creation, updates and disablement in the host; no email fallback
   or native MCP Events support is claimed by polling setup.
 
+## 0.7.3 (2026-11-04)
+
+- Document email-bound invitations, exact destination consent, browser-only redemption,
+  separate sharing approval and truthful asynchronous delivery status.
+
 ## 0.7.2 (2026-11-03)
 
 - Confirm fact approvals and audience widening with the fact timestamp returned by the
