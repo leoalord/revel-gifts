@@ -1,6 +1,5 @@
 """Native Resend invitation adapter. Fixed HTTPS origin, no redirects, no automatic retry."""
 
-from datetime import datetime
 from uuid import UUID
 
 import anyio
@@ -38,7 +37,6 @@ class ResendInvitationMailer:
         invite_url: str,
         idempotency_key: str,
         sender_name: str | None,
-        expires_at: datetime,
     ) -> str:
         from urllib.parse import urlsplit
 
@@ -61,9 +59,7 @@ class ResendInvitationMailer:
             "Idempotency-Key": key,
             "Accept": "application/json",
         }
-        content = render_invitation(
-            sender_name=sender_name, expires_at=expires_at, invite_url=invite_url
-        )
+        content = render_invitation(sender_name=sender_name, invite_url=invite_url)
         body = {
             "from": branded_sender(self._sender),
             "to": [destination],

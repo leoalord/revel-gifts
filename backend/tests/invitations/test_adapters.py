@@ -1,6 +1,5 @@
 """Invitation transport guards and disabled-by-default mail configuration."""
 
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -141,7 +140,6 @@ def test_smtp_uses_verified_tls_and_explicit_envelope(config, monkeypatch):
         "https://revel.example/app/invite#token=synthetic",
         "test-id",
         sender_name="Leo",
-        expires_at=datetime(2026, 11, 12, tzinfo=UTC),
     )
     assert calls[0] == ("smtp.example.test", 465, 10)
     message, sender, destinations = calls[-1]
@@ -149,7 +147,6 @@ def test_smtp_uses_verified_tls_and_explicit_envelope(config, monkeypatch):
 
     expected = render_invitation(
         sender_name="Leo",
-        expires_at=datetime(2026, 11, 12, tzinfo=UTC),
         invite_url="https://revel.example/app/invite#token=synthetic",
     )
     assert str(message["From"]) == "Revel Gifts <invites@example.test>"
@@ -169,7 +166,6 @@ def test_smtp_uses_verified_tls_and_explicit_envelope(config, monkeypatch):
             "https://evil.example/app/invite#token=x",
             "test-id",
             sender_name="Leo",
-            expires_at=datetime(2026, 11, 12, tzinfo=UTC),
         )
     with pytest.raises(svc.InvalidEmail):
         mailer._send(
@@ -177,7 +173,6 @@ def test_smtp_uses_verified_tls_and_explicit_envelope(config, monkeypatch):
             "https://revel.example/",
             "test-id",
             sender_name="Leo",
-            expires_at=datetime(2026, 11, 12, tzinfo=UTC),
         )
 
 
@@ -250,3 +245,43 @@ def test_smtp_requires_explicit_background_runtime_gate(config):
         configured_mailer(config)
     config.invitation_background_delivery_ready = True
     assert isinstance(configured_mailer(config), SMTPInvitationMailer)
+
+
+def test_join_http_requires_authentication_and_same_origin_and_only_posts_token(app, monkeypatch):
+    with TestClient(app, base_url="https://revel.example") as client:
+        assert (
+            client.post(
+                "/api/invitations/join",
+                json={"token": "a" * 43},
+                headers={"Origin": "https://revel.example"},
+            ).status_code
+            == 401
+        )
+    principal = Principal(uuid4(), None, None, "ui")
+    app.dependency_overrides[current_ui_principal] = lambda: principal
+    calls = []
+
+    async def join(actor, **kwargs):
+        calls.append((actor, kwargs))
+        return {"status": "joined", "expires_at": None, "connection_request_id": None}
+
+    monkeypatch.setattr(svc, "join", join)
+    with TestClient(app, base_url="https://revel.example") as client:
+        assert client.get("/api/invitations/join").status_code == 405
+        assert (
+            client.post(
+                "/api/invitations/join",
+                json={"token": "a" * 43},
+                headers={"Origin": "https://evil.example"},
+            ).status_code
+            == 403
+        )
+        result = client.post(
+            "/api/invitations/join",
+            json={"token": "a" * 43, "recipient_user_id": str(uuid4())},
+            headers={"Origin": "https://revel.example"},
+        )
+    assert result.json()["status"] == "joined"
+    assert result.headers["cache-control"] == "no-store"
+    assert len(calls) == 1 and calls[0][0] == principal
+    assert set(calls[0][1]) == {"token", "settings"}

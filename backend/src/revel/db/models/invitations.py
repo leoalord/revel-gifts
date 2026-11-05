@@ -13,7 +13,8 @@ class Invitation(TimestampMixin, Base):
     __tablename__ = "invitations"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','accepted','declined','cancelled','expired')", name="status"
+            "status IN ('pending','joined','accepted','declined','cancelled','expired')",
+            name="status",
         ),
         CheckConstraint(
             "delivery_status IN ('not_sent','sending','sent','unknown')", name="delivery_status"
@@ -34,7 +35,7 @@ class Invitation(TimestampMixin, Base):
     token_hash: Mapped[str] = mapped_column(Text, unique=True)
     sealed_token: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default="pending")
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_status: Mapped[str] = mapped_column(Text, server_default="not_sent")
     provider_message_id: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

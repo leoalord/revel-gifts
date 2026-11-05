@@ -1,13 +1,11 @@
 """Canonical branded email content, hostile server names and capability preservation."""
 
-from datetime import UTC, datetime, timedelta, timezone
 from html.parser import HTMLParser
 
 import pytest
 
 from revel.services.invitation_email import render_invitation, safe_sender_name
 
-EXPIRY = datetime(2026, 11, 12, 18, 30, tzinfo=UTC)
 URL = 'https://revel.example/app/invite#token=a&b="quoted"'
 
 
@@ -25,19 +23,18 @@ class Links(HTMLParser):
 
 
 def test_canonical_brand_and_semantic_plaintext_parity():
-    result = render_invitation(sender_name="Leo Walker", expires_at=EXPIRY, invite_url=URL)
+    result = render_invitation(sender_name="Leo Walker", invite_url=URL)
     assert result.subject == "Leo Walker invited you to Revel Gifts"
     parsed = Links()
     parsed.feed(result.html)
     assert parsed.links == [URL, URL]
     for phrase in [
         "Leo Walker invited you to Revel Gifts.",
-        "View invitation",
+        "Create Revel account",
         "A few simple steps",
         "with your approval.",
-        "Accepting this invitation won\u2019t share your profile.",
+        "Joining Revel won\u2019t share your profile.",
         "You decide what to share and who can see it.",
-        "November 12, 2026 at 18:30 UTC",
     ]:
         assert phrase in result.text
         assert phrase in "".join(parsed.text)
@@ -64,7 +61,7 @@ def test_canonical_brand_and_semantic_plaintext_parity():
 
 def test_hostile_name_is_header_safe_and_html_escaped():
     name = 'Leo\r\nBcc: other@example.test\u202e<script>"&</script>'
-    result = render_invitation(sender_name=name, expires_at=EXPIRY, invite_url=URL)
+    result = render_invitation(sender_name=name, invite_url=URL)
     assert (
         "\r" not in result.subject and "\n" not in result.subject and "\u202e" not in result.subject
     )
@@ -76,21 +73,18 @@ def test_hostile_name_is_header_safe_and_html_escaped():
 
 @pytest.mark.parametrize("name", [None, "", " \r\n\u202e\x00 "])
 def test_missing_name_has_safe_generic_fallback(name):
-    result = render_invitation(sender_name=name, expires_at=EXPIRY, invite_url=URL)
+    result = render_invitation(sender_name=name, invite_url=URL)
     assert result.subject == "You're invited to Revel Gifts"
     assert "None" not in result.text
     assert "wife" not in result.text.lower()
 
 
-def test_actual_expiry_is_converted_to_utc_and_naive_dates_refused():
-    result = render_invitation(
-        sender_name="Leo",
-        expires_at=EXPIRY.astimezone(timezone(timedelta(hours=-8))),
-        invite_url=URL,
-    )
-    assert "November 12, 2026 at 18:30 UTC" in result.text
-    with pytest.raises(ValueError, match="timezone"):
-        render_invitation(sender_name="Leo", expires_at=EXPIRY.replace(tzinfo=None), invite_url=URL)
+def test_signup_mail_has_no_expiry_or_accept_decline_actions():
+    result = render_invitation(sender_name="Leo", invite_url=URL)
+    assert "expir" not in result.text.lower()
+    assert "expir" not in result.html.lower()
+    assert "accept or decline" not in result.text.lower()
+    assert "Create Revel account" in result.text
 
 
 @pytest.mark.parametrize(
@@ -104,4 +98,4 @@ def test_actual_expiry_is_converted_to_utc_and_naive_dates_refused():
 )
 def test_invalid_url_never_reaches_html_or_headers(url):
     with pytest.raises(ValueError):
-        render_invitation(sender_name="Leo", expires_at=EXPIRY, invite_url=url)
+        render_invitation(sender_name="Leo", invite_url=url)

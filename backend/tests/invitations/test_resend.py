@@ -1,7 +1,6 @@
 """Resend transport contract with synthetic credentials and HTTP responses only."""
 
 import json
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -54,7 +53,6 @@ async def test_resend_contract_and_private_payload(config, caplog):
     ) as client:
         result = await ResendInvitationMailer(config, http_client=client).send_invitation(
             sender_name="Leo",
-            expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
             destination="Friend@Example.Test",
             invite_url="https://revel.example/app/invite#token=synthetic",
             idempotency_key=invitation_id,
@@ -72,7 +70,6 @@ async def test_resend_contract_and_private_payload(config, caplog):
 
     expected = render_invitation(
         sender_name="Leo",
-        expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
         invite_url="https://revel.example/app/invite#token=synthetic",
     )
     assert payload["subject"] == expected.subject
@@ -113,7 +110,6 @@ async def test_resend_errors_are_generic_and_not_retried(config, status, body):
         with pytest.raises(ResendDeliveryFailed) as error:
             await ResendInvitationMailer(config, http_client=client).send_invitation(
                 sender_name="Leo",
-                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=private",
                 idempotency_key=str(uuid4()),
@@ -138,7 +134,6 @@ async def test_resend_timeout_and_invalid_json_are_unknown_without_retry(config,
         with pytest.raises(ResendDeliveryFailed) as error:
             await ResendInvitationMailer(config, http_client=client).send_invitation(
                 sender_name="Leo",
-                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=private",
                 idempotency_key=str(uuid4()),
@@ -165,7 +160,6 @@ async def test_resend_never_transmits_invalid_capability_url(config, url):
         with pytest.raises(MailUnavailable):
             await ResendInvitationMailer(config, http_client=client).send_invitation(
                 sender_name="Leo",
-                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url=url,
                 idempotency_key=str(uuid4()),
@@ -195,7 +189,6 @@ async def test_resend_hard_deadline_cancels_a_stalled_response(config, monkeypat
         with pytest.raises(ResendDeliveryFailed):
             await ResendInvitationMailer(config, http_client=client).send_invitation(
                 sender_name="Leo",
-                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=x",
                 idempotency_key=str(uuid4()),

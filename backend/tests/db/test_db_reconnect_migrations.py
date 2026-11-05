@@ -25,7 +25,7 @@ RunAlembic = Callable[..., None]
 SESSIONS = "agent_delegation_sessions"
 UQ_ACTIVE = "uq_agent_delegations_user_id_agent_id_active"
 OLD_UQ = "uq_agent_delegations_user_id_agent_id"
-HEAD = "0008_invitation_provider_message"
+HEAD = "0009_invitation_join"
 
 
 @pytest.fixture

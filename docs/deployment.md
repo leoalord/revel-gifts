@@ -41,7 +41,7 @@ same public state so block/account existence cannot be inferred from the send re
 invalidates redemption even if an already reserved email subsequently arrives. Invite links use
 URL fragments; do not put tokens in server path/query strings, logs, prompts or third-party
 analytics. Verify actual mailbox delivery, WorkOS verified-email binding, new/existing-account
-browser/MCP continuity and recipient acceptance separately before declaring adoption ready.
+browser/MCP continuity and recipient signup attribution separately before declaring adoption ready.
 
 
 SMTP enablement also requires `INVITATION_BACKGROUND_DELIVERY_READY=true`, which defaults to
@@ -54,7 +54,7 @@ infrastructure before setting the gate. Provider/DNS/runtime plans remain approv
 The application lifespan owns the in-process mail task group and drains jobs on graceful
 shutdown. HTTP and MCP return `submitted` after a durable once-only reservation, before any
 private WorkOS lookup, block suppression or SMTP. Both blocked and unblocked requests take
-the same response path. The worker rechecks current delegation, cancellation, expiry and
+the same response path. The worker rechecks current delegation, cancellation and
 blocks before starting an attempt. Once an attempt starts, a later block or cancellation
 cannot recall it. Process crashes or suspended CPU may leave `sending`/`unknown`; no automatic
 replay occurs. This is not a durable delivery queue and never proves mailbox delivery. The
@@ -94,3 +94,27 @@ has no per-email override and does not need a domain-administration key. During 
 mailbox acceptance, inspect the actual received link and verify its original `#token=`
 fragment survives unchanged before redeeming it. Do not give the runtime full-access domain
 administration credentials to manage tracking settings.
+
+
+### Nonexpiring signup invitations (RG-66 owner revision)
+
+Migration `0009_invitation_join` makes expiry nullable and clears the deadline on all existing
+pending invitations, including already-sent links; tokens and send/provider records are
+preserved. Cancelled, declined and historically expired records remain terminal. New invites
+have no expiry. Downgrade refuses nonexpiring/joined rows rather than inventing deadlines or
+silently losing attribution.
+
+The primary browser signup/continue action posts the capability in the body to
+`POST /api/invitations/join`. It requires same-origin browser authentication and fresh verified
+invited-email binding, rechecks both-direction blocks/cancellation, and records `joined`
+attribution only. A same-recipient retry returns the same result and does not create a
+connection request, sharing tier or profile. Opening/previewing a link never joins by itself.
+The historical accept/decline endpoint remains compatibility-only; new clients use join.
+Browser-local primary-button intent may resume after sign-in; assistant setup never receives
+an invitation token, and browser revisit can complete attribution later.
+
+Deployment must treat 0009 as runtime-incompatible with the old image: old code compares
+expiry directly and does not understand joined status. Build and verify the compatible
+revision without traffic first, apply the migration, then immediately route to that ready
+revision. Do not route an old image over null-expiry/joined data. Use a forward fix or another
+compatible runtime for rollback; schema downgrade intentionally refuses incompatible data.

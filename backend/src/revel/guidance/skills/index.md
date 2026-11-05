@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.8.1
+version: 0.8.2
 status: active
 ---
 
@@ -37,8 +37,10 @@ inbox task. Stored preferences and host task reports never prove background oper
 - Invitations: `manage_invitations` (create, list, send or cancel email-bound invitations).
   Copy links work without email delivery. Before an external email send, show the exact
   destination and obtain explicit owner consent. Never put invitation tokens into prompts.
-  Recipients redeem only in the browser after WorkOS verifies the invited email; acceptance
-  grants no profile sharing. The submitted state records a request, never confirmed mailbox delivery.
+  Recipients join through the browser after WorkOS verifies the invited email. Signup
+  records joined attribution without a connection request or profile access. Invitations do
+  not expire; senders can cancel pending invites. Connections and sharing remain separate.
+  The submitted state records a request, never confirmed mailbox delivery.
   Unknown or interrupted sends are never automatically retried. Email delivery stays disabled
   until an approved provider and sender are configured.
 - Questions, as the asker: `submit_question` and `get_question` (status and answer; see

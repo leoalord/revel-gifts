@@ -1,4 +1,5 @@
-"""Email invitations never grant a sharing tier. Recipient acceptance creates a request only.
+"""Signup invitations record joined attribution without creating connections or sharing tiers.
+Legacy accept/decline remains compatibility-only.
 
 Creation never looks up destination accounts. Redemption uses a fresh verified WorkOS email,
 not cached users.email. Capability material is sent in JSON bodies and URL fragments only.
@@ -10,14 +11,14 @@ import hashlib
 import re
 import secrets
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
 import anyio.to_thread
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from revel.auth.browser import CookieSealer
@@ -26,7 +27,6 @@ from revel.db.models import ConnectionRequest, Invitation, User
 from revel.services import connections
 from revel.settings import Settings, get_settings
 
-LIFETIME = timedelta(days=7)
 CREATE_LIMIT = 20
 SEND_LIMIT = 20
 # Deliberately a single ASCII dot-atom mailbox, never display-name/comments/routes.
@@ -83,7 +83,7 @@ class InvitationInfo(BaseModel):
     id: UUID
     email: str
     status: str
-    expires_at: datetime
+    expires_at: datetime | None
     delivery_status: str
     invite_url: str | None = None
     connection_request_id: UUID | None = None
@@ -91,9 +91,11 @@ class InvitationInfo(BaseModel):
 
 class InvitationPreview(BaseModel):
     sender_name: str | None
-    expires_at: datetime
+    expires_at: datetime | None
     status: str
-    sharing_notice: str = "Accepting creates a connection request. No profile access is granted."
+    sharing_notice: str = (
+        "Joining shares nothing automatically. Connections and sharing are separate."
+    )
 
 
 class Mailer(Protocol):
@@ -104,7 +106,6 @@ class Mailer(Protocol):
         invite_url: str,
         idempotency_key: str,
         sender_name: str | None,
-        expires_at: datetime,
     ) -> str | None: ...
 
 
@@ -148,14 +149,12 @@ def _info(row: Invitation, settings: Settings, *, link: bool = False) -> Invitat
         except Exception:
             raise Unavailable() from None
         url = settings.public_base_url.rstrip("/") + "/app/invite#token=" + token
-    status = (
-        "expired" if row.status == "pending" and row.expires_at <= datetime.now(UTC) else row.status
-    )
+    status = row.status
     return InvitationInfo(
         id=row.id,
         email=row.email,
         status=status,
-        expires_at=row.expires_at,
+        expires_at=None if row.status in ("pending", "joined") else row.expires_at,
         delivery_status=("submitted" if row.delivery_status != "not_sent" else "not_sent"),
         invite_url=url,
         connection_request_id=row.connection_request_id,
@@ -201,15 +200,6 @@ async def create(
                 session, connections._lock_key("revel.invites.sender", principal.user_id)
             )
             now = session.scalar(select(func.now()))
-            session.execute(
-                update(Invitation)
-                .where(
-                    Invitation.sender_user_id == principal.user_id,
-                    Invitation.status == "pending",
-                    Invitation.expires_at <= now,
-                )
-                .values(status="expired")
-            )
             existing = session.scalar(
                 select(Invitation).where(
                     Invitation.sender_user_id == principal.user_id,
@@ -236,7 +226,7 @@ async def create(
                 token_hash=_token_hash(token),
                 sealed_token=_sealer(settings).seal("invitation", {"token": token}),
                 status="pending",
-                expires_at=now + LIFETIME,
+                expires_at=None,
                 delivery_status="not_sent",
             )
             session.add(row)
@@ -345,7 +335,7 @@ async def send(
                 .with_for_update()
             )
             now = session.scalar(select(func.now()))
-            if row is None or row.status != "pending" or row.expires_at <= now:
+            if row is None or row.status != "pending":
                 raise InvitationError()
             if row.delivery_status != "not_sent":
                 return _info(row, settings)
@@ -374,7 +364,7 @@ async def send(
 
 
 async def _deliver_reserved(principal, reserved, factory, settings, mailer, directory) -> None:
-    """Private worker: recheck revocation, invitation state, expiry and blocks before mail."""
+    """Private worker: recheck revocation, invitation state and blocks before mail."""
     outcome = "unknown"
     provider_message_id = None
     try:
@@ -388,7 +378,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
         if subjects is None:
             raise Unavailable()
 
-        def permitted() -> tuple[str | None, datetime] | None:
+        def permitted() -> tuple[str | None] | None:
             with factory() as session, session.begin():
                 _start(session, principal)
                 targets = list(
@@ -403,13 +393,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                 ):
                     connections._advisory_lock(session, key)
                 row = session.get(Invitation, reserved.id, with_for_update=True)
-                now = session.scalar(select(func.now()))
-                if (
-                    row is None
-                    or row.status != "pending"
-                    or row.expires_at <= now
-                    or row.delivery_status != "sending"
-                ):
+                if row is None or row.status != "pending" or row.delivery_status != "sending":
                     return None
                 blocked = session.scalar(
                     select(ConnectionRequest.id)
@@ -427,7 +411,7 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                 if blocked or principal.user_id in targets:
                     return None
                 sender = session.get(User, principal.user_id)
-                return (sender.display_name if sender else None, row.expires_at)
+                return (sender.display_name if sender else None,)
 
         metadata = await _run(permitted)
         if metadata is not None:
@@ -436,7 +420,6 @@ async def _deliver_reserved(principal, reserved, factory, settings, mailer, dire
                 invite_url=reserved.invite_url,
                 idempotency_key=str(reserved.id),
                 sender_name=metadata[0],
-                expires_at=metadata[1],
             )
             outcome = "sent"
     except Exception:
@@ -482,12 +465,12 @@ async def redeem(
     principal: Principal,
     *,
     token: str,
-    action: Literal["preview", "accept", "decline"],
+    action: Literal["preview", "join", "accept", "decline"],
     sessions: Any = None,
     settings: Settings | None = None,
     directory: Any = None,
 ) -> InvitationPreview | InvitationInfo:
-    if principal.via != "ui" or action not in ("preview", "accept", "decline"):
+    if principal.via != "ui" or action not in ("preview", "join", "accept", "decline"):
         raise InvitationError()
     token_hash = _token_hash(token)
     settings = settings or get_settings()
@@ -518,7 +501,8 @@ async def redeem(
                 .execution_options(populate_existing=True)
             )
             now = session.scalar(select(func.now()))
-            if row.status != "pending" or row.expires_at <= now:
+            already_joined = row.status == "joined" and row.recipient_user_id == principal.user_id
+            if row.status != "pending" and not already_joined:
                 raise InvitationError()
             if row.email != email or sender == principal.user_id:
                 raise EmailVerificationRequired()
@@ -537,12 +521,19 @@ async def redeem(
             )
             if blocked:
                 raise InvitationError()
+            if already_joined and action not in ("preview", "join"):
+                raise InvitationError()
+            if already_joined and action == "join":
+                return _info(row, settings)
             if action == "preview":
                 user = session.get(User, sender)
                 return InvitationPreview(
-                    sender_name=user.display_name, expires_at=row.expires_at, status=row.status
+                    sender_name=user.display_name, expires_at=None, status=row.status
                 )
-            row.status = "accepted" if action == "accept" else "declined"
+            row.expires_at = None
+            row.status = (
+                "joined" if action == "join" else ("accepted" if action == "accept" else "declined")
+            )
             row.responded_at = now
             row.recipient_user_id = principal.user_id
             if action == "accept":
@@ -557,3 +548,8 @@ async def redeem(
             return _info(row, settings)
 
     return await _run(work)
+
+
+async def join(principal: Principal, *, token: str, **kwargs: Any) -> InvitationInfo:
+    """Idempotent explicit signup/continue attribution. No connection or sharing side effects."""
+    return await redeem(principal, token=token, action="join", **kwargs)

@@ -152,7 +152,7 @@ def test_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(
         Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     )
-    assert script.get_heads() == ["0008_invitation_provider_message"]
+    assert script.get_heads() == ["0009_invitation_join"]
     assert (
         script.get_revision("0005_connection_owner_confirmed").down_revision
         == "0004_delegation_reconnect"

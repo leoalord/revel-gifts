@@ -64,8 +64,8 @@ def register(server: MCPServer, settings: Any) -> None:
             "to send, then pass owner_confirmed=true after explicit owner consent. "
             "Never send unsolicited invitations. If email is unavailable, offer a copy link. "
             "Do not copy invitation tokens into prompts or logs. Recipient signs in through WorkOS "
-            "with the verified invited email and accepts in their browser. Acceptance creates a "
-            "pending directional connection request and grants no profile access. "
+            "with the verified invited email. Signup records joined attribution only: no "
+            "connection request or profile access. Invites do not expire; senders can cancel. "
             "Duplicate creates return the existing pending invite. Sending is never automatically "
             "retried after an unknown delivery outcome. Confirm cancellation with the owner."
         ),

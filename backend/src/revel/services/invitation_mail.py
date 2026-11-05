@@ -10,7 +10,6 @@ from __future__ import annotations
 import smtplib
 import ssl
 from contextlib import asynccontextmanager
-from datetime import datetime
 from email.message import EmailMessage
 from functools import partial
 from urllib.parse import urlsplit
@@ -49,7 +48,6 @@ class SMTPInvitationMailer:
         idempotency_key: str,
         *,
         sender_name: str | None,
-        expires_at: datetime,
     ) -> None:
         from revel.services.invitations import MailUnavailable, normalize_email
 
@@ -58,9 +56,7 @@ class SMTPInvitationMailer:
         if f"{parts.scheme}://{parts.netloc}" != self._origin or parts.scheme != "https":
             raise MailUnavailable()
         message = EmailMessage()
-        content = render_invitation(
-            sender_name=sender_name, expires_at=expires_at, invite_url=invite_url
-        )
+        content = render_invitation(sender_name=sender_name, invite_url=invite_url)
         message["From"] = branded_sender(self._sender)
         message["To"] = destination
         message["Subject"] = content.subject
@@ -80,7 +76,6 @@ class SMTPInvitationMailer:
         invite_url: str,
         idempotency_key: str,
         sender_name: str | None,
-        expires_at: datetime,
     ) -> None:
         await anyio.to_thread.run_sync(
             partial(
@@ -89,7 +84,6 @@ class SMTPInvitationMailer:
                 invite_url,
                 idempotency_key,
                 sender_name=sender_name,
-                expires_at=expires_at,
             )
         )
 

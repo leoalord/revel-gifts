@@ -73,6 +73,11 @@ async def preview(principal: SameOriginUIPrincipal, body: TokenBody, request: Re
     )
 
 
+@router.post("/join")
+async def join(principal: SameOriginUIPrincipal, body: TokenBody, request: Request):
+    return await _call(svc.join, principal, token=body.token, settings=request.app.state.settings)
+
+
 @router.post("/respond")
 async def respond(principal: SameOriginUIPrincipal, body: RespondBody, request: Request):
     return await _call(
