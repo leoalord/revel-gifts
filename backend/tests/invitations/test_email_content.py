@@ -41,8 +41,21 @@ def test_canonical_brand_and_semantic_plaintext_parity():
     ]:
         assert phrase in result.text
         assert phrase in "".join(parsed.text)
-    for value in ["#faf7f2", "#282320", "#8a3e35", "Georgia", "@media"]:
+    for value in [
+        "#f8f4ef",
+        "#fffdfa",
+        "#272120",
+        "#61544e",
+        "#e4d8d0",
+        "#f2ac9e",
+        "#813c31",
+        "#f9e5df",
+        "Georgia",
+        "@media",
+    ]:
         assert value in result.html
+    assert 'bgcolor="#f2ac9e"' in result.html
+    assert "font-weight:bold;color:#272120;text-decoration:none;" in result.html
     assert not ({"img", "script", "iframe", "form", "link"} & set(parsed.tags))
     assert "WorkOS" not in result.html
     assert "seven days" not in result.text

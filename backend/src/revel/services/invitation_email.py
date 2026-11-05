@@ -1,4 +1,8 @@
-"""Canonical, asset-free invitation content shared by HTTPS and SMTP delivery."""
+"""Canonical, asset-free invitation content shared by HTTPS and SMTP delivery.
+
+Visual source: Brand & UI Style Guide
+https://app.notion.com/p/40f2bade7f31819b988af36e5e02b78b
+"""
 
 import unicodedata
 from dataclasses import dataclass
