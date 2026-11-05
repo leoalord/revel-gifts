@@ -1028,7 +1028,7 @@ button.danger {
 .home-intro h2 { margin: 0.5rem 0 0.75rem; }
 .home-intro > p:last-child { color: var(--muted); margin: 0; max-width: 65ch; }
 .eyebrow { margin: 0; color: var(--accent); font-size: 0.75rem; font-weight: 750; letter-spacing: 0.12em; text-transform: uppercase; }
-.home-assistant-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 2.5rem; align-items: start; }
+.home-assistant-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; align-items: start; }
 .home-assistants.connection-panel { padding: 0; margin: 0; border: 0; background: transparent; }
 .assistant-list { min-width: 0; }
 .assistant-list .section-head { margin: 0 0 0.5rem; }
@@ -1043,6 +1043,7 @@ button.danger {
 .assistant-empty { padding: 1.5rem 0; border-block: 1px solid var(--border); margin-top: 1.25rem; }
 .assistant-empty > p:first-child { font-weight: 650; margin: 0 0 0.5rem; }
 .assistant-setup { min-width: 0; border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; background: var(--surface); }
+.assistant-setup > p, .starter-guidance > p { max-width: 70ch; }
 .assistant-setup h3 { margin: 0.4rem 0 0.75rem; }
 .assistant-setup > p:not(.eyebrow) { color: var(--muted); font-size: var(--fs-secondary); }
 .assistant-setup details { border-bottom: 1px solid var(--border); }
