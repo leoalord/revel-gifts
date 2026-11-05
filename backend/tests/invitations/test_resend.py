@@ -1,6 +1,7 @@
 """Resend transport contract with synthetic credentials and HTTP responses only."""
 
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -52,6 +53,8 @@ async def test_resend_contract_and_private_payload(config, caplog):
         transport=httpx.MockTransport(handle), follow_redirects=True
     ) as client:
         result = await ResendInvitationMailer(config, http_client=client).send_invitation(
+            sender_name="Leo",
+            expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
             destination="Friend@Example.Test",
             invite_url="https://revel.example/app/invite#token=synthetic",
             idempotency_key=invitation_id,
@@ -64,9 +67,19 @@ async def test_resend_contract_and_private_payload(config, caplog):
     assert request.headers["Idempotency-Key"] == invitation_id
     assert request.extensions["timeout"] == {"connect": 3, "read": 10, "write": 10, "pool": 10}
     payload = json.loads(request.content)
-    assert payload["from"] == "invites@example.test"
+    assert payload["from"] == "Revel Gifts <invites@example.test>"
+    from revel.services.invitation_email import render_invitation
+
+    expected = render_invitation(
+        sender_name="Leo",
+        expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
+        invite_url="https://revel.example/app/invite#token=synthetic",
+    )
+    assert payload["subject"] == expected.subject
+    assert payload["html"] == expected.html
+    assert payload["text"] == expected.text
     assert payload["to"] == ["friend@example.test"]
-    assert set(payload) == {"from", "to", "subject", "text"}
+    assert set(payload) == {"from", "to", "subject", "text", "html"}
     assert "#token=synthetic" in payload["text"]
     assert "re_synthetic_secret" not in caplog.text
     assert "friend@example.test" not in caplog.text
@@ -99,6 +112,8 @@ async def test_resend_errors_are_generic_and_not_retried(config, status, body):
     ) as client:
         with pytest.raises(ResendDeliveryFailed) as error:
             await ResendInvitationMailer(config, http_client=client).send_invitation(
+                sender_name="Leo",
+                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=private",
                 idempotency_key=str(uuid4()),
@@ -122,6 +137,8 @@ async def test_resend_timeout_and_invalid_json_are_unknown_without_retry(config,
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(ResendDeliveryFailed) as error:
             await ResendInvitationMailer(config, http_client=client).send_invitation(
+                sender_name="Leo",
+                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=private",
                 idempotency_key=str(uuid4()),
@@ -147,7 +164,11 @@ async def test_resend_never_transmits_invalid_capability_url(config, url):
     ) as client:
         with pytest.raises(MailUnavailable):
             await ResendInvitationMailer(config, http_client=client).send_invitation(
-                destination="friend@example.test", invite_url=url, idempotency_key=str(uuid4())
+                sender_name="Leo",
+                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
+                destination="friend@example.test",
+                invite_url=url,
+                idempotency_key=str(uuid4()),
             )
     assert not requests
 
@@ -173,6 +194,8 @@ async def test_resend_hard_deadline_cancels_a_stalled_response(config, monkeypat
     async with httpx.AsyncClient(transport=httpx.MockTransport(stalls)) as client:
         with pytest.raises(ResendDeliveryFailed):
             await ResendInvitationMailer(config, http_client=client).send_invitation(
+                sender_name="Leo",
+                expires_at=datetime(2026, 11, 12, 18, 30, tzinfo=UTC),
                 destination="friend@example.test",
                 invite_url="https://revel.example/app/invite#token=x",
                 idempotency_key=str(uuid4()),
