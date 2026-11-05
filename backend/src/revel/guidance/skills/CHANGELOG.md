@@ -1,11 +1,19 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.8.0
+version: 0.8.1
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.8.1 (2026-11-04)
+
+- `revel-manage-profile` section 3 centres facts on gift choice: record the lasting trait at
+  the detail a giver can use, and only for interests a giver could act on. Routines, plans
+  and task details (meal plans, workout logs, league settings) are not facts, and diets or
+  fitness goals are never recorded as interests. Adds before-and-after examples. The `add_facts` tool and `statement` field descriptions say
+  the same. No tool or API change.
 
 ## 0.8.0 (2026-11-04)
 

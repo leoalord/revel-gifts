@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.8.0
+version: 0.8.1
 status: active
 ---
 
