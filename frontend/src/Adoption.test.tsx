@@ -77,6 +77,21 @@ describe("invitation capabilities and consent", () => {
     expect(pendingInvitation()).toBe("synthetic-private-capability");
   });
 
+  it("keeps open signup usable when invitation attribution is unavailable", async () => {
+    window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
+    const fetchMock = vi.fn(async (url: string) => url === "/auth/session"
+      ? jsonResponse(200, { user: { email: "alex@example.test" } })
+      : jsonResponse(404, { detail: "Invitation unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
+    render(<InviteLanding />);
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Continue to Revel" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/app/"));
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/join"))).toBe(false);
+    expect(pendingInvitation()).toBeNull();
+  });
+
   it("requires destination-specific confirmation before sending email", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, []));
     vi.stubGlobal("fetch", fetchMock);

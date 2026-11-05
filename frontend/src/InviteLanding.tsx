@@ -41,7 +41,7 @@ export function InviteLanding() {
           if (active) browserNavigation.assign("/app/");
         }
       } catch (e) {
-        if (active) { setError(messageFor(e)); setBusy(false); }
+        if (active) { setError(messageFor(e)); setPreview(null); setBusy(false); }
         try { sessionStorage.removeItem(JOIN_INTENT); } catch { /* ignore */ }
       } finally { if (active) setLoading(false); }
     }
@@ -59,11 +59,11 @@ export function InviteLanding() {
       return;
     }
     try {
-      if (token) await invitePost("join", { token });
+      if (token && preview) await invitePost("join", { token });
       clearInvitation();
       try { sessionStorage.removeItem(JOIN_INTENT); } catch { /* ignore */ }
       browserNavigation.assign("/app/");
-    } catch (e) { setError(messageFor(e)); setBusy(false); }
+    } catch (e) { setError(messageFor(e)); setPreview(null); setBusy(false); }
   }
 
   async function signOut() {
@@ -81,8 +81,8 @@ export function InviteLanding() {
         <p className="invite-description">{preview?.sender_name ? `${preview.sender_name} invited you to Revel. ` : ""}Bring together what your assistants know about you, so the people in your life can give gifts that feel like you.</p>
         {loading ? <p role="status">Checking sign-in…</p> : <>
           {session && <p className="hint">Signed in as {session.user.email ?? session.user.display_name ?? "your Revel account"}.</p>}
-          {error && <div className="invite-error"><p role="alert">{error}</p>{session && <><p>After signing out, reopen the invitation from your email and sign in with the email that received it.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button></>}</div>}
-          <button className="primary" type="button" disabled={busy || Boolean(session && token && !preview)} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : session ? "Continue to Revel" : "Create Revel account"}</button>
+          {error && <div className="invite-error"><p role="alert">{error}</p>{session && <><p>You can continue to your account without linking this invitation.</p><p>To use a different account, after signing out, reopen the invitation from your email and sign in with the email that received it.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button></>}</div>}
+          <button className="primary" type="button" disabled={busy} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : session ? "Continue to Revel" : "Create Revel account"}</button>
           <p className="hint">{session ? "Your profile and sharing stay in your control." : "Already have an account? You can sign in on the next screen."}</p>
         </>}
       </div>
