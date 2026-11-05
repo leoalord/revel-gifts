@@ -72,9 +72,12 @@ GET_PROFILE_DESCRIPTION = (
     "with the user; do not guess other handles. Handle lookups are rate limited."
 )
 ADD_FACTS_DESCRIPTION = (
-    "Save 1-20 short, actionable gifting facts about the user to their Revel profile "
-    "(e.g. 'Owns a Moka pot', 'Prefers loose-leaf green tea'). Never raw conversation or "
-    "quotes. Sensitive topics go only in the 'sensitive' category and only when the user "
+    "Save 1-20 short facts about the user that help someone choose them a gift: what they "
+    "enjoy, their taste and personality, what they want, own or avoid (e.g. 'Owns a Moka pot', "
+    "'Prefers loose-leaf green tea'). Save the lasting trait, not routines, plans or task "
+    "details (a meal plan, a workout log, league settings), and skip anything that would not "
+    "change what someone gives them. Never raw conversation or quotes. Sensitive topics go "
+    "only in the 'sensitive' category and only when the user "
     "volunteered them (evidence_type 'explicit'; Only Me; held for the user's approval); "
     "never infer them or ask about them. Set involves_others when a fact is about other "
     "people too. Each fact gets its own outcome: 'accepted' (status 'active', or "
