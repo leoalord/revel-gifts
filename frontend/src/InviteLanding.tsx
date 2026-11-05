@@ -81,7 +81,7 @@ export function InviteLanding() {
         <p className="invite-description">{preview?.sender_name ? `${preview.sender_name} invited you to Revel. ` : ""}Bring together what your assistants know about you, so the people in your life can give gifts that feel like you.</p>
         {loading ? <p role="status">Checking sign-in…</p> : <>
           {session && <p className="hint">Signed in as {session.user.email ?? session.user.display_name ?? "your Revel account"}.</p>}
-          {error && <div className="invite-error"><p role="alert">{error}</p>{session && <button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button>}</div>}
+          {error && <div className="invite-error"><p role="alert">{error}</p>{session && <><p>After signing out, reopen the invitation from your email and sign in with the email that received it.</p><button type="button" disabled={busy} onClick={() => void signOut()}>Use a different account</button></>}</div>}
           <button className="primary" type="button" disabled={busy || Boolean(session && token && !preview)} onClick={() => void continueToRevel()}>{busy ? "Opening Revel…" : session ? "Continue to Revel" : "Create Revel account"}</button>
           <p className="hint">{session ? "Your profile and sharing stay in your control." : "Already have an account? You can sign in on the next screen."}</p>
         </>}

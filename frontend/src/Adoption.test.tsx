@@ -61,6 +61,21 @@ describe("invitation capabilities and consent", () => {
     expect(sessionStorage.getItem("revel.invitationJoinIntent")).toBeNull();
   });
 
+  it("keeps the invitation through wrong-account sign-out and explains recovery", async () => {
+    window.history.replaceState(null, "", "/app/invite#token=synthetic-private-capability"); captureInvitation();
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url === "/auth/session") return jsonResponse(200, { user: { email: "wrong@example.test" } });
+      if (url === "/auth/logout") return jsonResponse(200, { logout_url: "https://auth.example.test/logout" });
+      return jsonResponse(404, { detail: "Invitation unavailable" });
+    }));
+    const assign = vi.spyOn(browserNavigation, "assign").mockImplementation(() => {});
+    render(<InviteLanding />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use a different account" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://auth.example.test/logout"));
+    expect(screen.getByText(/reopen the invitation from your email/)).toBeInTheDocument();
+    expect(pendingInvitation()).toBe("synthetic-private-capability");
+  });
+
   it("requires destination-specific confirmation before sending email", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, []));
     vi.stubGlobal("fetch", fetchMock);
