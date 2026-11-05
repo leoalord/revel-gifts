@@ -374,3 +374,22 @@ gcloud run jobs execute revel-fga-admin --region us-central1 --wait \
 - Output carries counts and ids only. The JSON block between `BEGIN/END DEMO DISCLOSURE MANIFEST` lists each prepared fact's seed key, claim id and audience for #23. Facts Muse contributes during the recording are live.
 - Exit codes: 0 success, 1 a phase or check failed (a database error prints only the phase and exception class, and that phase's transaction rolls back), 2 refused (nothing written).
 - Tests: From `backend/`, run `REVEL_TEST_DATABASE_URL=… uv run pytest tests/demo` serially against a [disposable database](../backend/README.md). These tests downgrade and truncate that database. OpenFGA is faked.
+
+## Invitation dispatch runtime (RG-66)
+
+SMTP delivery is disabled by default. The in-process dispatcher must have CPU after the
+HTTP/MCP response completes. The existing development service uses request-based CPU allocation;
+setting only SMTP credentials is insufficient. [Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings)
+explains the CPU allocation and background execution requirements.
+
+`invitation_background_delivery_ready = true` changes only the app's CPU policy to
+`cpu_idle = false` and sets `INVITATION_BACKGROUND_DELIVERY_READY=true`. It opts into
+instance-based billing and requires explicit approval of the Terraform plan. It does not
+create or configure a mail provider, enable SMTP, or verify delivery. Leave it false until
+approved. A durable dispatch worker could replace this arrangement in a future reviewed change.
+
+Before mail enablement, approve a transactional SMTP provider, sender/domain and test mailbox;
+prepare the provider-specific DNS and managed-secret/environment changes in a separate concrete
+plan. Never store credentials in tfvars or Git. Apply only approved plans and verify the actual
+Cloud Run CPU annotation before enabling SMTP. A dispatcher crash can leave an unknown delivery
+outcome; do not automatically retry an invitation. A submitted response never proves receipt.

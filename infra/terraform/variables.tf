@@ -235,3 +235,9 @@ variable "fga_reconcile_schedule" {
   type        = string
   default     = "*/15 * * * *"
 }
+
+variable "invitation_background_delivery_ready" {
+  description = "Opt in to instance-based CPU allocation for invitation dispatch and assert runtime readiness. Requires explicit user approval and deployed verification before true. This does not enable SMTP or provision a mail provider."
+  type        = bool
+  default     = false
+}
