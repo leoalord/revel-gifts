@@ -741,3 +741,30 @@ async def test_resend_provider_reference_stays_private_and_unknown_never_retries
         row = session.get(Invitation, info.id)
         assert row.provider_message_id == (provider_id if response_kind == "success" else None)
         assert row.delivery_status == ("sent" if response_kind == "success" else "unknown")
+
+
+@pytest.mark.anyio
+async def test_mail_uses_fresh_authenticated_inviter_and_actual_row_expiry(
+    people, factory, config, mail_dispatcher
+):
+    info = await make(people, factory, config)
+    actual_expiry = datetime.now(UTC) + timedelta(minutes=37)
+    with factory() as session, session.begin():
+        session.get(User, people[0].user_id).display_name = "Current authenticated inviter"
+        session.get(User, people[1].user_id).display_name = "Never infer this recipient name"
+        session.get(Invitation, info.id).expires_at = actual_expiry
+    mailer = Mailer()
+    await svc.send(
+        people[0],
+        info.id,
+        owner_confirmed=True,
+        settings=config,
+        sessions=lambda: factory,
+        directory=Directory(),
+        mailer=mailer,
+    )
+    await mail_dispatcher.wait_idle()
+    assert len(mailer.sent) == 1
+    assert mailer.sent[0]["sender_name"] == "Current authenticated inviter"
+    assert mailer.sent[0]["expires_at"] == actual_expiry
+    assert "recipient_name" not in mailer.sent[0]

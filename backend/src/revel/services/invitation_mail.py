@@ -10,6 +10,7 @@ from __future__ import annotations
 import smtplib
 import ssl
 from contextlib import asynccontextmanager
+from datetime import datetime
 from email.message import EmailMessage
 from functools import partial
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 import anyio
 import anyio.to_thread
 
+from revel.services.invitation_email import branded_sender, render_invitation
 from revel.settings import Settings
 
 
@@ -40,7 +42,15 @@ class SMTPInvitationMailer:
         self._sender = normalize_email(settings.invitation_from_email)
         self._origin = settings.public_origin
 
-    def _send(self, destination: str, invite_url: str, idempotency_key: str) -> None:
+    def _send(
+        self,
+        destination: str,
+        invite_url: str,
+        idempotency_key: str,
+        *,
+        sender_name: str | None,
+        expires_at: datetime,
+    ) -> None:
         from revel.services.invitations import MailUnavailable, normalize_email
 
         destination = normalize_email(destination)
@@ -48,19 +58,15 @@ class SMTPInvitationMailer:
         if f"{parts.scheme}://{parts.netloc}" != self._origin or parts.scheme != "https":
             raise MailUnavailable()
         message = EmailMessage()
-        message["From"] = self._sender
-        message["To"] = destination
-        message["Subject"] = "You're invited to Revel Gifts"
-        message["Message-ID"] = f"<{idempotency_key}@{self._sender.split('@')[1]}>"
-        message.set_content(
-            "Someone invited you to connect on Revel Gifts.\n\n"
-            "Open the link, sign in with this email through WorkOS, then accept or decline:\n"
-            + invite_url
-            + "\n\n"
-            "The invitation page shows the link expiry. Accepting grants no profile access. "
-            "Sharing permissions are approved separately. If you weren't expecting this "
-            "invitation, you can ignore it.\n"
+        content = render_invitation(
+            sender_name=sender_name, expires_at=expires_at, invite_url=invite_url
         )
+        message["From"] = branded_sender(self._sender)
+        message["To"] = destination
+        message["Subject"] = content.subject
+        message["Message-ID"] = f"<{idempotency_key}@{self._sender.split('@')[1]}>"
+        message.set_content(content.text)
+        message.add_alternative(content.html, subtype="html")
         with smtplib.SMTP_SSL(
             self._host, self._port, timeout=10, context=ssl.create_default_context()
         ) as client:
@@ -68,10 +74,23 @@ class SMTPInvitationMailer:
             client.send_message(message, from_addr=self._sender, to_addrs=[destination])
 
     async def send_invitation(
-        self, *, destination: str, invite_url: str, idempotency_key: str
+        self,
+        *,
+        destination: str,
+        invite_url: str,
+        idempotency_key: str,
+        sender_name: str | None,
+        expires_at: datetime,
     ) -> None:
         await anyio.to_thread.run_sync(
-            partial(self._send, destination, invite_url, idempotency_key)
+            partial(
+                self._send,
+                destination,
+                invite_url,
+                idempotency_key,
+                sender_name=sender_name,
+                expires_at=expires_at,
+            )
         )
 
 
