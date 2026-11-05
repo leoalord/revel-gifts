@@ -56,6 +56,14 @@ export function SetupSection() {
     return () => { active = false; };
   }, []);
 
+  async function refresh() {
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const [result, list] = await Promise.all([apiRequest<Setup>("/api/setup"), agentsApi.list()]);
+      apply(result); setAgents(list.filter((a) => a.status === "active"));
+    } catch (e) { setError(messageFor(e)); } finally { setBusy(false); }
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!setup) return;
@@ -79,6 +87,7 @@ export function SetupSection() {
     <p><a href="/guidance/revel-get-started.md">Read the starter guidance</a> · <a href="/app/policy">Review contribution consent</a> · <a href="/app/contributions">Review your profile</a></p>
     <button type="button" disabled={!prompt} onClick={() => { if (prompt) void navigator.clipboard.writeText(prompt).then(() => setNotice("Starter guidance copied. Paste it into your connected assistant."), () => setNotice("Open the starter guidance link and copy its text.")); }}>Copy starter prompt</button>
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
+    <button type="button" disabled={busy} onClick={() => void refresh()}>Refresh setup status</button>
     {setup && <>
       <h4>Scheduled inbox checks</h4>
       <p>Status: <strong>{setup.schedule_state.replaceAll("_", " ")}</strong>. Unattended pickup: <strong>not verified</strong>.</p>

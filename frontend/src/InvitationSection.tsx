@@ -55,7 +55,7 @@ export function InvitationSection() {
       <div className="field"><label htmlFor="invite-email">Their email</label><input id="invite-email" type="email" required autoComplete="off" value={email} onChange={(e) => { setEmail(e.target.value); setConfirmed(false); }} /></div>
       <div className="field"><label htmlFor="invite-channel">How to invite</label><select id="invite-channel" value={channel} onChange={(e) => { setChannel(e.target.value as "copy" | "email"); setConfirmed(false); }}><option value="copy">Create a link to share</option><option value="email">Send an email invitation</option></select></div>
       {channel === "email" && <label className="checkbox-field"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I want Revel to send an invitation to {email || "the email above"}.</label>}
-      <p className="hint">Email sending requires a configured mail provider. A copyable link works independently.</p>
+      <p className="hint">Email sending requires a configured mail provider. A copyable link works independently. Submitted means an email attempt was recorded, not that it reached the mailbox.</p>
       <button type="submit" disabled={busy || (channel === "email" && !confirmed)}>{channel === "copy" ? "Create invitation link" : "Send confirmed invitation"}</button>
     </form>
     {error && <p role="alert">{error}</p>}
