@@ -1,7 +1,7 @@
 ---
 name: revel-manage-profile
 description: Build, maintain and edit your user's own Revel gifting profile, from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience; and manage its policy, approvals and audiences with the owner's confirmation.
-version: 0.8.0
+version: 0.8.1
 status: active
 ---
 
@@ -58,13 +58,41 @@ try once more.
   assistants do not corroborate each other.
 - Change the policy only when the owner asks, following section 9.
 
-## 3. Identify useful, durable facts
+## 3. Identify facts that help someone choose a gift
 
-Look for: interests and hobbies, style, favorite brands, wishes, dislikes, items they already
-own, birthday month and day, city or region, sizes, anniversaries, life events, sentimental
-context, and foods to avoid. Keep only a short, supported fact that could change a gift
-choice or prevent a mistake. Leave unsupported categories empty, and leave unrelated context
-where it is. Keep drafts in this conversation separate from what Revel confirms it stored.
+Revel is a gifting profile, not a general memory. The assistants of people your user approves
+read it to choose a gift your user would love, so record who your user is and what they enjoy,
+not what they did this week.
+
+Look for: interests and hobbies, style and taste, personality as it shows in gifts (practical or
+sentimental, experiences or things, surprises or a list), favorite brands, wishes, dislikes,
+items they already own, birthday month and day, city or region, sizes, anniversaries, life
+events, sentimental context, and foods to avoid. Keep only a short, supported fact that could
+change a gift choice or prevent a mistake. Leave unsupported categories empty, and leave
+unrelated context where it is. Keep drafts in this conversation separate from what Revel
+confirms it stored.
+
+Write each fact as the lasting trait, at the detail a giver can use:
+
+- Record an interest only when a giver could act on it: gear, experiences, books, team or brand
+  merchandise, things to eat or drink. Many activities have little to give for them (fantasy
+  sports, apps, chores); record the passion behind one instead, such as a team they follow, or
+  skip it.
+- Keep a detail when it changes the gift: the model an accessory must fit, the team they follow,
+  a size, a brand. Drop one that does not: league size, the app they use, aftermarket parts.
+- Routines, plans and tasks are not facts: meal plans, workout logs, shopping lists, schedules,
+  work projects. Record the interest behind one only when it is clear and lasting; otherwise
+  skip it.
+- Diets, nutrition and fitness goals border on health: never record them as interests or
+  style. Record only a food to avoid, as `diet_exclusion`.
+- Prefer a pattern over a one-off. A single purchase or plan is a fact only when it is a wish,
+  an owned item a giver should not duplicate, or a life event.
+
+| Instead of | Save |
+| --- | --- |
+| "Plays fantasy football in a 12-team Yahoo league" | Nothing on its own: there is little to give for it. If they say they follow a team closely, `interest`: "Big Seattle Seahawks fan" |
+| "Owns a 2024 Toyota Land Cruiser 1958 on Method Racing wheels" | `owned_item`: "Drives a 2024 Toyota Land Cruiser" |
+| "Plans high-protein meals with salmon, chicken, lean ground beef and cottage cheese" | Nothing: a meal plan, not a taste. If they say they love to cook, `interest`: "Enjoys cooking at home" |
 
 Never collect or submit:
 

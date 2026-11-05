@@ -260,7 +260,10 @@ class FactInput(BaseModel):
 
     category: str = Field(description="Category id from get_profile's policy.categories.")
     statement: str = Field(
-        description="Short actionable fact, 1-500 characters. Never raw conversation."
+        description=(
+            "One short sentence about the user that would help choose them a gift, 1-500 "
+            "characters. Never raw conversation, routines or task details."
+        )
     )
     details: dict[str, Any] | None = Field(
         default=None, description="Structured details per the category's details_schema."
