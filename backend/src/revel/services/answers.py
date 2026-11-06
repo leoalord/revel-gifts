@@ -1,5 +1,5 @@
-"""Evidence-aware answers: submit_answer (respondent), get_answer and get_question_status
-(requester). Owned by F7.
+"""Evidence-aware answers: submit_answer (respondent), get_answer, get_question_status and
+cancel_question (requester). Owned by F7.
 
 Policy: Notion "Ongoing Enrichment & Agent Questions" (answer evidence, lifecycle) and
 "Relationships, Discovery & Privacy".
@@ -31,6 +31,14 @@ question deadline. An OpenFGA outage is ``service_unavailable`` (never an allow)
 get_question_status(question_id): the requester's view of their question (open, answered,
 expired, declined, ...) without respondent details. An open question past its deadline is
 marked expired lazily.
+
+cancel_question(question_id): the requester withdraws their own open question (another caller
+gets ``not_found``). The question becomes ``cancelled`` (final) with a ``cancelled`` event;
+it leaves every inbox and later lease or answer calls are ``question_closed`` (an answer already
+in flight that loses the race is ``stale_lease``). Assignments are left as they are, as with
+expiry. Repeating it returns the same result; an answered, declined or closed question is
+``question_closed`` and an expired one ``question_expired``, also when that happens during the
+call: the guarded UPDATE only moves an open question, and a lost race reports the winner's state.
 
 Lock order (F4 gate): writes only ``assignments``, ``questions``, ``answers``,
 ``answer_evidence`` and ``question_events``; reads (never locks) ``claims`` and
@@ -76,6 +84,8 @@ from revel.services.categories import CategoryError
 from revel.services.profiles import effective_max_audience, validate_category
 from revel.services.question_leases import (
     HELD_LEASE_STATUSES,
+    QuestionClosed,
+    QuestionExpired,
     StaleLease,
     _versioned_update,
     _write,
@@ -542,6 +552,65 @@ async def get_question_status(
                 session.rollback()
 
         return await _in_thread(read)
+
+
+async def cancel_question(
+    principal: PrincipalLike, question_id: UUID, *, deps: QuestionDeps
+) -> QuestionStatusResponse:
+    """Withdraw the requester's own open question. Final, and safe to repeat."""
+    now = deps.now()
+
+    def response(question: _OwnQuestion, closed_at: datetime | None) -> QuestionStatusResponse:
+        return QuestionStatusResponse(
+            question_id=question.id,
+            status=QuestionStatus.CANCELLED.value,
+            expires_at=question.expires_at,
+            created_at=question.created_at,
+            closed_at=closed_at,
+            answer_available=False,  # Only an open question can be cancelled.
+        )
+
+    def work(session: Session) -> QuestionStatusResponse:
+        question = _own_question(session, principal, question_id, now)
+        if question.status == QuestionStatus.CANCELLED.value:
+            return response(question, question.closed_at)
+        if question.status == QuestionStatus.EXPIRED.value:
+            raise QuestionExpired()
+        if question.status != QuestionStatus.OPEN.value:
+            raise QuestionClosed()
+        cancelled = session.execute(
+            update(Question)
+            .where(
+                Question.id == question_id,
+                Question.status == QuestionStatus.OPEN.value,
+                Question.expires_at > now,
+            )
+            .values(status=QuestionStatus.CANCELLED.value, closed_at=now)
+        )
+        if cancelled.rowcount != 1:
+            # A concurrent write won the row: report what it left, so a repeat stays safe.
+            raced = session.execute(
+                select(Question.status, Question.closed_at).where(Question.id == question_id)
+            ).one()
+            if raced.status == QuestionStatus.CANCELLED.value:
+                return response(question, raced.closed_at)
+            if raced.status == QuestionStatus.EXPIRED.value:
+                raise QuestionExpired()
+            raise QuestionClosed()
+        session.add(
+            QuestionEvent(
+                question_id=question_id,
+                event_type=QuestionEventType.CANCELLED.value,
+                actor_user_id=principal.user_id,
+                actor_delegation_id=principal.delegation_id,
+                details={"via": principal.via},
+                occurred_at=now,
+            )
+        )
+        session.commit()
+        return response(question, now)
+
+    return await _write(deps, work)
 
 
 async def _releasable(

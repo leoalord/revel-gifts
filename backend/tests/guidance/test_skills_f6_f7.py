@@ -346,14 +346,13 @@ def test_giver_limits_match_f7() -> None:
     max_ideas = question_routing.PrivatePurpose.model_json_schema()["properties"][
         "candidate_ideas"
     ]["maxItems"]
-    hours = int(questions_svc.DEFAULT_DEADLINE.total_seconds() // 3600)
     low = int(questions_svc.MIN_DEADLINE.total_seconds() // 3600)
     window = int(questions_svc.RATE_LIMIT_WINDOW.total_seconds() // 3600)
     assert window == 1
     for phrase in (
         f"1 to {question_routing.REQUESTED_INFORMATION_MAX_LENGTH} characters",
         f"`candidate_ideas` (up to {max_ideas})",
-        f"expires after {hours} hours",
+        f"expires after {questions_svc.DEFAULT_DEADLINE.days} days",
         f"between {low} hour and {questions_svc.MAX_DEADLINE.days} days",
         f"at most {questions_svc.RATE_LIMIT_MAX_QUESTIONS} questions per hour",
     ):

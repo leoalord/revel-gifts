@@ -107,26 +107,19 @@ SET_POLICY_DESCRIPTION = (
     + " Returns the policy in the same shape as get_profile's 'policy'."
 )
 UPDATE_FACT_DESCRIPTION = (
-    "Change one of the user's facts. action='set_audience' (requires audience): change who "
-    "can see it (public > connections > trusted_circle > only_me); narrowing needs no "
-    "confirmation. Sensitive facts are always only_me and Public needs the user's Public opt-in. "
-    "action='approve' (takes no audience): approve a fact pending the "
+    "Change, approve, reject or remove one of the user's facts. action='set_audience' (requires "
+    "audience): change who can see it (public > connections > trusted_circle > only_me); "
+    "narrowing needs no confirmation. Sensitive facts are always only_me and Public needs the "
+    "user's Public opt-in. action='approve' (takes no audience): approve a fact pending the "
     "user's review, when they decide; it becomes active and shared with its audience (a "
-    "replacement retires the fact it corrects) and always needs the owner's confirmation. To "
-    "reject a pending fact use remove_fact with action='reject'. For approvals and widening, "
-    "first call without confirmation for a preview. Retry with owner_confirmed=true and the "
-    "preview's expected_updated_at only after the owner agrees. If Revel returns a new "
-    "preview, ask again. " + CONFIRMATION_RULE
-)
-REMOVE_DESCRIPTION = (
-    "Remove one of the user's live facts (action='remove'), or reject a fact pending their "
-    "review (action='reject'). State mismatch is a conflict: reread and confirm the intended "
-    "operation before retrying. Neither action requires confirmation. Pass the action explicitly. "
-    "A legacy call omitting action with owner_confirmed=true can only reject a pending fact."
-)
-REJECT_CONFIRMED_DESCRIPTION = (
-    "Reject only: set true only when the owner explicitly told you to reject this pending "
-    "fact. If action is omitted, true selects reject."
+    "replacement retires the fact it corrects) and always needs the owner's confirmation. "
+    "action='reject': reject a fact pending their review; pass owner_confirmed=true only when "
+    "the owner explicitly told you to. action='remove': remove a live fact; this is final and "
+    "takes no owner_confirmed. Neither reject nor remove needs a confirmation step, and a state "
+    "mismatch is a conflict: reread and confirm the intended operation before retrying. For "
+    "approvals and widening, first call without confirmation for a preview. Retry with "
+    "owner_confirmed=true and the preview's expected_updated_at only after the owner agrees. If "
+    "Revel returns a new preview, ask again. " + CONFIRMATION_RULE
 )
 
 _NOT_FOUND = "Fact not found"
@@ -139,8 +132,8 @@ _POLICY_CONFLICT = "The policy changed; read it again with get_profile and retry
 _INVALID = "Invalid request"
 _INVALID_REQUEST = "invalid_request"  # error code shared with the F6/F7 adapters (RG-59)
 
-FactAction = Literal["set_audience", "approve"]
-FACT_ACTIONS: tuple[FactAction, ...] = ("set_audience", "approve")
+FactAction = Literal["set_audience", "approve", "reject", "remove"]
+FACT_ACTIONS: tuple[FactAction, ...] = ("set_audience", "approve", "reject", "remove")
 AUDIENCES: tuple[str, ...] = tuple(a.value for a in Audience)  # widest first
 
 
@@ -218,10 +211,10 @@ def _fact_action(action: str, audience: str | None) -> tuple[FactAction, Audienc
             + ", ".join(FACT_ACTIONS)
             + "."
         )
-    if action == "approve":
+    if action != "set_audience":
         if audience is not None:
-            raise _invalid_request("Action 'approve' does not accept audience.")
-        return "approve", None
+            raise _invalid_request(f"Action '{action}' does not accept audience.")
+        return action, None
     if audience is None:
         raise _invalid_request("Action 'set_audience' requires audience.")
     if audience not in AUDIENCES:
@@ -315,8 +308,8 @@ def register(server: MCPServer, settings: Any) -> None:
         action: Annotated[
             str,
             Field(
-                description="'set_audience' (requires audience) or 'approve' (a pending fact; "
-                "takes no audience).",
+                description="'set_audience' (requires audience), or 'approve' or 'reject' (a "
+                "pending fact) or 'remove' (a live fact), which take no audience.",
                 json_schema_extra={"enum": list(FACT_ACTIONS)},
             ),
         ],
@@ -335,6 +328,17 @@ def register(server: MCPServer, settings: Any) -> None:
         ] = None,
     ) -> FactOut:
         checked, new_audience = _fact_action(action, audience)
+        if checked in ("reject", "remove") and expected_updated_at is not None:
+            raise _invalid_request(f"Action '{checked}' does not accept expected_updated_at.")
+        if checked == "reject":
+            return await _run(
+                settings,
+                lambda s, p: profiles.reject_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
+            )
+        if checked == "remove":
+            if owner_confirmed:
+                raise _invalid_request("Action 'remove' does not accept owner_confirmed=true.")
+            return await _run(settings, lambda s, p: profiles.remove_fact(s, p, fact_id))
         if checked == "approve":
             return await _run(
                 settings,
@@ -390,31 +394,6 @@ def register(server: MCPServer, settings: Any) -> None:
             lambda s, p: profiles.set_policy(s, p, update, owner_confirmed=owner_confirmed),
         )
 
-    async def remove_fact(
-        fact_id: UUID,
-        owner_confirmed: Annotated[bool, Field(description=REJECT_CONFIRMED_DESCRIPTION)] = False,
-        action: Annotated[
-            Literal["remove", "reject"] | None,
-            Field(
-                description="Required unless a legacy confirmed rejection omits it. "
-                "Remove a live fact or reject a pending fact."
-            ),
-        ] = None,
-    ) -> FactOut:
-        if action == "reject" or (action is None and owner_confirmed):
-            return await _run(
-                settings,
-                lambda s, p: profiles.reject_fact(s, p, fact_id, owner_confirmed=owner_confirmed),
-            )
-        if action is None:
-            raise ToolError(
-                "action_required: Pass action='remove' to remove a live fact or "
-                "action='reject' to reject a pending fact."
-            )
-        if owner_confirmed:
-            raise _invalid_request("Action 'remove' does not accept owner_confirmed=true.")
-        return await _run(settings, lambda s, p: profiles.remove_fact(s, p, fact_id))
-
     read_only = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     tools: list[tuple[Callable[..., Any], str, str, str, ToolAnnotations]] = [
         (get_profile, "get_profile", "Read a profile", GET_PROFILE_DESCRIPTION, read_only),
@@ -445,19 +424,10 @@ def register(server: MCPServer, settings: Any) -> None:
         (
             update_fact,
             "update_fact",
-            "Change a fact's audience or approve it",
+            "Change, approve, reject or remove a fact",
             UPDATE_FACT_DESCRIPTION,
-            # A repeat approve is a conflict (ToolError), so not idempotent.
-            ToolAnnotations(
-                readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-            ),
-        ),
-        (
-            remove_fact,
-            "remove_fact",
-            "Remove or reject a fact",
-            REMOVE_DESCRIPTION,
-            # A repeat remove is a conflict (ToolError), so not idempotent.
+            # Destructive: action remove. A repeat approve, reject or remove is a conflict
+            # (ToolError), so not idempotent.
             ToolAnnotations(
                 readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
             ),

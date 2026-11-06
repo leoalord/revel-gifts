@@ -118,8 +118,7 @@ async def principal_from_mcp_context(runtime: AuthRuntime) -> Principal:
     **Every MCP tool that reads or writes user data must call this first** and act
     only as the returned principal. The SDK middleware (``DelegationAwareVerifier``)
     already answers 401 for a disconnected authorization's tokens, but it does not create
-    or select the delegation; this call does, and re-checks the disconnect rule (only
-    data-free tools such as ``ping`` may skip it).
+    or select the delegation; this call does, and re-checks the disconnect rule.
 
     Raises :class:`ToolError` (returned to the client as a tool error) when the
     request is unauthenticated or the delegation is disconnected.

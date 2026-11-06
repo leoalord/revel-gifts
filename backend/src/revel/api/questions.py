@@ -3,8 +3,9 @@
 - ``POST /api/questions`` (submit), ``GET /api/updates`` (respondent inbox);
 - ``POST /api/assignments/{id}/claim|renew|release|user-contact|decline`` (leases,
   ``revel.services.question_leases``) and ``POST /api/assignments/{id}/answer`` (201);
-- ``GET /api/questions/{id}`` (requester status) and ``GET /api/questions/{id}/answer``
-  (requester answer retrieval, ``revel.services.answers``).
+- ``GET /api/questions/{id}`` (requester status), ``GET /api/questions/{id}/answer``
+  (requester answer retrieval) and ``POST /api/questions/{id}/cancel`` (requester withdraws an
+  open question), all ``revel.services.answers``.
 
 Errors are ``{"detail": {"code": ..., "message": ...}}`` with the service's status code
 (422 invalid_request / unsafe_requested_information / invalid_evidence, 403 not_permitted,
@@ -184,6 +185,17 @@ async def get_question_status(
 ) -> QuestionStatusResponse:
     try:
         return await answers.get_question_status(principal, question_id, deps=_deps(request))
+    except QuestionError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/questions/{question_id}/cancel", response_model=QuestionStatusResponse)
+async def cancel_question(
+    question_id: UUID, principal: CurrentPrincipal, request: Request
+) -> QuestionStatusResponse:
+    """Withdraw your own open question. Final, and safe to repeat."""
+    try:
+        return await answers.cancel_question(principal, question_id, deps=_deps(request))
     except QuestionError as exc:
         raise _http_error(exc) from None
 

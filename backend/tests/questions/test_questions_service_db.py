@@ -343,7 +343,7 @@ async def test_deadline_clamped_on_submit(
     now = datetime.now(UTC)
     result = await submit_question(
         agent_principal(world.requester_d),
-        request(expires_in_hours=24 * 60),
+        request(expires_in_hours=24 * 90),
         deps=world.deps(factory, now=lambda: now),
     )
     assert result.deadline_clamped

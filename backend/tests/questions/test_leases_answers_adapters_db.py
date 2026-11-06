@@ -142,6 +142,31 @@ def test_http_lease_answer_and_retrieval_flow(
         )
 
 
+def test_http_cancel_question(
+    factory: sessionmaker[Session], settings: Settings, fake_world: tuple[World, FakeFga]
+) -> None:
+    world, _ = fake_world
+    configure_question_deps(settings, QuestionDeps(sessionmaker=factory))
+    with TestClient(http_app(settings, agent_principal(world.requester_d, via="api"))) as c:
+        created = c.post(
+            "/api/questions",
+            json={"handle": "chelsea", "requested_information": REQUESTED},
+        )
+        assert created.status_code == 201, created.text
+        question_id = created.json()["question_id"]
+    with TestClient(http_app(settings, agent_principal(world.owner_d1, via="api"))) as c:
+        refused = c.post(f"/api/questions/{question_id}/cancel")
+        assert refused.status_code == 404
+        assert refused.json()["detail"]["code"] == "not_found"
+    with TestClient(http_app(settings, agent_principal(world.requester_d, via="api"))) as c:
+        cancelled = c.post(f"/api/questions/{question_id}/cancel")
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        repeated = c.post(f"/api/questions/{question_id}/cancel")
+        assert repeated.json() == cancelled.json()
+        assert c.get(f"/api/questions/{question_id}").json()["status"] == "cancelled"
+
+
 @requires_db
 def test_http_outreach_cooldown_has_retry_after(
     factory: sessionmaker[Session], settings: Settings, fake_world: tuple[World, FakeFga]
@@ -253,6 +278,37 @@ async def test_mcp_lease_answer_and_retrieval_tools(
     ).structured_content
     assert released is not None and released["result"] == "answer"
     assert [e["kind"] for e in released["answer"]["evidence"]] == ["claim", "inline"]
+
+
+@pytest.mark.anyio
+@requires_db
+async def test_mcp_cancel_question(
+    factory: sessionmaker[Session],
+    settings: Settings,
+    fga: Any,
+    world_builder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await world_builder()
+    configure_question_deps(settings, QuestionDeps(sessionmaker=factory))
+    asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
+    created = await asker.call_tool(
+        "submit_question", {"handle": "chelsea", "requested_information": REQUESTED}
+    )
+    question_id = created.structured_content["question_id"]  # type: ignore[index]
+
+    responder = mcp_server(settings, monkeypatch, agent_principal(world.owner_d1))
+    with pytest.raises(ToolError, match="not_found"):
+        await responder.call_tool("cancel_question", {"question_id": question_id})
+
+    asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
+    cancelled = await asker.call_tool("cancel_question", {"question_id": question_id})
+    assert cancelled.structured_content["status"] == "cancelled"  # type: ignore[index]
+    repeated = await asker.call_tool("cancel_question", {"question_id": question_id})
+    assert repeated.structured_content == cancelled.structured_content
+    seen = await asker.call_tool("get_question", {"question_id": question_id})
+    assert seen.structured_content["status"] == "cancelled"  # type: ignore[index]
+    assert seen.structured_content["result"] == "not_answered"  # type: ignore[index]
 
 
 @pytest.mark.anyio

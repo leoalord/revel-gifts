@@ -69,7 +69,7 @@ async def test_no_policy_holds_every_example(session: Any, world: Any) -> None:
 
 
 async def test_remove_fact_twice_is_an_error(session: Any, world: Any) -> None:
-    # Documented: remove_fact is not idempotent.
+    # Documented: removing a fact is not idempotent.
     await profiles.set_policy(session, world.alex.ui, PolicyUpdate(expected_version=None))
     _attrs, item = next((a, i) for a, i in examples() if a["outcome"] == "accepted")
     (result,) = (await profiles.add_facts(session, world.alex.mcp, [item])).results
@@ -153,13 +153,13 @@ async def test_owner_controls_two_step_flow(session: Any, world: Any) -> None:
     )
     assert approved_fact.status.value == "active"
     # The documented rejection and live removal are distinct one-call actions.
-    reject = _owner_example("remove_fact", None, action="reject")
+    reject = _owner_example("update_fact", None, action="reject")
     assert "owner_confirmed" not in reject
     rejected = await profiles.reject_fact(session, agent, second_fact.claim_id)
     assert rejected.status.value not in ("pending_review", "active")
     with pytest.raises(profiles.FactConflict):
         await profiles.reject_fact(session, agent, second_fact.claim_id)
-    remove = _owner_example("remove_fact", None, action="remove")
+    remove = _owner_example("update_fact", None, action="remove")
     assert "owner_confirmed" not in remove
     removed = await profiles.remove_fact(session, agent, approved_fact.id)
     assert removed.status.value == "removed"

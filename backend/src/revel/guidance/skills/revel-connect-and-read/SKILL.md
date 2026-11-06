@@ -1,7 +1,7 @@
 ---
 name: revel-connect-and-read
 description: Connect your user to another Revel member by exact handle, handle requests addressed to your user, and read only the profile facts that person has chosen to share.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 

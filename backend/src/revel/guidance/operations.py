@@ -9,7 +9,6 @@ PROVISIONAL_MARKER = "<!-- PROVISIONAL"
 
 IMPLEMENTED_MCP_TOOLS = frozenset(
     {
-        "ping",
         "get_setup",
         "configure_inbox_checks",
         "whoami",
@@ -17,7 +16,6 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "get_profile",
         "add_facts",
         "update_fact",
-        "remove_fact",
         "set_contribution_policy",
         # F6 #15, consolidated by RG-59: revel/mcp/connection_tools.py
         "set_handle",
@@ -32,6 +30,7 @@ IMPLEMENTED_MCP_TOOLS = frozenset(
         "update_assignment",
         "submit_answer",
         "get_question",
+        "cancel_question",
     }
 )
 
@@ -56,7 +55,7 @@ RETIRED_PROFILE_TOOLS = frozenset(
         "get_my_profile",  # -> get_profile (no handle)
         "get_contribution_policy",  # -> get_profile (no handle), its policy
         "set_fact_audience",  # -> update_fact (action set_audience)
-        "review_pending_fact",  # -> update_fact (action approve); reject -> remove_fact
+        "review_pending_fact",  # -> update_fact (action approve or reject)
     }
 )
 RETIRED_CONNECTION_TOOLS = frozenset(
@@ -68,6 +67,15 @@ RETIRED_CONNECTION_TOOLS = frozenset(
     }
 )
 RETIRED_MCP_TOOLS = RETIRED_QUESTION_TOOLS | RETIRED_PROFILE_TOOLS | RETIRED_CONNECTION_TOOLS
+
+# Removed in 0.9.0. Served guidance must not mention them outside the CHANGELOG, which keeps the
+# history of the versions that had them.
+REMOVED_MCP_TOOLS = frozenset(
+    {
+        "ping",  # -> whoami
+        "remove_fact",  # -> update_fact (action remove or reject)
+    }
+)
 
 IMPLEMENTED_HTTP = frozenset(
     {
@@ -102,6 +110,7 @@ IMPLEMENTED_HTTP = frozenset(
         "POST /api/assignments/{assignment_id}/answer",
         "GET /api/questions/{question_id}",
         "GET /api/questions/{question_id}/answer",
+        "POST /api/questions/{question_id}/cancel",
     }
 )
 

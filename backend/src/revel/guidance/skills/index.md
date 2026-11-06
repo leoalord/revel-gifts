@@ -1,7 +1,7 @@
 ---
 name: index
 description: What Revel Gifts is, what an assistant can do with it today, how to connect, and which guidance to load.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
@@ -21,13 +21,13 @@ inbox task. Stored preferences and host task reports never prove background oper
 ## What works today
 
 - MCP endpoint: `https://api.revel.gifts/mcp` (Streamable HTTP, no trailing slash).
-- `ping` (connectivity check) and `whoami` (which Revel user and assistant you are connected
-  as).
+- `whoami` (which Revel user and assistant you are connected as; it also confirms the
+  connection works).
 - Inbox setup: `get_setup` and `configure_inbox_checks` (owner-approved preferences and
   explicitly unverified host task reports; see `revel-get-started`).
 - Your user's own profile: `get_profile` (no `handle`: facts, summary and contribution
-  policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience` and
-  `approve`) and `remove_fact` (actions `remove` for a live fact and `reject` for pending
+  policy), `set_contribution_policy`, `add_facts`, `update_fact` (actions `set_audience`,
+  `approve`, `remove` for a live fact and `reject` for pending
   review) (see
   `revel-manage-profile`).
 - Connections and shared profiles: `set_handle`, `request_connection`, `list_connections`
@@ -43,8 +43,8 @@ inbox task. Stored preferences and host task reports never prove background oper
   The submitted state records a request, never confirmed mailbox delivery.
   Unknown or interrupted sends are never automatically retried. Email delivery stays disabled
   until an approved provider and sender are configured.
-- Questions, as the asker: `submit_question` and `get_question` (status and answer; see
-  `revel-find-a-gift`).
+- Questions, as the asker: `submit_question`, `get_question` (status and answer) and
+  `cancel_question` (see `revel-find-a-gift`).
 - Questions, as your user's assistant: `get_updates`, `update_assignment` (actions `claim`,
   `renew`, `release`, `decline` and `report_user_contact`) and `submit_answer` (see
   `revel-answer-question`).
@@ -110,8 +110,8 @@ without MCP access (bearer token; see "HTTP API" above):
 | Change the owner's contribution policy (widening needs the owner's confirmation) | `set_contribution_policy` | `PUT /api/v1/profile/policy` |
 | Change a fact's audience (widening needs the owner's confirmation) | `update_fact` (action `set_audience`) | `PATCH /api/v1/profile/facts/{fact_id}/audience` |
 | Approve a pending fact (needs the owner's confirmation) | `update_fact` (action `approve`) | `POST /api/v1/profile/facts/{fact_id}/approve` |
-| Reject a pending fact | `remove_fact` (action `reject`) | `POST /api/v1/profile/facts/{fact_id}/reject` |
-| Remove a live fact (not idempotent) | `remove_fact` (action `remove`) | `DELETE /api/v1/profile/facts/{fact_id}` |
+| Reject a pending fact | `update_fact` (action `reject`) | `POST /api/v1/profile/facts/{fact_id}/reject` |
+| Remove a live fact (not idempotent) | `update_fact` (action `remove`) | `DELETE /api/v1/profile/facts/{fact_id}` |
 | Read a person's shared profile by exact handle | `get_profile` (with `handle`) | `GET /api/v1/profiles/{handle}` |
 | Set your user's handle and discoverability | `set_handle` | MCP only |
 | Request a connection by exact handle | `request_connection` | MCP only |
@@ -123,6 +123,7 @@ without MCP access (bearer token; see "HTTP API" above):
 | Ask a question | `submit_question` | `POST /api/questions` |
 | Check a question you asked | `get_question` | `GET /api/questions/{question_id}` |
 | Get the answer to a question you asked | `get_question` | `GET /api/questions/{question_id}/answer` |
+| Cancel a question you asked | `cancel_question` | `POST /api/questions/{question_id}/cancel` |
 | Get assigned work | `get_updates` | `GET /api/updates` |
 | Claim an assignment | `update_assignment` (action `claim`) | `POST /api/assignments/{assignment_id}/claim` |
 | Renew a lease | `update_assignment` (action `renew`) | `POST /api/assignments/{assignment_id}/renew` |

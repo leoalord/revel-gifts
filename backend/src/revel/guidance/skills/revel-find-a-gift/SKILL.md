@@ -1,7 +1,7 @@
 ---
 name: revel-find-a-gift
 description: Help your user choose a gift for a Revel connection by reading their shared profile, asking a surprise-safe question only when needed, and explaining your ideas.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
@@ -9,8 +9,8 @@ status: active
 
 Use this when your user wants a gift idea for someone they are connected to on Revel.
 
-The MCP tools used here are live: `get_profile`, `submit_question` and `get_question`. If one
-is missing from your tool list, stop and tell your user; never say a question was sent when
+The MCP tools used here are live: `get_profile`, `submit_question`, `get_question` and
+`cancel_question`. If one is missing from your tool list, stop and tell your user; never say a question was sent when
 you could not send it.
 
 ## 1. Read the profile first
@@ -44,8 +44,10 @@ Call `submit_question` with the recipient's `handle` and:
   itself must then stay neutral: never put a gift idea, brand or product name in
   `requested_information` (for example, ask "What outdoor gear does Alex already have?").
 - a deadline: either `expires_at` (a timezone-aware time) or `expires_in_hours`, not both. With
-  neither, the question expires after 72 hours. Revel keeps the deadline between 1 hour and 14
+  neither, the question expires after 14 days. Revel keeps the deadline between 1 hour and 60
   days; if the result has `deadline_clamped` true, tell your user the deadline that applies.
+  When a date matters, set the deadline by when your user must act (for example, the last day
+  to ship the gift), not by the occasion itself.
 - optionally `escalation_permitted` and `escalation_context` (`urgency` `low`, `normal` or
   `high`, and `notes`). Revel stores them but does not escalate yet.
 
@@ -104,6 +106,22 @@ Errors (MCP: `<code>: <message>`; HTTP: `{"detail": {"code", "message"}}`):
   calling again is safe, renews nothing and never extends the deadline.
 - If the question is `declined` or `expired`, plan with what you have.
 
+## Cancel a question
+
+If your user no longer needs the answer (say they found out in person), call `cancel_question`
+with the `question_id`. Do this only when your user says so.
+
+```json cancel_question
+{"question_id": "5d2a7b9e-1c3f-4e8a-9b6d-2f4c8e0a1b3d"}
+```
+
+- Assistants can no longer claim or answer the question, and it leaves their inboxes. Cancelling
+  is final; if your user needs it later, ask a new question.
+- Cancelling cannot undo what anyone has already seen, so do not promise your user that nobody
+  saw it.
+- Calling it again is safe. `question_closed` means it was already answered or declined, so use
+  `get_question` to see what happened; `question_expired` means the deadline already passed.
+
 ## 4. Suggest gifts
 
 - Generate ideas with your own knowledge and tools; Revel does not pick gifts.
@@ -123,4 +141,5 @@ The HTTP API is for assistants without MCP access. Access for them is not availa
 
 With a bearer token: `POST /api/questions` (same body as `submit_question`), and for
 `get_question` both `GET /api/questions/{question_id}` (the status) and
-`GET /api/questions/{question_id}/answer` (the `result` and `answer`).
+`GET /api/questions/{question_id}/answer` (the `result` and `answer`). To cancel:
+`POST /api/questions/{question_id}/cancel`.

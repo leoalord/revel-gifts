@@ -113,9 +113,9 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_MAX_QUESTIONS = 10
 RATE_LIMIT_WINDOW = timedelta(hours=1)
-DEFAULT_DEADLINE = timedelta(hours=72)
+DEFAULT_DEADLINE = timedelta(days=14)
 MIN_DEADLINE = timedelta(hours=1)
-MAX_DEADLINE = timedelta(days=14)
+MAX_DEADLINE = timedelta(days=60)
 # Tiers that may ask questions about a profile (Public viewers and strangers may not).
 REQUESTER_TIERS = frozenset({ViewerTier.connections, ViewerTier.trusted_circle})
 # The routing ladder step a new question is placed at (step 1 is answered inline).

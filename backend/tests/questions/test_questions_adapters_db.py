@@ -213,6 +213,7 @@ async def test_mcp_tools_listed(settings: Settings, monkeypatch: pytest.MonkeyPa
         "update_assignment",
         "submit_answer",
         "get_question",
+        "cancel_question",
     }
     for old in (
         "claim_assignment",
@@ -243,6 +244,14 @@ async def test_mcp_tools_listed(settings: Settings, monkeypatch: pytest.MonkeyPa
         False,
     )
     assert tools["get_question"].output_schema is not None
+    cq = tools["cancel_question"].annotations
+    assert cq is not None
+    assert (cq.read_only_hint, cq.destructive_hint, cq.idempotent_hint, cq.open_world_hint) == (
+        False,
+        True,
+        True,
+        False,
+    )
     assert "private_purpose" in tools["submit_question"].input_schema["properties"]
     assert tools["get_updates"].input_schema.get("properties", {}) == {}
     assert tools["submit_question"].output_schema is not None

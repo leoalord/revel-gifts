@@ -17,6 +17,7 @@ from mcp import Client
 from revel.guidance import documents, render_markdown, server_instructions
 from revel.guidance.operations import (
     IMPLEMENTED_MCP_TOOLS,
+    REMOVED_MCP_TOOLS,
     RENAMED_IN_VERSION,
     RENAMED_SKILLS,
     RETIRED_IN_VERSION,
@@ -103,6 +104,17 @@ def served_documents() -> dict[str, str]:
     served[CHANGELOG] = current_changelog(served[CHANGELOG])
     served["server-instructions"] = server_instructions()
     return served
+
+
+def test_removed_tools_are_only_mentioned_in_the_changelog() -> None:
+    for name, text in served_documents().items():
+        if name != CHANGELOG:
+            assert retired_mentions(text, REMOVED_MCP_TOOLS) == [], name
+
+
+def test_removed_tools_are_not_registered() -> None:
+    assert not REMOVED_MCP_TOOLS & IMPLEMENTED_MCP_TOOLS
+    assert not REMOVED_MCP_TOOLS & set(TOOLS)
 
 
 def test_retired_action_collisions_are_known() -> None:

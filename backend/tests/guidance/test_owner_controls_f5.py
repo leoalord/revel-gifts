@@ -29,7 +29,7 @@ from revel.settings import Settings
 from .test_skills_f6_f7 import TOOLS
 
 DISCOVERY = "revel-manage-profile"
-OWNER_TOOLS = ("set_contribution_policy", "update_fact", "remove_fact")
+OWNER_TOOLS = ("set_contribution_policy", "update_fact")
 FENCE = re.compile(r"^```json ([a-z_]+)([^\n]*)\n(.*?)\n```$", re.M | re.S)
 
 # (tool, action or None) -> (strict request model of the matching HTTP route, tool arguments
@@ -38,8 +38,8 @@ SERVICE_MODELS: dict[tuple[str, str | None], tuple[type[BaseModel], frozenset[st
     ("set_contribution_policy", None): (profiles.AgentPolicyUpdate, frozenset()),
     ("update_fact", "approve"): (profiles_api.FactConfirmation, frozenset({"fact_id", "action"})),
     ("update_fact", "set_audience"): (profiles_api.AudienceBody, frozenset({"fact_id", "action"})),
-    ("remove_fact", "reject"): (profiles.OwnerConfirmation, frozenset({"fact_id", "action"})),
-    ("remove_fact", "remove"): (profiles.OwnerConfirmation, frozenset({"fact_id", "action"})),
+    ("update_fact", "reject"): (profiles.OwnerConfirmation, frozenset({"fact_id", "action"})),
+    ("update_fact", "remove"): (profiles.OwnerConfirmation, frozenset({"fact_id", "action"})),
 }
 
 
@@ -83,10 +83,8 @@ def test_examples_cover_flag_and_no_flag_cases() -> None:
     widen = [d for t, d in examples if t == "update_fact" and d["action"] == "set_audience"]
     assert [d.get("owner_confirmed", False) for d in widen] == [False, True]
     # Rejecting a pending fact and removing a live one are distinct actions.
-    assert [data["action"] for tool, data in examples if tool == "remove_fact"] == [
-        "reject",
-        "remove",
-    ]
+    undo = [d["action"] for t, d in examples if t == "update_fact"]
+    assert undo.count("reject") == 1 and undo.count("remove") == 1
     policies = [d for t, d in examples if t == "set_contribution_policy"]
     assert any(d["expected_version"] is None and d.get("owner_confirmed") for d in policies)
     assert any(not d.get("owner_confirmed") for d in policies)  # tightening needs no flag
@@ -127,8 +125,9 @@ def test_two_step_flow_for_every_widening_example() -> None:
     steps = owner_steps()
     ones = [(t, d) for t, s, d in steps if s == "1"]
     twos = [(t, d) for t, s, d in steps if s == "2"]
-    # Rejecting (remove_fact) narrows: always one call.
-    assert {t for t, _ in ones} == set(OWNER_TOOLS) - {"remove_fact"}
+    # Rejecting and removing narrow: always one call.
+    assert {t for t, _ in ones} == set(OWNER_TOOLS)
+    assert not {d["action"] for t, d in ones if t == "update_fact"} & {"reject", "remove"}
     assert len(ones) == len(twos)
     for (tool1, first), (tool2, second) in zip(ones, twos, strict=True):
         assert tool1 == tool2 and not first.get("owner_confirmed")
@@ -251,7 +250,7 @@ def test_quotes_each_change_line_and_shows_the_statement() -> None:
     assert "statement" in profiles.FactOut.model_fields
 
 
-# --- update_fact actions, remove_fact and the owner read (RG-59) ---------------------------------
+# --- update_fact actions and the owner read (RG-59) ----------------------------------------------
 
 FACT_ROW = re.compile(r"^\| `([a-z_]+)` \|([^|]*)\|([^|]*)\|([^|]*)\|$", re.M)
 
@@ -284,10 +283,12 @@ def test_update_fact_table_matches_code() -> None:
     audience = rows["set_audience"][0]
     assert audience.startswith("required: ")
     assert re.findall(r"`([a-z_]+)`", audience) == list(profile_tools.AUDIENCES)
-    assert rows["approve"][0] == "not accepted"
-    for _audience, flag, preview in rows.values():
-        assert flag.startswith("true only after the owner's yes")
-        assert "use the preview value" in preview
+    assert rows["approve"][0] == rows["reject"][0] == rows["remove"][0] == "not accepted"
+    for action in ("set_audience", "approve"):
+        assert rows[action][1].startswith("true only after the owner's yes")
+        assert "use the preview value" in rows[action][2]
+    assert rows["reject"][1:] == ("true only if the owner told you to reject it", "not accepted")
+    assert rows["remove"][1:] == ("not accepted", "not accepted")
 
 
 async def _profile_error(tool: str, args: dict[str, Any]) -> str:
@@ -358,18 +359,8 @@ def test_owner_read_shape_matches_code() -> None:
     assert "policy.policy.version is the expected_version" in profile_tools.GET_PROFILE_DESCRIPTION
 
 
-@pytest.mark.anyio
-async def test_remove_fact_requires_explicit_action() -> None:
-    error = await _profile_error("remove_fact", {})
-    code, message = error.split(": ", 1)
-    assert code == "action_required" and f"`{code}`" in _flat()
-    assert "action='remove'" in message and "action='reject'" in message
-
-
-def test_remove_fact_rules_match_code() -> None:
+def test_reject_and_remove_rules_match_code() -> None:
     flat = _flat()
-    schema = TOOLS["remove_fact"].parameters["properties"]
-    assert {"fact_id", "action", "owner_confirmed"} == set(schema)
     assert "a rejection does not remove a fact another assistant approved" in flat
     assert "No confirmation step is required" in flat
     assert "the fact it would have replaced stays live" in flat

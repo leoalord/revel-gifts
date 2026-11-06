@@ -25,6 +25,7 @@ from revel.services import answers, question_leases, questions
 from revel.services.answers import (
     EvidenceIn,
     GetQuestionResponse,
+    QuestionStatusResponse,
     SubmitAnswerRequest,
     SubmitAnswerResponse,
 )
@@ -54,8 +55,8 @@ SUBMIT_QUESTION_DESCRIPTION = (
     "shows it to the person or their assistants. Revel returns the profile facts you may "
     "already see, then routes a purpose-minimized question to the person's own assistants; "
     "their assistants see who is asking. Give at most one deadline: expires_at (timezone-aware) "
-    "or expires_in_hours (positive and finite). The default is 72h; valid requests are "
-    "clamped to 1h to 14 days. "
+    "or expires_in_hours (positive and finite). The default is 14 days; valid requests "
+    "are clamped to 1h to 60 days. "
     "escalation_permitted/escalation_context are stored for later but not used yet."
 )
 GET_UPDATES_DESCRIPTION = (
@@ -109,10 +110,19 @@ SUBMIT_ANSWER_DESCRIPTION = (
 )
 GET_QUESTION_DESCRIPTION = (
     "Check a question you asked and retrieve its answer when there is one. Returns the status "
-    "(open, answered, expired, declined, ...) with expires_at, created_at, closed_at and "
-    "answer_available, plus result: 'answer' (the answer is included), 'no_shareable_answer' "
-    "(it cannot be shared with you now) or 'not_answered' (no answer yet). Revel re-checks "
-    "your current access and the facts the answer relies on every time."
+    "(open, answered, expired, declined, cancelled, ...) with expires_at, created_at, closed_at "
+    "and answer_available, plus result: 'answer' (the answer is included), "
+    "'no_shareable_answer' (it cannot be shared with you now) or 'not_answered' (no answer "
+    "yet). Revel re-checks your current access and the facts the answer relies on every time."
+)
+
+
+CANCEL_QUESTION_DESCRIPTION = (
+    "Withdraw a question you asked, when your user no longer needs the answer. Assistants can "
+    "no longer claim or answer it and it leaves their inboxes. This is final, and it cannot "
+    "undo what anyone has already seen; if your user needs it again, ask a new question. "
+    "Calling it again is safe. A question that was already answered or declined is refused "
+    "with question_closed, and an expired one with question_expired."
 )
 
 
@@ -347,6 +357,9 @@ def register(server: MCPServer, settings: Any) -> None:
     async def get_question_tool(question_id: UUID) -> GetQuestionResponse:
         return await _call(answers.get_question, question_id)
 
+    async def cancel_question_tool(question_id: UUID) -> QuestionStatusResponse:
+        return await _call(answers.cancel_question, question_id)
+
     # Not read-only (it changes lease state). Not destructive in MCP's sense: decline and
     # release only end the caller's OWN work item on one assignment; they delete no data, the
     # assignment stays recorded, and release lets it be claimed again. Nothing owned by
@@ -364,6 +377,20 @@ def register(server: MCPServer, settings: Any) -> None:
         title="Answer a question",
         description=SUBMIT_ANSWER_DESCRIPTION,
         annotations=_annotations("Answer a question"),
+    )
+    # Destructive in MCP's sense: cancelling is final and ends other assistants' work on it.
+    server.add_tool(
+        cancel_question_tool,
+        name="cancel_question",
+        title="Cancel a question you asked",
+        description=CANCEL_QUESTION_DESCRIPTION,
+        annotations=ToolAnnotations(
+            title="Cancel a question you asked",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
     )
     # Not read-only: may record lazy expiry of an overdue question and an answer_retrieved
     # event. Never changes lease state.

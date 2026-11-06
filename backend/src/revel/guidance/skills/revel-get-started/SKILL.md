@@ -1,7 +1,7 @@
 ---
 name: revel-get-started
 description: Resume Revel setup, build a sourced gifting profile with owner consent, and arrange truthful owner-approved inbox checks in a supported assistant host.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
