@@ -282,6 +282,37 @@ async def test_mcp_lease_answer_and_retrieval_tools(
 
 @pytest.mark.anyio
 @requires_db
+async def test_mcp_cancel_question(
+    factory: sessionmaker[Session],
+    settings: Settings,
+    fga: Any,
+    world_builder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await world_builder()
+    configure_question_deps(settings, QuestionDeps(sessionmaker=factory))
+    asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
+    created = await asker.call_tool(
+        "submit_question", {"handle": "chelsea", "requested_information": REQUESTED}
+    )
+    question_id = created.structured_content["question_id"]  # type: ignore[index]
+
+    responder = mcp_server(settings, monkeypatch, agent_principal(world.owner_d1))
+    with pytest.raises(ToolError, match="not_found"):
+        await responder.call_tool("cancel_question", {"question_id": question_id})
+
+    asker = mcp_server(settings, monkeypatch, agent_principal(world.requester_d))
+    cancelled = await asker.call_tool("cancel_question", {"question_id": question_id})
+    assert cancelled.structured_content["status"] == "cancelled"  # type: ignore[index]
+    repeated = await asker.call_tool("cancel_question", {"question_id": question_id})
+    assert repeated.structured_content == cancelled.structured_content
+    seen = await asker.call_tool("get_question", {"question_id": question_id})
+    assert seen.structured_content["status"] == "cancelled"  # type: ignore[index]
+    assert seen.structured_content["result"] == "not_answered"  # type: ignore[index]
+
+
+@pytest.mark.anyio
+@requires_db
 async def test_mcp_update_assignment_other_actions(
     factory: sessionmaker[Session],
     settings: Settings,

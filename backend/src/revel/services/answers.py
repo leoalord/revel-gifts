@@ -34,10 +34,11 @@ marked expired lazily.
 
 cancel_question(question_id): the requester withdraws their own open question (another caller
 gets ``not_found``). The question becomes ``cancelled`` (final) with a ``cancelled`` event;
-it leaves every inbox and later lease or answer calls are ``question_closed``. Assignments are
-left as they are, as with expiry. Repeating it returns the same result; an answered, declined
-or closed question is ``question_closed`` and an expired one ``question_expired``. A race with
-an answer has one winner: the guarded UPDATE only moves an open question.
+it leaves every inbox and later lease or answer calls are ``question_closed`` (an answer already
+in flight that loses the race is ``stale_lease``). Assignments are left as they are, as with
+expiry. Repeating it returns the same result; an answered, declined or closed question is
+``question_closed`` and an expired one ``question_expired``, also when that happens during the
+call: the guarded UPDATE only moves an open question, and a lost race reports the winner's state.
 
 Lock order (F4 gate): writes only ``assignments``, ``questions``, ``answers``,
 ``answer_evidence`` and ``question_events``; reads (never locks) ``claims`` and
@@ -587,7 +588,15 @@ async def cancel_question(
             .values(status=QuestionStatus.CANCELLED.value, closed_at=now)
         )
         if cancelled.rowcount != 1:
-            raise QuestionClosed()  # An answer won the race; nothing is written.
+            # A concurrent write won the row: report what it left, so a repeat stays safe.
+            raced = session.execute(
+                select(Question.status, Question.closed_at).where(Question.id == question_id)
+            ).one()
+            if raced.status == QuestionStatus.CANCELLED.value:
+                return response(question, raced.closed_at)
+            if raced.status == QuestionStatus.EXPIRED.value:
+                raise QuestionExpired()
+            raise QuestionClosed()
         session.add(
             QuestionEvent(
                 question_id=question_id,

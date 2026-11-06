@@ -9,8 +9,8 @@ status: active
 
 Use this when your user wants a gift idea for someone they are connected to on Revel.
 
-The MCP tools used here are live: `get_profile`, `submit_question` and `get_question`. If one
-is missing from your tool list, stop and tell your user; never say a question was sent when
+The MCP tools used here are live: `get_profile`, `submit_question`, `get_question` and
+`cancel_question`. If one is missing from your tool list, stop and tell your user; never say a question was sent when
 you could not send it.
 
 ## 1. Read the profile first
@@ -141,4 +141,5 @@ The HTTP API is for assistants without MCP access. Access for them is not availa
 
 With a bearer token: `POST /api/questions` (same body as `submit_question`), and for
 `get_question` both `GET /api/questions/{question_id}` (the status) and
-`GET /api/questions/{question_id}/answer` (the `result` and `answer`).
+`GET /api/questions/{question_id}/answer` (the `result` and `answer`). To cancel:
+`POST /api/questions/{question_id}/cancel`.
