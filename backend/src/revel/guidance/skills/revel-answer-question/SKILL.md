@@ -1,7 +1,7 @@
 ---
 name: revel-answer-question
 description: Answer a question Revel routes to you about your user with minimal evidence, and coordinate any contact with your user through the exclusive lease.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
@@ -171,7 +171,7 @@ MCP errors read `<code>: <message>`, which your client may show after
 | `human_contact_required` | You do not hold a human-contact lease. Do not contact your user; claim with `human_contact` true first |
 | `human_contact_taken`, `outreach_cooldown` | Do not contact your user (see above) |
 | `question_expired` | The deadline passed (late answers too). Stop; do not retry |
-| `question_closed` | The question was answered, declined or closed. Stop; do not retry |
+| `question_closed` | The question was answered, declined, cancelled by the asker, or closed. Stop; do not retry, and do not follow up with your user about it |
 | `invalid_evidence`, `invalid_request` | Fix the listed fields (or the action's parameters) and submit once more |
 | `not_permitted`, `not_found` | You may no longer act on this assignment. Stop |
 | `service_unavailable` | Nothing changed; try again later |

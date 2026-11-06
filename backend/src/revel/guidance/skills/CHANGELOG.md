@@ -1,11 +1,22 @@
 ---
 name: CHANGELOG
 description: Version history of the Revel agent guidance.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
 # Revel agent guidance changelog
+
+## 0.9.0 (2026-11-06)
+
+- `cancel_question`: new tool (`POST /api/questions/{question_id}/cancel`) for the asker to
+  withdraw an open question. It is final and cannot undo what anyone has already seen.
+- Question deadlines: the default is now 14 days (was 72 hours) and the maximum 60 days (was 14
+  days). Set a deadline from when your user must act, not the occasion itself.
+- `question_closed` also covers a question the asker cancelled.
+- `remove_fact` is gone: use `update_fact` with action `remove` or `reject`. `action` is always
+  required.
+- `ping` is gone: use `whoami` to check your connection.
 
 ## 0.8.2 (2026-11-05)
 

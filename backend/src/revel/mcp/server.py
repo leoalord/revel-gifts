@@ -29,10 +29,6 @@ def create_mcp_server(settings: Settings, **server_kwargs: Any) -> MCPServer:
     ``MCPServer``."""
     server = MCPServer(name="revel", instructions=guidance.server_instructions(), **server_kwargs)
 
-    @server.tool(description="Connectivity check. Returns 'pong'.")
-    def ping() -> str:
-        return "pong"
-
     identity_tools.register(server, settings)
     profile_tools.register(server, settings)
     question_tools.register(server, settings)

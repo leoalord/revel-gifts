@@ -366,7 +366,7 @@ async def test_server_catalog_is_resolved_lazily() -> None:
         return "x"
 
     catalog = await load()
-    assert {"ping", "late_tool"} <= catalog.tools
+    assert {"whoami", "late_tool"} <= catalog.tools
     assert "revel://guidance/index" in catalog.resources  # F9 guidance resources
     assert catalog.prompts  # F9 guidance prompts
 
@@ -418,12 +418,11 @@ def test_authenticated_call_logs_client_id_only(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     auth = {**MCP_HEADERS, "Authorization": f"Bearer {token}"}
-    call = _rpc("tools/call", {"name": "ping", "arguments": {}})
+    call = _rpc("tools/call", {"name": "whoami", "arguments": {}})
     unknown = _rpc("tools/call", {"name": f"nope-{SECRET_ARG}", "arguments": {}})
     with TestClient(create_app(settings), base_url="http://localhost:8000") as client:
         response = client.post("/mcp", json=call, headers=auth)
         assert response.status_code == 200, response.text
-        assert response.json()["result"]["content"][0]["text"] == "pong"
         assert client.post("/mcp", json=unknown, headers=auth).status_code == 200
         bad_host = client.post("/mcp", json=call, headers={**auth, "Host": "evil.example.com"})
         assert bad_host.status_code == 421
@@ -431,9 +430,9 @@ def test_authenticated_call_logs_client_id_only(
     assert [
         (line["method"], line["target"], line["client_id"], line["status"]) for line in lines
     ] == [
-        ("tools/call", "ping", "client_muse", 200),
+        ("tools/call", "whoami", "client_muse", 200),
         ("tools/call", "unknown", "client_muse", 200),
-        ("tools/call", "ping", "client_muse", 421),
+        ("tools/call", "whoami", "client_muse", 421),
     ]
     audit_text = json.dumps(lines)
     text = _all_log_text(caplog)

@@ -417,7 +417,7 @@ async def test_adapters_take_only_a_handle(readers: Readers) -> None:
     assert set(tool.input_schema["properties"]) == {"handle"}
     assert not tool.input_schema.get("required")
     assert tool.annotations.read_only_hint is True
-    f5_tools = ("add_facts", "update_fact", "set_contribution_policy", "remove_fact")
+    f5_tools = ("add_facts", "update_fact", "set_contribution_policy")
     for name in (*f5_tools, "get_profile"):
         assert "profile_id" not in tools[name].input_schema.get("properties", {}), name
 

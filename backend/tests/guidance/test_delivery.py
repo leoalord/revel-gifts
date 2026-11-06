@@ -116,7 +116,7 @@ async def test_wired_into_mcp_server(settings: Settings) -> None:
     names = {p.name for p in await server.list_prompts()}
     assert names == set(skill_names())
     tools = {t.name for t in await server.list_tools()}
-    assert {"ping", "whoami"} <= tools
+    assert "whoami" in tools and "ping" not in tools
 
 
 # --- Renamed skills (0.7.0): old pages redirect, old MCP names are gone --------------------------

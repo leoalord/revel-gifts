@@ -142,6 +142,31 @@ def test_http_lease_answer_and_retrieval_flow(
         )
 
 
+def test_http_cancel_question(
+    factory: sessionmaker[Session], settings: Settings, fake_world: tuple[World, FakeFga]
+) -> None:
+    world, _ = fake_world
+    configure_question_deps(settings, QuestionDeps(sessionmaker=factory))
+    with TestClient(http_app(settings, agent_principal(world.requester_d, via="api"))) as c:
+        created = c.post(
+            "/api/questions",
+            json={"handle": "chelsea", "requested_information": REQUESTED},
+        )
+        assert created.status_code == 201, created.text
+        question_id = created.json()["question_id"]
+    with TestClient(http_app(settings, agent_principal(world.owner_d1, via="api"))) as c:
+        refused = c.post(f"/api/questions/{question_id}/cancel")
+        assert refused.status_code == 404
+        assert refused.json()["detail"]["code"] == "not_found"
+    with TestClient(http_app(settings, agent_principal(world.requester_d, via="api"))) as c:
+        cancelled = c.post(f"/api/questions/{question_id}/cancel")
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        repeated = c.post(f"/api/questions/{question_id}/cancel")
+        assert repeated.json() == cancelled.json()
+        assert c.get(f"/api/questions/{question_id}").json()["status"] == "cancelled"
+
+
 @requires_db
 def test_http_outreach_cooldown_has_retry_after(
     factory: sessionmaker[Session], settings: Settings, fake_world: tuple[World, FakeFga]

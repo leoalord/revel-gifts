@@ -12,6 +12,7 @@ from revel.guidance.operations import (
     IMPLEMENTED_MCP_TOOLS,
     PROVISIONAL_MARKER,
     PROVISIONAL_OPERATIONS,
+    REMOVED_MCP_TOOLS,
     RETIRED_MCP_TOOLS,
 )
 
@@ -27,7 +28,9 @@ IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 # ``F5_VOCABULARY`` and ``F6_F7_VOCABULARY``): OAuth metadata fields and a JSON literal.
 FIELDS_AND_VALUES = frozenset({"resource", "authorization_servers", "true"})
 # Retired names are known (old CHANGELOG entries name them); test_retired_tools confines them.
-ALL_OPERATIONS = IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS) | RETIRED_MCP_TOOLS
+ALL_OPERATIONS = (
+    IMPLEMENTED_MCP_TOOLS | set(PROVISIONAL_OPERATIONS) | RETIRED_MCP_TOOLS | REMOVED_MCP_TOOLS
+)
 DOC_NAME_TOKENS = frozenset(DOC_NAMES)
 
 
@@ -103,7 +106,7 @@ def test_lint_catches_violations() -> None:
     assert unmarked_provisional("Call `whoami`.") == []
     assert unknown_tokens("Call `delete_everything`.") == ["1: 'delete_everything'"]
     assert unknown_tokens("Call `POST /api/v1/secret`.") == ["1: route 'POST /api/v1/secret'"]
-    assert unknown_tokens("Call `ping` with `evidence_type`.") == []
+    assert unknown_tokens("Call `whoami` with `evidence_type`.") == []
 
 
 def test_provisional_names_are_not_implemented() -> None:

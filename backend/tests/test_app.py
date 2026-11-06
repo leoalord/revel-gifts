@@ -61,20 +61,8 @@ def test_mcp_raw_jsonrpc_initialize_list_call(client: TestClient, token: str) ->
 
     tools = _rpc(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, **auth)
     assert tools.status_code == 200, tools.text
-    assert "ping" in [t["name"] for t in tools.json()["result"]["tools"]]
-
-    call = _rpc(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "ping", "arguments": {}},
-        },
-        **auth,
-    )
-    assert call.status_code == 200, call.text
-    assert call.json()["result"]["content"][0]["text"] == "pong"
+    names = [t["name"] for t in tools.json()["result"]["tools"]]
+    assert "whoami" in names and "ping" not in names
 
 
 def test_mcp_endpoint_exact_path_no_redirect(client: TestClient, token: str) -> None:
@@ -99,9 +87,7 @@ async def test_mcp_sdk_client_over_streamable_http(app: FastAPI, token: str) -> 
             streams = streamable_http_client("http://localhost:8000/mcp", http_client=hc)
             async with Client(streams) as mcp_client:
                 tools = await mcp_client.list_tools()
-                assert "ping" in [t.name for t in tools.tools]
-                result = await mcp_client.call_tool("ping", {})
-                assert result.content[0].text == "pong"
+                assert "whoami" in [t.name for t in tools.tools]
 
 
 def test_mcp_unauthenticated_401(client: TestClient) -> None:

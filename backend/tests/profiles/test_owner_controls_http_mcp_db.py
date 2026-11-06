@@ -1,7 +1,7 @@
 """Agent-first owner controls (F5 #29) end to end through ``create_app``: the bearer agent API
 (``PUT /api/v1/profile/policy``, ``POST /api/v1/profile/facts/{id}/approve|reject``,
 ``PATCH .../audience`` with ``owner_confirmed``) and the MCP tools ``set_contribution_policy``,
-``update_fact`` and ``remove_fact`` (consolidated in RG-59, #31). The browser routes stay
+``update_fact`` (consolidated in RG-59, #31, with removal added in 0.9.0). The browser routes stay
 unchanged."""
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ OLD_F5_TOOLS = (
     "get_contribution_policy",
     "set_fact_audience",
     "review_pending_fact",
+    "remove_fact",
 )
 
 
@@ -96,7 +97,12 @@ def test_tools_are_listed_with_the_confirmation_rule(
         assert tool["annotations"]["readOnlyHint"] is False
     assert "expected_version" in tools["set_contribution_policy"]["inputSchema"]["required"]
     update = tools["update_fact"]["inputSchema"]
-    assert update["properties"]["action"]["enum"] == ["set_audience", "approve"]
+    assert update["properties"]["action"]["enum"] == [
+        "set_audience",
+        "approve",
+        "reject",
+        "remove",
+    ]
     assert update["properties"]["audience"]["enum"] == [
         "public",
         "connections",
@@ -109,15 +115,9 @@ def test_tools_are_listed_with_the_confirmation_rule(
     assert set(update["required"]) == {"fact_id", "action"}
     assert "set_audience" in tools["update_fact"]["description"]
     assert "requires audience" in tools["update_fact"]["description"]
-    assert "remove_fact" in tools["update_fact"]["description"]  # where rejecting went
-    remove = tools["remove_fact"]
-    assert remove["inputSchema"]["required"] == ["fact_id"]
-    assert (
-        "explicitly told you to reject"
-        in (remove["inputSchema"]["properties"]["owner_confirmed"]["description"])
-    )
-    assert "action" in remove["inputSchema"]["properties"]
-    assert "reject a fact pending" in remove["description"]
+    assert "reject a fact pending" in tools["update_fact"]["description"]
+    assert "remove a live fact" in tools["update_fact"]["description"]
+    assert "remove_fact" not in tools
 
 
 def test_f5_tool_set_and_annotations(stack: tuple[TestClient, AuthRuntime, Any]) -> None:
@@ -134,8 +134,7 @@ def test_f5_tool_set_and_annotations(stack: tuple[TestClient, AuthRuntime, Any])
         "get_profile": (True, None, True),
         "add_facts": (False, False, False),
         "set_contribution_policy": (False, False, False),
-        "update_fact": (False, False, False),
-        "remove_fact": (False, True, False),
+        "update_fact": (False, True, False),
     }
     for name, (read_only, destructive, idempotent) in expected.items():
         hints = tools[name]["annotations"]
@@ -168,9 +167,9 @@ def test_update_fact_per_action_validation(stack: tuple[TestClient, AuthRuntime,
     fid = added["claim_id"]
     cases = [
         (
-            {"action": "reject"},
-            "invalid_request: Unknown action 'reject' for update_fact; expected one of: "
-            "set_audience, approve.",
+            {"action": "discard"},
+            "invalid_request: Unknown action 'discard' for update_fact; expected one of: "
+            "set_audience, approve, reject, remove.",
         ),
         ({"action": "set_audience"}, "invalid_request: Action 'set_audience' requires audience."),
         (
@@ -185,6 +184,26 @@ def test_update_fact_per_action_validation(stack: tuple[TestClient, AuthRuntime,
         (
             {"action": "approve", "audience": "only_me", "owner_confirmed": True},
             "invalid_request: Action 'approve' does not accept audience.",
+        ),
+        (
+            {"action": "reject", "audience": "only_me"},
+            "invalid_request: Action 'reject' does not accept audience.",
+        ),
+        (
+            {"action": "remove", "audience": "only_me"},
+            "invalid_request: Action 'remove' does not accept audience.",
+        ),
+        (
+            {"action": "reject", "expected_updated_at": "2026-11-03T18:00:00+00:00"},
+            "invalid_request: Action 'reject' does not accept expected_updated_at.",
+        ),
+        (
+            {"action": "remove", "expected_updated_at": "2026-11-03T18:00:00+00:00"},
+            "invalid_request: Action 'remove' does not accept expected_updated_at.",
+        ),
+        (
+            {"action": "remove", "owner_confirmed": True},
+            "invalid_request: Action 'remove' does not accept owner_confirmed=true.",
         ),
     ]
     for args, message in cases:
@@ -459,7 +478,7 @@ def test_mcp_review_and_audience(
     for name, args in (
         ("update_fact", {**approve, "owner_confirmed": True}),
         ("update_fact", {**narrow, "owner_confirmed": True}),
-        ("remove_fact", {"fact_id": pid, "owner_confirmed": True}),
+        ("update_fact", {"fact_id": pid, "action": "reject", "owner_confirmed": True}),
     ):
         assert tool_error(mcp_call(client, name, args)).endswith("Fact not found")
     for path in (f"/api/v1/profile/facts/{pid}/approve", f"/api/v1/profile/facts/{pid}/reject"):
@@ -571,13 +590,9 @@ def test_confirmed_approval_requires_the_previewed_pending_audience(
         },
     )
     assert approved.status_code == 200 and approved.json()["status"] == "active"
-    for args in ({"action": "reject"}, {"owner_confirmed": True}):
+    for args in ({}, {"owner_confirmed": True}):
         assert "fact_not_pending" in tool_error(
-            mcp_call(client, "remove_fact", {"fact_id": fact_id, **args})
-        )
-    for args in ({}, {"owner_confirmed": False}):
-        assert "action_required" in tool_error(
-            mcp_call(client, "remove_fact", {"fact_id": fact_id, **args})
+            mcp_call(client, "update_fact", {"fact_id": fact_id, "action": "reject", **args})
         )
     assert client.get("/api/v1/profile").json()["facts"][0]["status"] == "active"
 
@@ -605,28 +620,32 @@ def test_remove_fact_rejects_pending_and_removes_live(
     auto_id, explicit_id = (p["claim_id"] for p in pending)
 
     assert "fact_not_removable" in tool_error(
-        mcp_call(client, "remove_fact", {"fact_id": auto_id, "action": "remove"})
+        mcp_call(client, "update_fact", {"fact_id": auto_id, "action": "remove"})
     )
     assert client.delete(f"/api/v1/profile/facts/{auto_id}").status_code == 409
-    rejected = ok(mcp_call(client, "remove_fact", {"fact_id": auto_id, "action": "reject"}))
+    rejected = ok(mcp_call(client, "update_fact", {"fact_id": auto_id, "action": "reject"}))
     assert rejected["status"] == "removed"
     assert _events(factory, auto_id)[-1] == ("rejected", "automatic")
     assert "removed" not in [a for a, _ in _events(factory, auto_id)]
 
     confirmed = ok(
-        mcp_call(client, "remove_fact", {"fact_id": explicit_id, "owner_confirmed": True})
+        mcp_call(
+            client,
+            "update_fact",
+            {"fact_id": explicit_id, "action": "reject", "owner_confirmed": True},
+        )
     )
     assert confirmed["status"] == "removed"
     assert _events(factory, explicit_id)[-1] == ("rejected", "explicit")
 
     # A stale reject attempt against a live fact leaves no event behind.
     before = _events(factory, live_id)
-    for args in ({"action": "reject"}, {"owner_confirmed": True}):
+    for args in ({}, {"owner_confirmed": True}):
         assert "fact_not_pending" in tool_error(
-            mcp_call(client, "remove_fact", {"fact_id": live_id, **args})
+            mcp_call(client, "update_fact", {"fact_id": live_id, "action": "reject", **args})
         )
     assert _events(factory, live_id) == before
-    removed = ok(mcp_call(client, "remove_fact", {"fact_id": live_id, "action": "remove"}))
+    removed = ok(mcp_call(client, "update_fact", {"fact_id": live_id, "action": "remove"}))
     assert removed["status"] == "removed"
     after = _events(factory, live_id)
     assert after[: len(before)] == before and after[len(before) :] == [("removed", "automatic")]
@@ -635,7 +654,7 @@ def test_remove_fact_rejects_pending_and_removes_live(
     for fid, action in ((auto_id, "reject"), (live_id, "remove")):
         count = len(_events(factory, fid))
         assert "changed" in tool_error(
-            mcp_call(client, "remove_fact", {"fact_id": fid, "action": action})
+            mcp_call(client, "update_fact", {"fact_id": fid, "action": action})
         )
         assert len(_events(factory, fid)) == count
 
@@ -654,7 +673,7 @@ def test_remove_fact_rejects_pending_and_removes_live(
         )
     )["results"]
     assert repl["outcome"] == "pending_review"
-    ok(mcp_call(client, "remove_fact", {"fact_id": repl["claim_id"], "action": "reject"}))
+    ok(mcp_call(client, "update_fact", {"fact_id": repl["claim_id"], "action": "reject"}))
     assert _events(factory, repl["claim_id"])[-1][0] == "rejected"
     live_ids = {f["id"] for f in client.get("/api/v1/profile").json()["facts"]}
     assert target in live_ids and repl["claim_id"] not in live_ids

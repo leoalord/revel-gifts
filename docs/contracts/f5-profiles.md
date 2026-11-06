@@ -167,8 +167,8 @@ the fact), `PolicyVersionConflict` (409), `PolicyInvalid` / `InvalidRequest` (40
 | Contribution summary | in `get_profile()` | `GET /api/v1/profile/summary?since=` | `GET /api/ui/profile/summary?since=` |
 | Correct (new statement/details) | `add_facts` with `supersedes_id` | same | `PATCH /api/ui/profile/facts/{id}` |
 | Change audience | `update_fact(action="set_audience", audience)` (widening needs `owner_confirmed`) | `PATCH /api/v1/profile/facts/{id}/audience` (same) | `PATCH /api/ui/profile/facts/{id}` |
-| Remove (undo) | `remove_fact` (action=`"remove"`) | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
-| Approve/reject pending | `update_fact(action="approve")` (needs `owner_confirmed`); reject: `remove_fact(action="reject")` | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
+| Remove (undo) | `update_fact(action="remove")` | `DELETE /api/v1/profile/facts/{id}` | `DELETE /api/ui/profile/facts/{id}` |
+| Approve/reject pending | `update_fact(action="approve")` (needs `owner_confirmed`); reject: `update_fact(action="reject")` | `POST /api/v1/profile/facts/{id}/approve` (needs `owner_confirmed`), `/reject` | `POST /api/ui/profile/facts/{id}/approve`, `/reject` |
 
 ### MCP tools (RG-59, #31)
 
@@ -180,8 +180,7 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
 | `get_profile` | `handle?: str` | no handle: owner view; handle: shared view | `readOnlyHint`, `idempotentHint` |
 | `add_facts` | `facts: [FactInput]` (1-20) | `{"results": [...]}` | write, not destructive, not idempotent |
 | `set_contribution_policy` | `expected_version` (required, nullable), policy fields, `owner_confirmed=false` | the policy response | write, not destructive, not idempotent |
-| `update_fact` | `fact_id`, `action: "set_audience" \| "approve"`, `audience?`, `owner_confirmed=false`, `expected_updated_at?` | the fact | write, not destructive, not idempotent |
-| `remove_fact` | `fact_id`, `action?: "remove" \| "reject"`, `owner_confirmed=false` | the fact (`status: removed`) | `destructiveHint`, not idempotent |
+| `update_fact` | `fact_id`, `action: "set_audience" \| "approve" \| "reject" \| "remove"`, `audience?`, `owner_confirmed=false`, `expected_updated_at?` | the fact (`status: removed` after reject or remove) | `destructiveHint`, not idempotent |
 
 - `get_profile()` (no handle) is the owner read: `get_my_profile` (F4 `owner_claims`) plus
   `get_policy`, as `{"profile_id", "policy_version", "facts", "summary", "policy"}`, where
@@ -195,11 +194,10 @@ annotations stay accurate. Every tool also has `openWorldHint: false`.
   `trusted_circle`, `only_me`) and is `set_fact_audience`; `approve` takes no `audience` and is
   `approve_fact`. The confirmed retry must include the fact revision `expected_updated_at`
   supplied by the preview. A changed fact requires new confirmation.
-- `remove_fact(action="reject")` rejects only a pending fact (audit event `rejected`).
+- `update_fact(action="reject")` rejects only a pending fact (audit event `rejected`).
   `owner_confirmed=true` records explicit acceptance on rejection and does not permit live
-  removal. `remove_fact(action="remove")` removes only a live fact. Legacy calls that omit
-  `action` with `owner_confirmed=true` select `reject`; other calls missing `action` fail with
-  `action_required`. A mismatch is a conflict checked under the fact lock, without falling
+  removal. `update_fact(action="remove")` removes only a live fact and refuses
+  `owner_confirmed=true`. Neither takes `audience` or `expected_updated_at`. A mismatch is a conflict checked under the fact lock, without falling
   back to another operation.
 - Per-action validation happens before any service call. Errors are `ToolError`s with the
   `invalid_request` code shared with the F6/F7 tools:
@@ -323,7 +321,7 @@ takes the same fields as arguments (`expected_version` required, nullable) and r
 same shape. `POST /api/v1/profile/facts/{id}/approve` and `/reject` take an optional body
 `{"owner_confirmed": false}` → the fact; approval also accepts `expected_updated_at` for a
 confirmed retry. MCP equivalents are `update_fact(action="approve")` and
-`remove_fact(action="reject")`
+`update_fact(action="reject")`
 → the fact. 409 `{"detail": "policy_version_conflict", "policy": {...}, "categories": [...], "provisional_caveat": "..."}` (the current `GET .../policy` shape plus `detail`).
 
 `POST .../facts` body `{"facts": [FactInput, ...]}` →
@@ -367,7 +365,7 @@ owner's Public opt-in").
 `DELETE /api/v1/profile/facts/{id}` removes a live fact. The browser owner can also remove a
 pending fact. Successful removal returns **200** with the removed fact (`"status": "removed"`). Removing it
 again (or a superseded fact) is **409** `{"detail": "fact_not_removable", "fact": {...}}`. The MCP
-`remove_fact` tool is therefore annotated `idempotentHint: false` (a repeat is a tool error).
+`update_fact` tool is therefore annotated `idempotentHint: false` (a repeat is a tool error).
 
 Locking: `add_facts` locks every `supersedes_id` target up front in id order (after the
 profile's `FOR SHARE`), so batches naming the same facts in opposite orders queue instead of

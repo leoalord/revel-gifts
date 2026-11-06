@@ -37,6 +37,7 @@ from revel.services.answers import (
     InvalidEvidence,
     QuestionNotFound,
     SubmitAnswerRequest,
+    cancel_question,
     get_answer,
     get_question,
     get_question_status,
@@ -1302,6 +1303,88 @@ async def test_only_the_requester_may_read_status_or_answer(
                 agent_principal(delegation), question_id, deps=deps(factory, clock)
             )
     assert event_types(factory, question_id).count("answer_retrieved") == 0
+
+
+# --- Cancelling a question ---------------------------------------------------------------------
+
+
+async def test_requester_cancels_and_respondents_can_no_longer_act(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    question_id, assignments = await ask(factory, world)
+    holder = agent_principal(world.owner_d1)
+    lease = await claim_assignment(
+        holder, assignments[world.owner_d1.id], ClaimRequest(), deps=deps(factory)
+    )
+
+    requester = agent_principal(world.requester_d)
+    result = await cancel_question(requester, question_id, deps=deps(factory))
+    assert result.status == "cancelled" and result.closed_at == T0
+    assert not result.answer_available
+    assert question(factory, question_id).status == "cancelled"
+
+    # Repeating changes nothing and records no second event.
+    again = await cancel_question(requester, question_id, deps=deps(factory))
+    assert again == result
+    assert event_types(factory, question_id).count("cancelled") == 1
+
+    with factory() as s:
+        event = s.execute(
+            select(QuestionEvent).where(
+                QuestionEvent.question_id == question_id,
+                QuestionEvent.event_type == "cancelled",
+            )
+        ).scalar_one()
+    assert event.actor_delegation_id == world.requester_d.id
+
+    # The inbox drops it, and neither the held lease nor another assistant can continue.
+    assert (await get_updates(holder, deps=deps(factory))).items == []
+    with pytest.raises(QuestionClosed):
+        await submit_answer(
+            holder,
+            assignments[world.owner_d1.id],
+            answer_request(lease.lease_version, inline()),
+            deps=deps(factory),
+        )
+    with pytest.raises(QuestionClosed):
+        await claim_assignment(
+            agent_principal(world.owner_d2),
+            assignments[world.owner_d2.id],
+            ClaimRequest(),
+            deps=deps(factory),
+        )
+    assert count(factory, Answer, Answer.question_id == question_id) == 0
+
+
+async def test_only_the_requester_may_cancel(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    question_id, _ = await ask(factory, world)
+    for delegation in (world.owner_d1, world.stranger_d, world.public_d):
+        with pytest.raises(QuestionNotFound):
+            await cancel_question(agent_principal(delegation), question_id, deps=deps(factory))
+    assert question(factory, question_id).status == "open"
+    assert "cancelled" not in event_types(factory, question_id)
+
+
+async def test_answered_or_expired_questions_cannot_be_cancelled(
+    factory: sessionmaker[Session], fga: Any, world_builder: Any
+) -> None:
+    world = await world_builder()
+    requester = agent_principal(world.requester_d)
+    clock = Clock(T0)
+    answered, _ = await answered_question(factory, world, inline(), clock=clock)
+    with pytest.raises(QuestionClosed):
+        await cancel_question(requester, answered, deps=deps(factory, clock))
+    assert question(factory, answered).status == "answered"
+
+    overdue, _ = await ask(factory, world, hours=1)
+    late = Clock(T0 + timedelta(hours=2))
+    with pytest.raises(QuestionExpired):
+        await cancel_question(requester, overdue, deps=deps(factory, late))
+    assert question(factory, overdue).status == "expired"
 
 
 # --- OpenFGA outages ----------------------------------------------------------------------------

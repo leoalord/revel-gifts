@@ -1,7 +1,7 @@
 ---
 name: revel-manage-profile
 description: Build, maintain and edit your user's own Revel gifting profile, from context you are already authorized to use, with consent, minimal evidence and the tightest sensible audience; and manage its policy, approvals and audiences with the owner's confirmation.
-version: 0.8.2
+version: 0.9.0
 status: active
 ---
 
@@ -12,7 +12,7 @@ profile, or to change who can see it (its contribution policy, pending approvals
 audiences).
 
 The MCP tools used here are live: `whoami`, `get_profile`, `add_facts`, `update_fact`,
-`remove_fact` and `set_contribution_policy`. If one is missing from your tool list, stop and
+and `set_contribution_policy`. If one is missing from your tool list, stop and
 tell the user; never say something was saved when you could not save it.
 
 `update_fact` takes a `fact_id` and an `action`, and each action takes only its own
@@ -22,13 +22,15 @@ parameters:
 | --- | --- | --- | --- |
 | `set_audience` | required: `public`, `connections`, `trusted_circle` or `only_me` | true only after the owner's yes to a widening | required for confirmed widening; use the preview value |
 | `approve` | not accepted | true only after the owner's yes | required for confirmed approval; use the preview value |
+| `reject` | not accepted | true only if the owner told you to reject it | not accepted |
+| `remove` | not accepted | not accepted | not accepted |
 
 Revel refuses anything else with `invalid_request`, for example
 "invalid_request: Action 'set_audience' requires audience.",
 "invalid_request: Action 'set_audience' requires audience to be one of: public, connections,
 trusted_circle, only_me.", "invalid_request: Action 'approve' does not accept audience." or
 "invalid_request: Unknown action '<action>' for update_fact; expected one of: set_audience,
-approve." (your client may show it after "Error executing tool <name>: "). Fix the call and
+approve, reject, remove." (your client may show it after "Error executing tool <name>: "). Fix the call and
 try once more.
 
 ## 1. Confirm identity and consent
@@ -252,9 +254,8 @@ actually returned:
   fact. A new fact lands at the category default, which undoes the owner's choice. Correct it
   with `supersedes_id` instead, or leave it as the owner set it.
 - If the user asks you to undo something you added, check its current status. Call
-  `remove_fact` with its `fact_id` and action `remove` for a live fact or action `reject` for
-  a pending fact (see section 9). If Revel returns `action_required`, read the current
-  fact before choosing an action. The actions are distinct: a rejection does not remove a
+  `update_fact` with its `fact_id` and action `remove` for a live fact or action `reject` for
+  a pending fact (see section 9). The actions are distinct: a rejection does not remove a
   fact another assistant approved. A repeat or status mismatch can return `fact_not_removable`
   or `fact_not_pending`. HTTP uses `409` for the corresponding
   `DELETE /api/v1/profile/facts/{fact_id}` or `POST /api/v1/profile/facts/{fact_id}/reject`
@@ -298,7 +299,7 @@ available. Anything that widens access needs their explicit confirmation:
 | Loosening a category's audience | Requiring review (`require_review_all`, a category's `require_review`) |
 | Turning off `require_review_all` or a category's `require_review` | Withdrawing Public |
 | Turning `share_provisional` or `enrichment_enabled` back on | Turning `enrichment_enabled` off |
-| Approving a pending fact (including sensitive and `involves_others` facts) | Rejecting a pending fact (`remove_fact`, action `reject`) |
+| Approving a pending fact (including sensitive and `involves_others` facts) | Rejecting a pending fact (`update_fact`, action `reject`) |
 | Widening a fact's audience | Narrowing a fact's audience |
 
 Getting the owner's yes, for every change that may widen access (two calls):
@@ -376,17 +377,17 @@ in these examples are synthetic; use the exact value from each actual preview.
 {"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "approve", "owner_confirmed": true, "expected_updated_at": "2026-11-03T18:00:00+00:00"}
 ```
 
-Reject a pending fact with `remove_fact` and action `reject`. No confirmation step is
+Reject a pending fact with `update_fact` and action `reject`. No confirmation step is
 required. A rejected fact is not shared, and if it was a correction, the fact it would
 have replaced stays live.
 
-```json remove_fact
+```json update_fact
 {"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "reject"}
 ```
 
-Remove a live fact with `remove_fact` and action `remove`.
+Remove a live fact with `update_fact` and action `remove`.
 
-```json remove_fact
+```json update_fact
 {"fact_id": "5d2c8e1f-7a3b-4c6d-9e0f-1a2b3c4d5e6f", "action": "remove"}
 ```
 

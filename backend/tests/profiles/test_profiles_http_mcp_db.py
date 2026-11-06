@@ -93,14 +93,13 @@ def test_app_still_serves_health_and_mcp(
     )
     assert listed.status_code == 200
     tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
-    assert {"whoami", "ping"} <= set(tools)
-    f5 = ("get_profile", "add_facts", "update_fact", "remove_fact", "set_contribution_policy")
+    assert "whoami" in tools
+    f5 = ("get_profile", "add_facts", "update_fact", "set_contribution_policy")
     hints = {name: tools[name]["annotations"]["readOnlyHint"] for name in f5}
     assert hints["get_profile"] is True
-    assert hints["add_facts"] is False and hints["remove_fact"] is False
-    assert hints["update_fact"] is False
-    assert tools["remove_fact"]["annotations"]["destructiveHint"] is True
-    assert tools["remove_fact"]["annotations"]["idempotentHint"] is False
+    assert hints["add_facts"] is False and hints["update_fact"] is False
+    assert tools["update_fact"]["annotations"]["destructiveHint"] is True
+    assert tools["update_fact"]["annotations"]["idempotentHint"] is False
     assert "volunteers" in tools["get_profile"]["description"]
 
 
@@ -220,13 +219,13 @@ def test_bearer_mcp_and_ui_share_one_profile(
 
         # Removal: MCP and DELETE; unknown ids are 404 / generic tool errors.
         new_id = corrected.json()["id"]
-        removed = mcp_call(client, "remove_fact", {"fact_id": new_id, "action": "remove"})
+        removed = mcp_call(client, "update_fact", {"fact_id": new_id, "action": "remove"})
         assert removed["structuredContent"]["status"] == "removed"
         assert client.delete(f"/api/v1/profile/facts/{new_id}").status_code == 409
         missing = "00000000-0000-0000-0000-000000000000"
         assert client.delete(f"/api/v1/profile/facts/{missing}").status_code == 404
         assert ui.delete(f"/api/ui/profile/facts/{missing}", headers=ORIGIN).status_code == 404
-        tool_missing = mcp_call(client, "remove_fact", {"fact_id": missing, "action": "remove"})
+        tool_missing = mcp_call(client, "update_fact", {"fact_id": missing, "action": "remove"})
         assert tool_missing["isError"] is True
         assert tool_missing["content"][0]["text"].endswith("Fact not found")
 
