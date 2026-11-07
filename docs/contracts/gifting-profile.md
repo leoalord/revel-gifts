@@ -34,11 +34,13 @@ trigger and value, in either order. It is a safety net, not a proof.
 
 | Trigger | Refused value |
 | --- | --- |
-| `born`, `birth year`, `date of birth`, `dob` | A 19xx or 20xx year |
+| `born`, `birth year`, `birthyear`, `date of birth`, `year of birth`, `dob` | A 19xx or 20xx year |
 | `birthday`, `birthdate`, `birth date` | A full date containing a 19xx or 20xx year, or a 19xx year alone |
 
 A full date is `YYYY-M-D`, `D-M-YYYY` (separator `-`, `/` or `.`), `D Month YYYY` or
-`Month D, YYYY`, with full or abbreviated month names and optional ordinals. So a 20xx year alone
+`Month D YYYY` (comma optional), with full or abbreviated month names and optional ordinals. The
+numbers in `D-M-YYYY` are **not** range-checked or order-checked, so `12/25/2001` is refused. So a
+20xx year alone
 beside `birthday` is allowed.
 
 | Must refuse | Must allow |
@@ -48,6 +50,7 @@ beside `birthday` is allowed.
 | Birthday: June 3, 1985 | Adobe 2024 subscription |
 | Her birthday is 3 June 1985 | Bornholm ceramics, 2023 trip |
 | Birthdate 1985-06-03 | Stubborn about 2024 vintages |
+| Birthday June 3 2001 | |
 
 ## 2. Vocabulary
 
@@ -837,7 +840,8 @@ against gift outcomes is later research, not this phase.
 
 An assistant that sees only tools can finish with no prompts, resources, skills or guidance tool.
 GP-04 writes these rules into the `update_gifting_profile` description in the tool's own module;
-the release PR adds them to the `get_profile` and `add_facts` descriptions. Readiness supplies the
+the release PR adds them to the `get_profile` and `add_facts` descriptions, shown only with the
+gate on (section 19.1). Readiness supplies the
 next step:
 
 `get_profile` → read readiness and current facts → use existing authorized knowledge → `add_facts`
@@ -857,7 +861,7 @@ GP-02.
 | Downgrade | Refuse with an exception if either table has rows (precedent: `0009`); else drop the column and tables. Never silently drops narrative |
 | Demo reset | Add `gifting_profile_citations`, `gifting_profile_revisions` before `claim_events` in `CLEAR_TABLES` and to the verification counts; reset `narrative_reviewed_events = 0` for demo profiles, because deleting `claim_events` lowers `C(p)` |
 | Cloud Run rollback | Roll the image back; **no schema downgrade**. The old image names its columns, ignores the new tables and column, and reads no narrative. Facts are untouched. An opt-out made on the old image appends no section 8.5 row; section 6's `public_opt_in` check and section 6.1 cover that on return. Forward fix is the default |
-| Gate rollback | Setting `GIFTING_PROFILE_RELEASE=false` hides the narrative and write surface without losing data. Deployment changes follow the release gate |
+| Gate rollback | Setting `GIFTING_PROFILE_RELEASE=false` hides the narrative and write surface without losing data, and tool descriptions return to the baseline text. **One surface remains:** served guidance (MCP prompts and resources, website Markdown) still names `update_gifting_profile`, because it is one versioned static source with no gated variant. The server instructions, which every client receives, say "Use only the tools in your tool list; operations not listed are not available yet", and a call to the unregistered tool or route fails with no effect. To remove that text too, roll the image back. Deployment changes follow the release gate |
 
 Permissions, claims and existing data are not modified. `alembic check` stays clean.
 
@@ -1083,6 +1087,7 @@ One field: `Settings.gifting_profile_release: bool = False` (GP-02, env
 | `gifting_profile`, `readiness`, `maintenance` in `get_profile` and `add_facts` | `null` | Populated |
 | `get_updates` maintenance item | Never returned | Returned |
 | `get_profile.view_as`, `include_facts` | Work for facts (no narrative exists to show) | Include narrative |
+| `get_profile`, `add_facts` descriptions | Baseline text, no mention of the tool. `profile_tools.register` picks the text from `settings.gifting_profile_release` | Baseline text plus the section 12.5 rules |
 
 The service layer does not read the gate. Adapters and `create_app` do, using the `settings` they
 already receive. Nothing else in the codebase may branch on it.
@@ -1106,14 +1111,19 @@ The release PR merges last among 1-7 and is small. It changes only:
 1. `settings.py`: default `True`.
 2. `guidance/operations.py`: add `update_gifting_profile` to `IMPLEMENTED_MCP_TOOLS` and the bearer
    `POST` route to `IMPLEMENTED_HTTP`, making the lint test's set 20 names.
-3. `get_profile` and `add_facts` descriptions: the short authoring and readiness rules.
+3. `mcp/profile_tools.py`: `register` chooses the `get_profile` and `add_facts` descriptions from
+   `settings.gifting_profile_release`, adding the short authoring and readiness rules when on. The
+   existing constants stay as the gate-off text.
 4. The guidance: `revel-get-started`, `revel-manage-profile`, `revel-find-a-gift`,
-   `revel-connect-and-read`, `index.md`, `server-instructions.txt` if needed, version bump and
-   `CHANGELOG.md`.
+   `revel-connect-and-read`, `index.md`, version bump and `CHANGELOG.md`.
+   `server-instructions.txt` is unchanged: it names no tools.
 5. The guidance tests, removing `UNRELEASED_FIELDS` (19.4).
 
-Nothing reachable with the gate off may mention `update_gifting_profile`. Its own module, its
-description (GP-04) and gated text such as the maintenance prompt are not reachable until step 7. GP-06's Done depends on step 6 merging, which Notion's Depends on does not yet state:
+With the gate off, no tool description, tool result or `/openapi.json` entry may mention
+`update_gifting_profile`, before or after step 7. Its own module, its description (GP-04) and gated
+text such as the maintenance prompt are unreachable then. Before step 7 served guidance does not
+mention it either. After step 7 served guidance is the one surface that does, including during a
+gate rollback (section 13). GP-06's Done depends on step 6 merging, which Notion's Depends on does not yet state:
 the lead tracks this.
 
 ### 19.3 Acceptance split
@@ -1160,7 +1170,7 @@ listed task touches a path in its wave. "After GP-x" means serialized.
 | GP-04 | `services/gifting_writes.py` (new: `set`, `clear`, `set_audience`, decision table, checks); `services/categories.py` (`validate_section_text`); `services/gifting_maintenance.py` (new: `C(p)`, shape, advance); `mcp/gifting_profile_tools.py` (new); `api/gifting_profile.py` (new); `mcp/server.py`; `app.py`; `services/profiles.py` (`AddFactsResult`), `mcp/profile_tools.py` and `api/profiles.py` (`maintenance` wiring) after GP-03; `backend/tests/profiles/test_owner_controls_http_mcp_db.py` |
 | GP-05 | `services/gifting_writes.py` (`approve`, `reject`, `restore`) after GP-04; `services/profiles.py` (`set_policy` hook, section 8.5); `backend/tests/profiles/test_owner_controls_http_mcp_db.py` after GP-04 |
 | GP-06 first PR | `services/questions.py` (`UpdateItem`, `get_updates`); `mcp/question_tools.py`, `api/questions.py` (gate parameter); `services/gifting_maintenance.py` after GP-04; `backend/tests/questions/test_questions_service_db.py` |
-| GP-06 release PR | Section 19.2 list, including `backend/src/revel/guidance/**`, `settings.py` default, `mcp/profile_tools.py` descriptions, `backend/tests/guidance/**` |
+| GP-06 release PR | Section 19.2 list, including `backend/src/revel/guidance/**`, `settings.py` default, `mcp/profile_tools.py` (`register` description choice), `backend/tests/guidance/**` |
 | GP-07 | `frontend/src/GiftingProfileCard.tsx`, `.test.tsx` (new); `frontend/src/giftingProfileFixtures.ts` (new); `frontend/src/profileApi.ts`; `frontend/src/App.tsx`; `frontend/src/index.css`; `frontend/README.md`. MCP App, after the release PR: `backend/src/revel/mcp/app_resource.py` (new), `mcp/server.py` and `mcp/profile_tools.py` (`_meta` on `get_profile`) |
 | GP-08 | Disposable scripts, Notion evidence, `docs/deployment.md` rollback note. No permanent suite |
 
@@ -1202,13 +1212,13 @@ stay as task evidence; disposable scripts are deleted afterwards.
 | --- | --- |
 | `tests/authz/test_visibility_v2_db.py` | Parameterized matrix: owner, Public, Connections, Trusted Circle, revoked, unauthorized × section audience, with a private-synthesis negative. Zero-citation Public row with opt-in false and public tier forced. Source-withdrawal matrix: removed, narrowed, superseded, provisional off, opt-in withdrawn, connection revoked, each asserting text, evidence and readiness. Source return: narrow then re-widen, provisional off then on, both stay withheld; a laundering narrowing row does not reset it; a new revision and a regained tier show it. `pending D3` case. `view_as` equals a real viewer's response. External equivalence for two profiles with identical shared content and different private facts, conflicts and drafts |
 | `tests/authz/test_claim_read_guard.py` | `_SERVICE_USE` extended. Only `services/gifting_read.py`, `gifting_writes.py` and `gifting_maintenance.py` import `gifting_store`, so `revel/api` and `revel/mcp` cannot read revisions directly; no new claim-write module |
-| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold (`pending D2`), Public edit (`pending D1`), widening hold, narrowing immediate and unblocked by a stale citation, clear-then-set cannot widen, `pending D5`: withdrawn text with a swapped citation held, same text citing the replacement held, clear-then-set held, a real correction not held, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal including a stale citation, a pending revision on a Public section, and public-clear-opt-out-opt-in-set held, enrichment off (`pending D4` for `approve`), atomic batch, mixed-error precedence, no-change review, a fact committed between `C(p)` and the facts read stays outstanding, an `add_facts` result cannot resolve another assistant's fact, `validate_section_text`, all ten strings in section 1, API/MCP parity smoke |
+| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold (`pending D2`), Public edit (`pending D1`), widening hold, narrowing immediate and unblocked by a stale citation, clear-then-set cannot widen, `pending D5`: withdrawn text with a swapped citation held, same text citing the replacement held, clear-then-set held, a real correction not held, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal including a stale citation, a pending revision on a Public section, and public-clear-opt-out-opt-in-set held, enrichment off (`pending D4` for `approve`), atomic batch, mixed-error precedence, no-change review, a fact committed between `C(p)` and the facts read stays outstanding, an `add_facts` result cannot resolve another assistant's fact, `validate_section_text`, every string in section 1, API/MCP parity smoke |
 | `tests/profiles/test_shared_profiles_db.py` | Captured legacy no-argument and handle responses, compact opt-in, absent-narrative fallback, gate-off null keys. With the gate explicitly off, the string `update_gifting_profile` appears nowhere in `tools/list` or `/openapi.json`, schema text and descriptions included |
 | `tests/db/test_db_profile_migrations.py` | Schema, constraints, repository history and optimistic revision conflict, zero sections, facts preserved, downgrade refused with rows and clean without, one head |
 | `tests/profiles/test_readiness_rules.py` (new, one parameterized test) | Section 12.4 table and variants, fresh `taste` with stale `direction`, determinism, no grade input, `not_assessed` on failure |
 | `tests/questions/test_questions_service_db.py` | One item per window, duplicate and missed polls, other assistants' polls consume nothing, empty-inbox path, not designated gets none |
 | `tests/demo/test_demo_reset_db.py` | New tables cleared, watermark reset |
-| `tests/guidance/test_content_lint.py` | Release PR: curated guidance lint for tool, no-self-grading and stop rule text |
+| `tests/guidance/test_content_lint.py` | Release PR: curated guidance lint for tool, no-self-grading and stop rule text; gate-on `get_profile` and `add_facts` descriptions carry the rules |
 | `frontend/src/GiftingProfileCard.test.tsx` (new, one) | Plain-text rendering, owner versus connection, withheld, readiness label, no percentage |
 
 ### Remove
@@ -1227,3 +1237,4 @@ release PR.
 - GP-01 review round 2: D5 added (section 7 row 4), D3 reconnection corrected, I9 tier exception
   labelled, one owner for the tool description.
 - GP-01 review round 3: birth-year rule restated and run over the section 1 strings.
+- GP-01 review round 4: gated description text, gate rollback states what remains.
