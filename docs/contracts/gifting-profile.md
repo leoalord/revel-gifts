@@ -1,6 +1,7 @@
 # Gifting Profile: phase contract v1 (GP-01, RG-70)
 
-Status: design contract for review. Nothing here is implemented. Base: `2ea61d4`.
+Status: design contract for review. Nothing here is implemented. Base: `2ea61d4`. Four owner
+decisions are open (section 18). Rows that depend on one are marked `pending D<n>`.
 
 This file is the implementation contract for GP-02 to GP-08. Product policy lives in Notion: the
 [phase plan](https://app.notion.com/p/4112bade7f3181148150f30a460c3e08),
@@ -23,9 +24,11 @@ change, new read tool, or change to `submit_question` profile context or answer 
 | `gift_directions` | Gift directions |
 | `gift_cautions` | Gift cautions |
 
-Text: plain text, 1-1200 characters after trimming, no control characters except newline, passes
-F5's `validate_statement` street-address check. No Markdown or HTML semantics; clients render it
-as text. Every optional section may stay empty.
+Text: plain text, 1-1200 characters after trimming, no control characters except newline. New
+`categories.validate_section_text(text)` reuses F5's street-address pattern and refuses a
+19xx/20xx year within 20 characters of `born`, `birth`, `birthday` or `dob`. `validate_statement`
+cannot be used directly: it needs a `CategorySpec`. No Markdown or HTML semantics; clients render
+it as text. Every optional section may stay empty.
 
 ## 2. Vocabulary
 
@@ -67,7 +70,8 @@ row. Only `demo/reset.py` hard-deletes.
 | `via` | text | CHECK in `ContributedVia` |
 | `acceptance` | text null | CHECK in `AcceptanceMode`: `explicit` for owner-confirmed or browser rows, `automatic` for other agent rows, null while pending |
 | `policy_version` | int | Composite FK to `contribution_policies (profile_id, version)` RESTRICT. Not null: no write precedes the first policy |
-| `occurred_at` | timestamptz | `now()` |
+| `pending_reason` | text null | CHECK in `PendingReason` (section 7); not null exactly when `state = pending`. Added because `withdrawn_source` cannot be derived later |
+| `occurred_at` | timestamptz | Set by the service to `clock_timestamp()` after the profile lock is held, for ordering against `claim_events` (section 6.1) |
 
 Also `UNIQUE (profile_id, id)` as the composite target. `approve`, `restore` and `set_audience`
 copy text and citations into a new row, so a published row is self-contained and approval leaves
@@ -96,8 +100,10 @@ Maximum 20 citations per revision.
 
 ### Enums
 
-Add to `db/enums.py`: `ProfileSection`, `RevisionAction`, `RevisionState`, `TextOrigin`,
-`NarrativeBasis`. `ClaimEventAction` and the OpenFGA model do not change.
+Add to `db/enums.py`: `ProfileSection`, `RevisionAction`, `RevisionState`, `PendingReason`,
+`TextOrigin`, `NarrativeBasis`. `PendingReason` holds every value in section 7, including
+`public_edit`, so GP-02 does not wait for D1. `ClaimEventAction` and the OpenFGA model do not
+change.
 
 ## 4. Permissions
 
@@ -121,18 +127,19 @@ def audience_claims(session, grant, audience: Audience) -> VisibleClaims
     """Exactly what `audience` (not `only_me`) sees through `_visible_claims_for_tier`:
     Connections tier for `connections`, and so on. Sync, no OpenFGA call, so it is safe under
     the profile lock."""
-def owner_claims_locked(session, grant) -> list[Claim]   # live and pending; sync
+def owner_claims_locked(session, grant) -> list[Claim]   # all statuses; sync
 ```
 
 Readiness, `view_as`, reach and the write checks all use `audience_claims`. None may re-implement
-the audience, provisional or opt-in rules.
+the audience, provisional or opt-in rules. GP-03 adds both new names to `_SERVICE_USE` in
+`tests/authz/test_claim_read_guard.py`, whose `\bowner_claims\b` does not match them.
 
 ## 5. Evidence rules
 
 | Rule | Enforced |
 | --- | --- |
 | **Required citations.** `evidence_derived` text with audience other than `only_me` needs at least one citation | `set`, `restore`: `citations_required` |
-| **Live.** Each citation names a live (`active`, `provisional`) fact of this profile. Missing, foreign, pending, superseded and removed are identical | Write and publication: `unknown_citation` |
+| **Live.** Each citation names a live (`active`, `provisional`) fact of this profile. Missing, foreign, pending, superseded and removed are identical | `set`: `unknown_citation`. `approve`, `restore`: `source_unavailable`, because the citation was valid when stored |
 | **Evidence ceiling.** A section is never more visible than its narrowest citation: every citation must be in `audience_claims(section audience)` (for `only_me`, liveness only). This applies to `owner_approved` text with citations too, and also rejects a provisional citation while `share_provisional` is off | Write and publication: `evidence_ceiling`. Read: section 6 |
 | **Sensitive.** A section with audience other than `only_me` cites no `sensitive` fact | Write and publication: `sensitive_citation` |
 | **Close match.** Shared text may not closely match a fact the audience cannot read (below) | Write and publication: `narrower_fact_match` |
@@ -145,32 +152,69 @@ function words and sentiment verbs (`likes`, `loves`, `prefers`, `hates`, `disli
 `audience_claims(section audience)`. For each fact, for its statement and each string value in
 `details` independently: `T = tokens(value)`; a match is `T` non-empty and
 `|T ∩ tokens(text)| / |T| >= 0.8`. It runs for every shared write, including the owner's own, and
-never for `only_me` text or narrowing. The refusal names the fact id, never its text. This is a
+never for `only_me` text. The refusal names the fact id, never its text. This is a
 safety net: it catches copying, not implication, so guidance and owner review remain necessary.
 
 Citations are a disclosure ceiling and a withdrawal trigger. They do not prove the text.
+
+**Narrowing is never blocked.** A narrowing `set_audience`, `clear`, `reject` and the section 8.5
+rows skip every rule in this section and section 8.3 except authorization and, for the first
+three, the revision check. A stale citation cannot stop anyone reducing who sees a section.
 
 ## 6. Whole-section withdrawal
 
 One predicate decides every read. It lives in `services/gifting_read.py` and takes no other input:
 
 ```python
-def section_shown(published, citations: set[UUID], tier, visible_ids: set[UUID]) -> bool:
+def section_shown(published, citations: set[UUID], tier, visible_ids: set[UUID],
+                  *, public_opt_in: bool, source_floor: int) -> bool:
     return (
         published is not None and published.body is not None
         and Audience(published.audience).rank <= TIER_RANK[tier]
+        and source_floor <= TIER_RANK[tier]
+        and (tier is not ViewerTier.public or public_opt_in)
         and citations <= visible_ids
     )
 ```
 
-- `visible_ids` come from `visible_claims` or `audience_claims` for that viewer, so a `public`
-  tier viewer also needs the current `public_opt_in`.
-- It uses only the latest published revision. There is **no fallback** to an older revision: a
-  withdrawn section stays withheld until it is revised.
-- The read loads revisions **first**, then claims, so a fact withdrawn during a read withholds.
+(`pending D3`: option B adds one clause here.)
+
+- `visible_ids` come from `visible_claims` or `audience_claims` for that viewer.
+- `public_opt_in` is the current policy flag, passed explicitly because `citations <= visible_ids`
+  is true for an empty set. Text with no citations therefore cannot reach a `public` tier viewer
+  without the opt-in, even if OpenFGA or a section 8.5 row is out of step.
+- It uses only the latest published revision. There is **no fallback** to an older revision.
+- Read order on every surface: `C(p)` (section 11), revisions and citations, claims, then
+  `claim_events` and policy versions for `source_floor`. A fact withdrawn during a read withholds.
 - Nothing is cached or stored. Withdrawal needs no polling, signal, job or assistant response.
 - `owner_approved` text with citations withdraws like any other. Text with no citations can only
-  fall to the audience check.
+  fall to the audience and opt-in checks.
+
+### 6.1 Sources that come back
+
+The records say a section is withheld "until it is revised" (plan Privacy; Privacy page). So a
+section withdrawn because a source became unavailable stays withheld, for the audiences that lost
+it, until a new revision, even if the fact is re-widened or `share_provisional` returns. This is a
+reading of the literal record (I9). A viewer who regains a tier sees the section again, because
+the source never lapsed. Derived on each read, with no new table:
+
+**Anchor**: the published row, or, if it is a `set_audience` that did not widen, the row it copied
+from, followed through `source_revision` until a row that is not such a narrowing. Narrowing rows
+therefore neither start a new window nor launder a lapse.
+
+**`source_floor`**: the highest of these ranks, or `-1` if none applies:
+
+| Source lapse since the anchor | Rank |
+| --- | --- |
+| `audience_changed` event on a citation with `occurred_at` after the anchor's: `changes.audience.old` and `.new` | Each value's rank |
+| A contribution policy with `version` above the anchor's `policy_version` has `share_provisional = false`, and a citation is provisional | `only_me` rank, so every non-owner |
+| A policy with `version` above the anchor's has `public_opt_in = false`, and the section's audience is `public` | `connections` rank |
+
+Removal and supersession need no entry: neither can return. `claim_writes._event` sets
+`occurred_at = clock_timestamp()` (GP-02), and every claim write holds the profile row, so event
+and revision times follow lock order. `now()` would not: it is the transaction start.
+
+The owner tier has the highest rank, so owner reads are never hidden.
 
 | Trigger | Viewer effect on next read |
 | --- | --- |
@@ -178,11 +222,13 @@ def section_shown(published, citations: set[UUID], tier, visible_ids: set[UUID])
 | Cited fact superseded (a correction) | Same. The replacement is not auto-cited; the section needs revising |
 | Cited fact narrowed, directly or by a category tightening | Withheld from viewers no longer able to read it; narrower tiers that can still read it keep the section |
 | Cited fact is provisional and `share_provisional` goes off | Withheld from every non-owner |
+| A cited fact is re-widened, or `share_provisional` returns | **Stays withheld** until a new revision (section 6.1) |
 | `public_opt_in` withdrawn | Public tier sees nothing (also section 8.5) |
-| Connection revoked or tier lowered, viewer blocked | Falls to the new tier; tier `none` is the existing identical 404 |
+| Connection revoked or tier lowered, viewer blocked | Falls to the new tier; tier `none` is the existing identical 404. A regained tier sees the section again |
 | Viewer's assistant disconnected | Existing 401 / tool error |
 | Section narrowed or cleared | Applies by audience, or nothing is published |
 | Other unavailability to that viewer | `citations <= visible_ids` fails |
+| Author assistant disconnected | `pending D3` |
 
 What follows the withdrawal, for that viewer:
 
@@ -215,23 +261,32 @@ Evaluate in order for an **agent** `set` or `restore`, after all checks in secti
 | 1 | Proposed `text_origin` is `owner_approved` | pending | `owner_text` |
 | 2 | Policy `require_review_all` | pending | `require_review_all` |
 | 3 | Audience is `only_me` | published | |
-| 4 | Profile has no published shared revision yet | pending | `first_publication` |
-| 5 | Audience wider than baseline | pending | `wider_audience` |
-| 6 | Otherwise | published, `automatic`; reports what changed | |
+| 4 | The proposal would republish withheld content (below) | pending | `withdrawn_source` |
+| 5 | **`pending D2`**: no published shared revision yet for the profile (option A) or for this section (option B) | pending | `first_publication` |
+| 6 | **`pending D1`**: applies only under option B. Baseline is `public` and the text differs from the published text | pending | `public_edit` |
+| 7 | Audience wider than baseline | pending | `wider_audience` |
+| 8 | Otherwise | published, `automatic`; reports what changed | |
 
 **Baseline**: the `audience` of the section's latest published row, including a `clear` row. If
-the section has never been published, `connections`. Keeping the baseline across `clear` means
-clear-then-set cannot widen silently.
+the section has never been published, `connections` (reached only under D2 option A). Keeping the
+baseline across `clear` means clear-then-set cannot widen silently.
 
-**First publication** is profile-wide: it ends at the first `published` row with text and an
-audience other than `only_me`. Each section in the first batch is confirmed separately.
+**First publication** (`pending D2`) ends at the first `published` row with text and an audience
+other than `only_me`: anywhere on the profile under option A, in that section under option B.
+
+**Row 4.** Let `W` be the published revision's `withheld_citations` (section 10.2), minus any
+superseded citation whose live replacement the proposal cites, so an ordinary correction is not
+held. The row applies when `W` is non-empty and either the proposal matches the published text
+(`|tokens(published) ∩ tokens(text)| / |tokens(published)| >= 0.8`) or a citation in `W` closely
+matches the proposal (section 5 test, on its statement and details). It stops the owner's removal
+being undone by swapping a citation. It compares against the current published revision only.
 
 Other cases:
 
 | Case | Result |
 | --- | --- |
 | Agent `set_audience`, narrower | Published immediately, no confirmation |
-| Agent `set_audience`, wider | `pending` with `wider_audience` (or `first_publication`), text and citations copied. No citation is required to hold it |
+| Agent `set_audience`, wider | `pending` with `wider_audience`, or `first_publication` where row 5 applies (`pending D2`), text and citations copied. No citation is required to hold it |
 | `clear`, `reject` | Immediate |
 | Browser owner (`via = ui`) | Writes publish at once with `owner_approved`, `explicit`, including first publication and widening: the owner is acting. All checks in section 8 still apply |
 | Pending exists when another write lands | The write needs `expected_revision` = the pending head. It becomes the head, the old one is superseded, and the result reports `superseded_pending_revision` |
@@ -252,7 +307,7 @@ pattern (`update_fact` preview, then confirmed retry) inside the one new tool:
 2. The agent quotes exactly that to the owner and asks.
 3. Only on a clear yes in this conversation, it sends `approve` with that `revision`, that
    `audience` and `owner_confirmed: true`.
-4. `approve` without `owner_confirmed` writes nothing and refuses with
+4. `approve` without `owner_confirmed: true` writes nothing and refuses with
    `owner_confirmation_required`, listing the same data, so it also serves as a preview.
 
 Assistants may read pending text with `get_profile` later and repeat steps 2-3.
@@ -270,15 +325,16 @@ exact text and citations. `approve` succeeds only if `revision` is still the hea
 
 Nothing carries forward: a confirmation of revision A cannot publish revision B. Approving
 appends a `published`, `explicit`, `owner_approved` row with `source_revision` = the pending
-revision, copying text, audience and citations.
+revision, copying text, audience, citations and `basis`. `basis` is not recomputed.
 
 ### 8.3 Publication checks
 
-Run under the profile lock at every publication, `approve` and `restore` included:
+Run under the profile lock at every publication of text or wider access, `approve` and `restore`
+included. Narrowing is exempt (section 5):
 
 1. **Delegation.** The acting delegation is re-read and must be `active`.
 2. **Policy.** A policy exists; `public` needs the current `public_opt_in`; `enrichment_enabled`
-   per section 8.6.
+   per section 8.6 (`pending D4` for `approve`).
 3. **Sources.** Every section 5 rule on *current* facts. An approval fails with
    `source_unavailable` (or `evidence_ceiling`, `sensitive_citation`, `narrower_fact_match`) when
    a source moved since the revision was written. The revision stays pending and the owner read
@@ -297,18 +353,34 @@ applies it. A unique-index violation maps to `stale_revision`.
 ### 8.5 Public
 
 Needs both `public_opt_in` and a confirmation for that section. `public` without the opt-in is
-refused (`public_not_opted_in`), never held. Withdrawing the opt-in (`set_policy`, in its
-transaction) appends a `set_audience` narrowing to `connections` for each section published at
-`public`, mirroring how F5 narrows facts. Opting in again therefore never revives a Public
-section. A pending `public` revision is left in place and fails section 8.3 until the owner has
-opted in again.
+refused (`public_not_opted_in`), never held.
+
+Withdrawing the opt-in runs in `set_policy`'s transaction, mirroring how F5 narrows facts. For each
+section whose latest published row has audience `public`, it appends a row with audience
+`connections` and the new `policy_version`:
+
+| Latest published row | Appended row |
+| --- | --- |
+| Has text | `set_audience` narrowing |
+| Cleared | `clear`, so the baseline falls to `connections` and a later `set` at Public is wider |
+
+These rows follow section 5's exemption and can never fail `set_policy`. Opting in again therefore
+never revives a Public section, and section 6.1 holds the same line if a row is ever missing.
+
+The appended row becomes the head, so a pending revision on such a section is superseded and can
+never be approved. On a section whose published row is not Public, a pending `public` revision is
+left in place and fails section 8.3 until the owner has opted in again.
+
+`profiles.set_policy` imports the hook from `gifting_writes` inside the function, as `questions.py`
+does for `inbox_setup`, because `gifting_writes` needs helpers from `profiles`.
 
 ### 8.6 `enrichment_enabled = false`
 
 | Agent action | Result |
 | --- | --- |
 | `set`, widening `set_audience`, `restore` | `enrichment_disabled` |
-| `clear`, narrowing `set_audience`, `reject`, confirmed `approve`, no-change review | Allowed. These are owner controls, as `update_fact` stays available |
+| `clear`, narrowing `set_audience`, `reject`, no-change review | Allowed (I5) |
+| Confirmed `approve` | **`pending D4`**: allowed under option A, `enrichment_disabled` under option B |
 
 The browser owner is unaffected. No write of any kind precedes the first policy
 (`policy_required`), browser included.
@@ -317,9 +389,11 @@ The browser owner is unaffected. No write of any kind precedes the first policy
 
 A pending revision stays pending when its author disconnects. It never publishes by itself. It
 publishes only through `approve` from a currently active delegation with `owner_confirmed`, or
-the browser owner. Owner reads show `author_connected: false`. A revision already published stays
-published under the normal read checks. A disconnected assistant cannot confirm: its token fails
-at `principal_from_mcp_context` and at check 1.
+the browser owner. Owner reads show `author_connected: false`. A disconnected assistant cannot confirm: its token
+fails at `principal_from_mcp_context` and at check 1.
+
+**`pending D3`**: whether an `automatic` revision **already published** by a since-disconnected
+assistant stays readable to non-owners.
 
 ### 8.8 Undo (`restore`)
 
@@ -331,8 +405,9 @@ at `principal_from_mcp_context` and at check 1.
   restore old access. Wider access needs a later `set_audience` and confirmation.
 - All of section 5 and 8.3 run on current facts. A target citing a withdrawn fact is refused with
   `source_unavailable`; the assistant must write a new revision.
-- Then the section 7 table applies. An agent restoring `owner_approved` text gets a pending
-  revision (row 1), because a confirmation never carries to a new revision.
+- Then the section 7 table applies, including row 4 and `pending D1`. An agent restoring
+  `owner_approved` text gets a pending revision (row 1), because a confirmation never carries to
+  a new revision.
 
 ## 9. `update_gifting_profile`
 
@@ -367,7 +442,7 @@ MCP and HTTP). `reviewed_through`: optional integer from section 11. An empty `c
 | `set` | `section`, `expected_revision`, `text` | `audience` (default baseline), `citations`, `text_origin` (default `evidence_derived`), `basis` (default `inferred`) | `revision`, `owner_confirmed` |
 | `clear` | `section`, `expected_revision` | | all others |
 | `set_audience` | `section`, `expected_revision`, `audience` | | all others |
-| `approve` | `section`, `revision`, `audience`, `owner_confirmed: true` (browser: flag not needed) | | all others |
+| `approve` | `section`, `revision`, `audience` | `owner_confirmed`; publishes only when `true` (browser: not needed), otherwise a preview refusal | all others |
 | `reject` | `section`, `revision` | | all others |
 | `restore` | `section`, `expected_revision`, `revision` | | all others |
 
@@ -375,8 +450,11 @@ MCP and HTTP). `reviewed_through`: optional integer from section 11. An empty `c
   different sections never conflict.
 - A call is **atomic**: any failure writes nothing, including the watermark. All per-change errors
   are returned together.
-- `set` with identical text, audience, citations, origin and basis writes nothing:
-  `outcome: "unchanged"`. So does `set_audience` to the current audience.
+- After commit, a failure assembling `gifting_profile`, `readiness` or `maintenance` degrades the
+  result (`not_assessed`, `null`) and never fails the committed write.
+- `set` identical to the head revision (text, audience, citations, origin, basis) writes nothing:
+  `outcome: "unchanged"`. So does `set_audience` to the baseline. `unchanged` does not apply while
+  the published revision has `withheld_citations`; such a `set` follows section 7.
 - There is no grade, readiness or `owner_confirmed` input on `set`. An official tier cannot be
   submitted.
 
@@ -417,7 +495,7 @@ Errors. HTTP body `{"detail": "<code>", "errors": [{"index", "section", "code", 
 | --- | --- | --- |
 | 422 | | Structural (FastAPI). MCP validation error |
 | 400 | `invalid_request` | Per-action field rules, duplicate section, empty `changes` without `reviewed_through` |
-| 400 | `invalid_text` | Length, control characters, street address |
+| 400 | `invalid_text` | Length, control characters, street address, birth year |
 | 400 | `citations_required`, `unknown_citation`, `evidence_ceiling`, `sensitive_citation`, `narrower_fact_match`, `public_not_opted_in`, `audience_mismatch` | Sections 5 and 8 |
 | 400 | `invalid_reviewed_through` | Above the current event count |
 | 401 | | Not signed in, bad token, disconnected |
@@ -428,8 +506,12 @@ Errors. HTTP body `{"detail": "<code>", "errors": [{"index", "section", "code", 
 | 409 | `stale_approval` | Section 8.2, for `approve` and `reject` |
 | 409 | `nothing_published` | `clear`, `set_audience` with no published text; `restore` target invalid |
 | 409 | `policy_required` | No approved policy yet (also no profile) |
-| 409 | `source_unavailable` | Section 8.3 |
+| 409 | `source_unavailable` | Sections 5 and 8.3 |
 | 503 | | Authorization service unavailable |
+
+**Mixed errors.** All items are returned. Status and `detail` come from the first level present:
+`not_allowed`, `enrichment_disabled`, `policy_required`, other 409s, 400s, then
+`owner_confirmation_required`, matching F5's order of conflict, validation, confirmation.
 
 Never logged: `text`, `quote`, any revision body. Adapters log exception type names only, as F5
 does. `mcp/audit.py` logs method and target only and needs no change.
@@ -450,6 +532,7 @@ get_profile(handle: str | None = None,
 | `include_facts` | Default `true`, unchanged until measurement justifies otherwise. `false` is the compact opt-in: `facts` becomes `null` and owner `history` becomes `[]`; nothing else changes. `null` is used, not `[]`, so a caller cannot read compact output as "no facts" |
 | `view_as` | Owner preview, no handle. With `handle`: `invalid_request` |
 | No narrative | Owner sees five empty sections; viewers see `sections: []`. Reads never create a profile |
+| No profile (gate on) | `gifting_profile` is non-null with five empty sections, `readiness` is `not_assessed`, `maintenance` is `null`. `view_as` returns empty lists with `audience_reachable: false` |
 | Non-MCP | `GET /api/v1/profile`, `/api/ui/profile`, `/api/v1/profiles/{handle}`, `/api/ui/profiles/{handle}` take `include_facts`; the two owner routes take `view_as` |
 | Own handle | Existing shared shape at owner tier: no readiness, pending or history |
 | `provisional_caveat` | Also set when a returned evidence item is provisional |
@@ -492,11 +575,15 @@ Always five entries in canonical order. `pending`, `published` or both may be nu
 ```
 
 - `revision`: the head, the value for `expected_revision`.
+- `first_publication_done` (`pending D2`): a profile boolean under option A; moves into each
+  section under option B.
 - `reach`: which of `public`, `connections`, `trusted_circle` currently pass `section_shown`,
   computed through `audience_claims`, never separately. Empty means shared with no one.
-- `withheld_citations`: fact ids blocking reach at the section's own audience.
+- `withheld_citations`: fact ids blocking reach at the section's own audience, now or through a
+  lapse under section 6.1. Non-empty means a new revision is needed.
 - `history`: at most the three latest restorable published revisions, with text. Omitted
   (`[]`) when `include_facts=false`. No separate history tool.
+- `evidence`: in `visible_claims` order on every surface, so external output is stable.
 - `updated_by`, `author`: as `FactOut.contributor`: `"you"`, the agent's name or
   `"Your assistant"`.
 
@@ -534,7 +621,7 @@ C(p) = count of claim_events for p WHERE action IN
        (auto_accepted, approved, audience_changed, superseded, removed)
        OR (action = created AND acceptance IS NOT NULL)
 needed = narrative exists AND enrichment_enabled AND C(p) > profiles.narrative_reviewed_events
-reviewed_through = C(p) as read
+reviewed_through = C(p), read BEFORE the facts, on a read that returns facts
 ```
 
 "Narrative exists" means the profile has at least one revision. Before that, readiness carries
@@ -545,6 +632,14 @@ A fact whose transaction began before the read but committed after it would have
 timestamp than a `reviewed_through` taken from a newer event, and would be lost. The count only
 contains committed rows, so a late commit raises `C(p)` above any value already returned. Claim
 events are append-only, and only demo reset deletes them.
+
+**Only a read that returned facts is actionable.** `C(p)` is read before the facts, so a fact
+committed after it raises the count above `R` and stays outstanding. `reviewed_through` is an
+integer only
+on owner `get_profile` with `include_facts=true` and the default status set (HTTP `?status=` makes
+it `null`), including when `needed` is false, so a first narrative can carry it. Every other
+surface returns `null` and tells the assistant to call `get_profile` first: an `add_facts` result
+must not let one assistant resolve another's unseen facts.
 
 Advance, only inside a successful `update_gifting_profile` that carried `reviewed_through = R`:
 reject `R > C(p)` (`invalid_reviewed_through`), then
@@ -558,16 +653,22 @@ older `R` is a harmless no-op. A write without `reviewed_through` never advances
 | Consumed by | A profile update or no-change review only, never a poll. Resolves for all the owner's assistants |
 | Concurrent fact | `C(p) > R` after advance, so the signal stays |
 | Published sections | Stay readable while maintenance is pending, unless withdrawn |
-| `gift_ready` | Ends readiness prompts, not this signal |
+| `gift_ready` | Ends readiness prompts, not this signal (I8) |
 | `enrichment_enabled` off | Not needed, no item; the watermark holds until it is on again |
 | Conflict and age triggers | Future scope |
 
-Shape in owner `get_profile`, `add_facts` and `update_gifting_profile` results; `null` for no
-profile, and `needed: false` with `prompt: null` when nothing is outstanding:
+Shape; `null` for no profile, and `needed: false` with `prompt: null` when nothing is outstanding:
 
 ```json
 {"maintenance": {"needed": true, "reviewed_through": 42,
   "prompt": "Facts changed since this profile was last reviewed. Update a section only if the evidence changed what it should say. Otherwise record no change with update_gifting_profile(changes=[], reviewed_through=42)."}}
+```
+
+On `add_facts` and `update_gifting_profile` results and with `include_facts=false`:
+
+```json
+{"maintenance": {"needed": true, "reviewed_through": null,
+  "prompt": "Facts changed since this profile was last reviewed. Call get_profile to see them before deciding whether a section needs updating."}}
 ```
 
 `get_updates` item, added to `UpdateItem` as a discriminated union, returned only to the owner's
@@ -577,10 +678,11 @@ designated assistant there is no item, and the other surfaces still carry it:
 ```json
 {"type": "profile_maintenance",
  "item_id": "profile_maintenance:<profile_id>:42",
- "reviewed_through": 42, "prompt": "..."}
+ "reviewed_through": null, "prompt": "Facts changed ... Call get_profile ..."}
 ```
 
-It is appended after question items, does not count toward `MAX_UPDATES`, writes no event and is
+`get_updates` takes `include_maintenance: bool`, which the two adapters set from the gate. The item
+is appended after question items, does not count toward `MAX_UPDATES`, writes no event and is
 not routed through `update_assignment`. It must also appear on the `get_updates` early return for
 an empty inbox. `item_id` is stable until `C(p)` changes. It counts in `last_check_item_count`.
 
@@ -610,7 +712,7 @@ that judgment and may never set, override or restate the tier as its own.
 | --- | --- |
 | Countable fact | In the projection, `provisional = false`, `evidence_type != inferred`, category not in `sensitive`, `size`, `location` |
 | Fresh | `observed_at` null, or end of its period (`day`, `month`, `year`) within 730 days of `today` |
-| Counted section | Shown at Connections, and either `owner_approved`, or has at least one countable citation |
+| Counted section | Shown at Connections, and either has at least one countable citation, or is `owner_approved` with no citations |
 
 | Signal | Holds when |
 | --- | --- |
@@ -618,8 +720,8 @@ that judgment and may never set, override or restate the tier as its own.
 | `direction` | Countable `wish`; or counted `gift_directions` |
 | `caution` | Countable `dislike`, `owned_item` or `diet_exclusion`; or counted `gift_cautions`. A strength only. **Absence is neutral** |
 | `narrative` | Any counted section |
-| `conflict` | A projection fact in `interest`, `style`, `favorite_brand` or `wish` and one in `dislike` have `tokens` where one set contains the other and is non-empty; or likewise `wish` and `owned_item`. Provisional facts included: uncertainty applies to what is readable |
-| `stale` | `taste` or `direction` holds but no fresh fact or counted section with a fresh citation (or `owner_approved`, no citations) supports it |
+| `conflict` | A projection fact in `interest`, `style`, `favorite_brand` or `wish` and one in `dislike` have equal non-empty `tokens` sets; or likewise `wish` and `owned_item`. Provisional facts included: uncertainty applies to what is readable. A nuance such as "Loves coffee" and "Dislikes instant coffee" is not a conflict |
+| `stale` | Some holding signal among `taste` and `direction` has no fresh support. A signal's support is the countable facts and counted sections listed for it above. A fact is fresh by date; a counted section is fresh if it has a fresh countable citation or is `owner_approved` with no citations. So fresh `taste` with stale `direction` is `stale` |
 
 Facts about birthdays, anniversaries, life events and sentimental context neither help nor hurt.
 There is no conflict state in claims, so `conflict` is a structural hint, labeled as "possible".
@@ -657,8 +759,8 @@ There is no conflict state in claims, so `conflict` is a structural hint, labele
 
 `reason_code` (fixed text, one per code): `no_profile`, `no_policy`, `assessment_unavailable`,
 `no_shareable_signal`, `ready`, and for `useful` the first that applies of `possible_conflict`,
-`stale_signals`, `missing_direction`, `missing_taste`, `no_narrative`. `strengths`: fixed labels of holding signals, never fact text, section
-text or category names of hidden content. `narrower_content`: true when live facts or published
+`stale_signals`, `missing_direction`, `missing_taste`, `no_narrative`. `strengths`: fixed labels of
+holding signals, never fact text, section text or category names of hidden content. `narrower_content`: true when live facts or published
 sections exist outside the projection. Its only effect is the fixed note "Some of this person's
 profile is readable only by narrower audiences; that is their choice." It never produces an
 action.
@@ -682,10 +784,10 @@ acceptable place to stop. Never collect, infer, invent or publish merely to rais
 
 | # | Profile (what Connections can read unless noted) | Expected state | `reason_code` | `next_actions` |
 | --- | --- | --- | --- | --- |
-| 1 Sparse | One `interest`, inferred and provisional. Variant (generic filler): five sections citing only a `location` fact | `getting_started` | `no_shareable_signal` | `add_taste`, `add_direction` |
+| 1 Sparse | One `interest`, inferred and provisional. Variants (generic filler): five sections citing only a `location` fact, once `evidence_derived` and once `owner_approved` | `getting_started` | `no_shareable_signal` | `add_taste`, `add_direction` |
 | 2 Concise but useful | Explicit `interest`, explicit `dislike`, no narrative | `useful` | `missing_direction` | `add_direction`, `write_narrative` |
 | 3 Rich | Explicit `style`, explicit `wish`, one `gifting_style` section citing the `style` fact, no known cautions. Three items only | `gift_ready` | `ready` | none |
-| 4 Conflicted or stale | As 3 plus `interest` "Loves lilies" and `dislike` "Dislikes lilies". Variant: as 3 with every fact observed 2023-06 | `useful` | `possible_conflict` / `stale_signals` | `review_possible_conflict` / `refresh_old_facts` |
+| 4 Conflicted or stale | As 3 plus `interest` "Loves lilies" and `dislike` "Dislikes lilies". Variant: as 3 with every fact observed 2023-06. Negative: as 3 plus "Loves coffee" and "Dislikes instant coffee" stays `gift_ready` | `useful` | `possible_conflict` / `stale_signals` | `review_possible_conflict` / `refresh_old_facts` |
 | 5 Private only | Nothing. The owner has rich `only_me` and `trusted_circle` facts and a `trusted_circle` section. Variant (withdrawal): profile 3 after its cited `style` fact is narrowed to `trusted_circle` | `getting_started` / `useful` | `no_shareable_signal` / `missing_taste` | `add_taste`, `add_direction` / `add_taste`, `write_narrative`. Both with `narrower_content: true` |
 
 The withdrawal variant shows readiness following a source. The section is withheld from
@@ -694,6 +796,18 @@ and `taste` and `narrative` do not. Profile 3 also has no known cautions, which 
 
 The rubric and cutoffs (730 days, 0.8) are unvalidated. A change bumps `rules_version`. Validation
 against gift outcomes is later research, not this phase.
+
+### 12.5 Tool-only onboarding
+
+An assistant that sees only tools can finish with no prompts, resources, skills or guidance tool.
+The release PR puts these rules in the `get_profile`, `add_facts` and `update_gifting_profile`
+descriptions, and readiness supplies the next step:
+
+`get_profile` → read readiness and current facts → use existing authorized knowledge → `add_facts`
+where justified → `update_gifting_profile` where justified → quote any `confirmation` to the owner
+→ `get_profile` again → stop when useful or when nothing more is known. Zero questions and no change
+are valid. The full workflow stays in canonical guidance. `get_guidance` is not added without
+review evidence that this is inadequate. GP-08 runs the tool-only smoke test.
 
 ## 13. Migration and rollback
 
@@ -705,7 +819,7 @@ GP-02.
 | Upgrade | `SET LOCAL lock_timeout = '5s'`; create both tables; `ADD COLUMN` with a constant default (no table rewrite). **No backfill**: zero sections for every profile, no synthesized text |
 | Downgrade | Refuse with an exception if either table has rows (precedent: `0009`); else drop the column and tables. Never silently drops narrative |
 | Demo reset | Add `gifting_profile_citations`, `gifting_profile_revisions` before `claim_events` in `CLEAR_TABLES` and to the verification counts; reset `narrative_reviewed_events = 0` for demo profiles, because deleting `claim_events` lowers `C(p)` |
-| Cloud Run rollback | Roll the image back; **no schema downgrade**. The old image names its columns, ignores the new tables and column, and reads no narrative. Facts are untouched. Forward fix is the default |
+| Cloud Run rollback | Roll the image back; **no schema downgrade**. The old image names its columns, ignores the new tables and column, and reads no narrative. Facts are untouched. An opt-out made on the old image appends no section 8.5 row; section 6's `public_opt_in` check and section 6.1 cover that on return. Forward fix is the default |
 | Gate rollback | Setting `GIFTING_PROFILE_RELEASE=false` hides the narrative and write surface without losing data. Deployment changes follow the release gate |
 
 Permissions, claims and existing data are not modified. `alembic check` stays clean.
@@ -751,15 +865,16 @@ or render tool. The MCP App adds a resource and `_meta` on `get_profile`, not a 
 | --- | --- | --- |
 | 1 | `owner_confirmed` is asserted by the owner's assistant. Revel cannot prove a human agreed (same as facts) | Tool text forbids inferring consent. Binding limits the damage to one exact revision. MCP Apps get no confirm path |
 | 2 | The owner's authorized assistants are trusted within the policy | They read all pending and history text. Other users never do |
-| 3 | Citations do not prove the text | A truthful citation can sit under a sentence that says more. The close-match test catches copying only. Guidance and owner review remain necessary |
-| 4 | `owner_approved` text with no citations has no withdrawal trigger | The owner accepted that text. It obeys audience only |
+| 3 | Citations do not prove the text | A truthful citation can sit under a sentence that says more. The close-match test and section 7 row 4 catch copying only, and row 4 looks at the current published revision only. Guidance and owner review remain necessary |
+| 4 | `owner_approved` text with no citations has no source trigger | The owner accepted that text. It obeys audience and the Public opt-in only |
 | 5 | Readers may have kept what they already saw | Withdrawal stops future reads and cannot recall anything (Privacy) |
 | 6 | Section and fact text are untrusted data | Embedded instructions carry no authority. Tool descriptions and giver guidance say so; UI renders plain text; no field becomes a tool argument by itself. GP-08 tests this |
 | 7 | OpenFGA and PostgreSQL state are current at read | OpenFGA failure fails closed (503), as for facts. Never an allow |
 | 8 | Delegation status is authoritative | A disconnected token fails `principal_from_mcp_context` |
-| 9 | `C(p)` relies on `claim_events` being append-only | Demo reset is the only deleter and resets the watermark |
+| 9 | `C(p)` and section 6.1 rely on `claim_events` being append-only | Demo reset is the only deleter and resets the watermark |
+| 9a | Section 6.1 ordering relies on every claim write holding the profile row | True at `2ea61d4`. A new claim writer must keep it |
 | 10 | External equivalence relies on the fixed projection | New external fields must be reviewed against section 6 |
-| 11 | Readiness is computed for the owner only | It is structural, so generic filler can satisfy it where the owner confirmed it. The label and reason say what it is |
+| 11 | Readiness is structural and owner-only | Cited filler earns nothing unless it cites a countable fact, but uncited `owner_approved` filler still counts. The label and reason say what it is |
 | 12 | Text, quotes and evidence are never logged | Adapters log exception types. Reviewers check new log lines |
 
 ## 17. Owner decisions recorded
@@ -784,23 +899,104 @@ Each is an approved Notion record. This contract implements them and changes non
 
 ### Record interpretations (for reviewers to challenge)
 
-These are readings of accepted records, not new policy. Each follows the literal text. A changed
-reading is a small, local edit.
+These are readings of accepted records, not new policy. I1, I2 and the `approve` part of I5 moved
+to section 18 as open owner decisions. Where a record has no explicit exception, the Basis says so.
 
 | # | Reading | Basis | Alternative |
 | --- | --- | --- | --- |
-| I1 | A later same-audience edit of a Public section auto-publishes. The "explicit confirmation" applies per section, not per edit | Versioning bullet has no Public exception; Privacy says "for that section" | Hold every Public edit: add a row before row 6 in section 7 |
-| I2 | After first publication, a never-published section at Connections or narrower auto-publishes | "Narratives default to Connections"; first publication is "of a profile" | Hold each section's first publication: change row 4 |
 | I3 | Only Me text is not a "publication": it publishes without confirmation and does not end first publication | Audiences: "not a social audience" | |
 | I4 | An approved fact that is `inferred` still earns nothing | "inferred facts earn nothing" | Count it once owner-approved |
-| I5 | With enrichment off, agents keep narrowing, clearing, rejecting and confirmed approval (section 8.6) | Agent-first owner controls; `update_fact` precedent | Refuse all agent writes |
+| I5 | With enrichment off, agents keep narrowing, `clear`, `reject` and no-change review. This is not literal: "stops agent narrative writes" has no stated exception. Confirmed `approve` is D4 | "narrowing may proceed immediately"; agent-first owner controls; `update_fact` precedent | Refuse these too |
 | I6 | Without a designated assistant there is no `get_updates` item | "where one exists"; other surfaces carry the signal | Give it to all the owner's assistants |
 | I7 | Heuristic `conflict` and date-based `stale` feed readiness, though conflict and age are out of scope as **maintenance triggers** | The rubric asks for contradictions and freshness; the exclusion is about triggers | Drop them from `gp-readiness-1` |
+| I8 | `gift_ready` ends readiness prompts, not the maintenance signal | "`gift_ready` ends all prompts" sits in the readiness guardrails; a removed fact must still prompt | Suppress the signal too |
+| I9 | A source that returns does not restore a withdrawn section; a new revision does. A viewer who regains a tier sees it again. Reading of the literal "until it is revised" (plan Privacy, Privacy page) | Section 6.1 | Show again when the source returns (stateless) |
 
-## 18. Unresolved product decisions
+## 18. Open owner decisions (none decided)
 
-None at this revision. I1 and I2 are the two a reviewer is most likely to want the owner to
-confirm: neither changes the schema or the tool shape.
+These four are **open**. The records do not settle them. No option below is chosen, recommended or
+built in as a default, and "conservative" describes behavior only. Each needs the owner's answer.
+
+| Decision | Waits on the answer | Unaffected |
+| --- | --- | --- |
+| D1 | GP-04 decision table, row 6 | Schema, tool shape |
+| D2 | GP-04 row 5, `first_publication_done`, GP-07 fixture | Schema, tool shape |
+| D3 | GP-03 `section_shown`; under option B also GP-05 | Schema |
+| D4 | GP-05 `approve` | Schema, tool shape |
+
+GP-02 can proceed under any answer.
+
+### D1. Do agent edits of an already-Public section publish automatically or hold?
+
+Records (plan):
+
+- "later edits at the same or a narrower audience publish automatically and report what changed"
+- "Owner confirmation binds to one exact revision and audience and never carries forward to
+  different text."
+- "a Public section needs the policy-level Public opt-in plus explicit owner confirmation for that
+  section"
+
+| | Option A: publish automatically | Option B: hold |
+| --- | --- | --- |
+| Rule | Confirmation is needed once per section. Later agent edits at Public follow the general rule | Every agent text change or restore on a Public section is held for the owner |
+| Conservative | No | Yes |
+| What the user sees | Their assistant can change public text without asking; they get a report of what changed | Public text changes only after they confirm the exact words; more prompts |
+| Contract | Section 7 row 6 is deleted | Row 6 stays, with `public_edit` |
+| Code | `gifting_writes` has no row 6; `public_edit` stays unused in the enum | `gifting_writes` keeps row 6; add a held-edit test in `test_owner_controls_http_mcp_db.py` |
+
+### D2. Is first publication held per profile or per section?
+
+Records:
+
+- Plan: "the first publication of a profile is held as a pending revision until the owner confirms
+  its exact text"
+- Privacy: "The first publication of a profile needs owner confirmation of its exact text."
+- Plan: "never carries forward to different text"
+
+| | Option A: per profile | Option B: per section |
+| --- | --- | --- |
+| Rule | The first owner-confirmed shared section ends the hold for all five | Each section's first shared publication is held |
+| Conservative | No | Yes |
+| What the user sees | One approval opens the profile. **Consequence: after one approval, a draft still held, or one they rejected, auto-publishes when an agent re-`set`s it.** Sections published later are never shown to them first | Every section is seen once before it is shared; up to five confirmations |
+| Contract | Section 7 row 5 tests the profile; the never-published baseline applies; `first_publication_done` stays a profile boolean | Row 5 tests the section; the never-published baseline becomes unreachable; `first_publication_done` becomes per-section |
+| Code | `gifting_writes` profile-wide `EXISTS`; `gifting_read` boolean | Section-scoped `EXISTS`; `gifting_read` field moves into each section; GP-07 fixture; test: approve `about`, reject `gift_cautions`, re-`set` the same text stays pending |
+
+### D3. Does a published automatic revision by a since-disconnected assistant stay readable?
+
+Records (plan):
+
+- "A prior revision stays readable only while it still passes these checks."
+- "Recheck current delegation, policy and sources at publication."
+- "A revision from an assistant that has since been disconnected stays pending for the owner to
+  review and publishes only through a current authorized confirmation."
+
+The records do not state whether "these checks" on a published revision include the delegation.
+
+| | Option A: stays readable | Option B: withheld from non-owners |
+| --- | --- | --- |
+| Rule | Delegation is checked at publication only. Reads check audience, policy and sources | An `automatic` revision whose anchor's author delegation is disconnected is withheld from non-owners until the owner confirms or revises. `explicit` and browser rows are unaffected |
+| Conservative | No | Yes |
+| What the user sees | Disconnecting an assistant leaves what it already published in place | Disconnecting an assistant can silently remove sections from their profile until they act. Reconnecting restores them. Withheld text is the usual absence to viewers |
+| Contract | Sections 6 and 8.7 stay as written | Sections 6, 8.2, 8.7, 10.2 (`reach`, a reason on `withheld_citations` or a new owner flag), 16 |
+| Code | None | `section_shown` adds a delegation clause, and the read joins `agent_delegations`; readiness follows; `approve` must accept a published head, since nothing is pending to confirm; tests in `test_visibility_v2_db.py` |
+
+### D4. May an owner's assistant pass a confirmed `approve` while `enrichment_enabled=false`?
+
+Records:
+
+- Plan: "`enrichment_enabled=false` stops agent narrative writes"
+- Privacy: "The owner can do everything through their own authorized assistant"
+- Privacy: "The website is an optional fallback."
+
+This is about `approve` only. Narrowing, `clear` and `reject` stay allowed under I5.
+
+| | Option A: assistant may approve | Option B: browser only |
+| --- | --- | --- |
+| Rule | A confirmed `approve` is an owner control, not an enrichment write | Agent `approve` is refused with `enrichment_disabled`; the revision stays pending for the browser owner |
+| Conservative | No | Yes |
+| What the user sees | Their assistant can publish text they confirm even with contributions off | With contributions off, publishing needs the website |
+| Contract | Section 8.6 row: allowed | Section 8.6 row: refused; section 12 next actions unaffected |
+| Code | `gifting_writes.approve` skips the enrichment check | `gifting_writes.approve` applies it to agent principals; test in `test_owner_controls_http_mcp_db.py` |
 
 ## 19. Release ordering
 
@@ -883,8 +1079,8 @@ Verified **only after release** (step 7 or later):
 (`OwnerProfileView`) require every output model field to appear in served guidance. GP-03 and
 GP-04 add fields before guidance may name them. Both loops skip one named constant,
 `UNRELEASED_FIELDS = {"gifting_profile", "readiness", "maintenance", "view_as",
-"audience_reachable"}`, defined in `tests/guidance/test_owner_controls_f5.py`. The release PR
-deletes it, which forces the guidance to document them.
+"audience_reachable"}`, defined in `tests/guidance/test_skills_f6_f7.py`, because
+`test_owner_controls_f5.py` already imports from that file. The release PR deletes it, which forces the guidance to document them.
 
 ## 20. File ownership (at most two builders, disjoint files)
 
@@ -893,13 +1089,13 @@ listed task touches a path in its wave. "After GP-x" means serialized.
 
 | Task | Owns |
 | --- | --- |
-| GP-02 | `backend/migrations/versions/0010_gifting_profile.py`; `db/enums.py`; `db/models/profile.py` (column); `db/models/gifting_profile.py` (new); `db/models/__init__.py`; `services/gifting_store.py` (new: head, published, pending, history, append; no claim reads); `demo/reset.py`; `settings.py` (gate); `backend/tests/db/test_db_profile_migrations.py`; `backend/tests/demo/test_demo_reset_db.py` |
+| GP-02 | `backend/migrations/versions/0010_gifting_profile.py`; `db/enums.py`; `db/models/profile.py` (column); `db/models/gifting_profile.py` (new); `db/models/__init__.py`; `services/gifting_store.py` (new: head, published, pending, history, append; no claim reads); `demo/reset.py`; `settings.py` (gate); `services/claim_writes.py` (`_event` `clock_timestamp()`); `backend/tests/db/test_db_profile_migrations.py`; head pins in `backend/tests/db/test_db_unit.py`, `test_db_questions_unit.py`, `test_db_migrations.py`, `test_db_questions_migrations.py`, `test_db_reconnect_migrations.py`, `test_db_owner_confirmed_migrations.py`; `backend/tests/demo/test_demo_reset_db.py` |
 | GP-03 | `auth/visibility.py`; `services/gifting_read.py` (new); `services/gifting_tokens.py` (new); `services/readiness.py` (new); `services/profiles.py` (read models, `get_my_profile`, `read_shared_profile`); `mcp/profile_tools.py`; `api/profiles.py`; `backend/tests/authz/test_visibility_v2_db.py`; `backend/tests/authz/test_claim_read_guard.py`; `backend/tests/profiles/test_shared_profiles_db.py`; `backend/tests/profiles/test_readiness_rules.py` (new); guidance tests for `UNRELEASED_FIELDS` |
-| GP-04 | `services/gifting_writes.py` (new: `set`, `clear`, `set_audience`, decision table, checks); `services/gifting_maintenance.py` (new: `C(p)`, shape, advance); `mcp/gifting_profile_tools.py` (new); `api/gifting_profile.py` (new); `mcp/server.py`; `app.py`; `services/profiles.py` (`AddFactsResult`), `mcp/profile_tools.py` and `api/profiles.py` (`maintenance` wiring) after GP-03; `backend/tests/profiles/test_owner_controls_http_mcp_db.py` |
+| GP-04 | `services/gifting_writes.py` (new: `set`, `clear`, `set_audience`, decision table, checks); `services/categories.py` (`validate_section_text`); `services/gifting_maintenance.py` (new: `C(p)`, shape, advance); `mcp/gifting_profile_tools.py` (new); `api/gifting_profile.py` (new); `mcp/server.py`; `app.py`; `services/profiles.py` (`AddFactsResult`), `mcp/profile_tools.py` and `api/profiles.py` (`maintenance` wiring) after GP-03; `backend/tests/profiles/test_owner_controls_http_mcp_db.py` |
 | GP-05 | `services/gifting_writes.py` (`approve`, `reject`, `restore`) after GP-04; `services/profiles.py` (`set_policy` hook, section 8.5); `backend/tests/profiles/test_owner_controls_http_mcp_db.py` after GP-04 |
-| GP-06 first PR | `services/questions.py` (`UpdateItem`, `get_updates`); `mcp/question_tools.py`, `api/questions.py` if needed; `services/gifting_maintenance.py` after GP-04; `backend/tests/questions/test_questions_service_db.py` |
+| GP-06 first PR | `services/questions.py` (`UpdateItem`, `get_updates`); `mcp/question_tools.py`, `api/questions.py` (gate parameter); `services/gifting_maintenance.py` after GP-04; `backend/tests/questions/test_questions_service_db.py` |
 | GP-06 release PR | Section 19.2 list, including `backend/src/revel/guidance/**`, `settings.py` default, `mcp/profile_tools.py` descriptions, `backend/tests/guidance/**` |
-| GP-07 | `frontend/src/GiftingProfileCard.tsx`, `.test.tsx` (new); `frontend/src/giftingProfileFixtures.ts` (new); `frontend/src/profileApi.ts`; `frontend/src/App.tsx`; `frontend/src/index.css`; `frontend/README.md`. MCP App, after the release PR: `backend/src/revel/mcp/app_resource.py` (new) plus `_meta` on `get_profile` |
+| GP-07 | `frontend/src/GiftingProfileCard.tsx`, `.test.tsx` (new); `frontend/src/giftingProfileFixtures.ts` (new); `frontend/src/profileApi.ts`; `frontend/src/App.tsx`; `frontend/src/index.css`; `frontend/README.md`. MCP App, after the release PR: `backend/src/revel/mcp/app_resource.py` (new), `mcp/server.py` and `mcp/profile_tools.py` (`_meta` on `get_profile`) |
 | GP-08 | Disposable scripts, Notion evidence, `docs/deployment.md` rollback note. No permanent suite |
 
 Parallel pairs:
@@ -938,12 +1134,12 @@ stay as task evidence; disposable scripts are deleted afterwards.
 
 | File | Cases |
 | --- | --- |
-| `tests/authz/test_visibility_v2_db.py` | Parameterized matrix: owner, Public, Connections, Trusted Circle, revoked, unauthorized × section audience, with a private-synthesis negative. Source-withdrawal matrix: removed, narrowed, superseded, provisional off, opt-in withdrawn, connection revoked, each asserting text, evidence and readiness. `view_as` equals a real viewer's response. External equivalence for two profiles with identical shared content and different private facts, conflicts and drafts |
-| `tests/authz/test_claim_read_guard.py` | Only `services/gifting_read.py` and `gifting_writes.py` import `gifting_store`, so `revel/api` and `revel/mcp` cannot read revisions directly; no new claim-write module |
-| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold, widening hold, narrowing immediate, clear-then-set cannot widen, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal, enrichment off, atomic batch, no-change review, concurrent fact not lost, API/MCP parity smoke |
+| `tests/authz/test_visibility_v2_db.py` | Parameterized matrix: owner, Public, Connections, Trusted Circle, revoked, unauthorized × section audience, with a private-synthesis negative. Zero-citation Public row with opt-in false and public tier forced. Source-withdrawal matrix: removed, narrowed, superseded, provisional off, opt-in withdrawn, connection revoked, each asserting text, evidence and readiness. Source return: narrow then re-widen, provisional off then on, both stay withheld; a laundering narrowing row does not reset it; a new revision and a regained tier show it. `pending D3` case. `view_as` equals a real viewer's response. External equivalence for two profiles with identical shared content and different private facts, conflicts and drafts |
+| `tests/authz/test_claim_read_guard.py` | `_SERVICE_USE` extended. Only `services/gifting_read.py`, `gifting_writes.py` and `gifting_maintenance.py` import `gifting_store`, so `revel/api` and `revel/mcp` cannot read revisions directly; no new claim-write module |
+| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold (`pending D2`), Public edit (`pending D1`), widening hold, narrowing immediate and unblocked by a stale citation, clear-then-set cannot widen, withdrawn text with a swapped citation held, correction citing the replacement not held, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal including a stale citation, a pending revision on a Public section, and public-clear-opt-out-opt-in-set held, enrichment off (`pending D4` for `approve`), atomic batch, mixed-error precedence, no-change review, a fact committed between `C(p)` and the facts read stays outstanding, an `add_facts` result cannot resolve another assistant's fact, API/MCP parity smoke |
 | `tests/profiles/test_shared_profiles_db.py` | Captured legacy no-argument and handle responses, compact opt-in, absent-narrative fallback, gate-off null keys |
 | `tests/db/test_db_profile_migrations.py` | Schema, constraints, zero sections, facts preserved, downgrade refused with rows and clean without, one head |
-| `tests/profiles/test_readiness_rules.py` (new, one parameterized test) | Section 12.4 table and variants, determinism, no grade input, `not_assessed` on failure |
+| `tests/profiles/test_readiness_rules.py` (new, one parameterized test) | Section 12.4 table and variants, fresh `taste` with stale `direction`, determinism, no grade input, `not_assessed` on failure |
 | `tests/questions/test_questions_service_db.py` | One item per window, duplicate and missed polls, other assistants' polls consume nothing, empty-inbox path, not designated gets none |
 | `tests/demo/test_demo_reset_db.py` | New tables cleared, watermark reset |
 | `tests/guidance/test_content_lint.py` | Release PR: curated guidance lint for tool, no-self-grading and stop rule text |
@@ -951,11 +1147,14 @@ stay as task evidence; disposable scripts are deleted afterwards.
 
 ### Remove
 
-None at this revision. No existing test contradicts the contract: additive keys leave the
-`outputSchema` two-shape assertion valid. Builders delete or consolidate a test only when an
+No test is removed at this revision. Additive keys leave the `outputSchema` two-shape assertion
+valid. GP-02 updates the six `0009_invitation_join` head pins listed in section 20. Builders delete or consolidate a test only when an
 interface change makes it obsolete, and say so in the PR. `UNRELEASED_FIELDS` is deleted by the
 release PR.
 
 ## Changelog
 
 - GP-01 (RG-70): initial contract at base `2ea61d4`.
+- GP-01 review round 1: source-return rule (6.1), read-order and actionable `reviewed_through`,
+  `pending_reason` column, withdrawn-text hold, opt-out handling for cleared sections, readiness
+  rule fixes, tool-only onboarding (12.5); section 18 lists four open owner decisions.
