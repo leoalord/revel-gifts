@@ -25,10 +25,29 @@ change, new read tool, or change to `submit_question` profile context or answer 
 | `gift_cautions` | Gift cautions |
 
 Text: plain text, 1-1200 characters after trimming, no control characters except newline. New
-`categories.validate_section_text(text)` reuses F5's street-address pattern and refuses a
-19xx/20xx year within 20 characters of `born`, `birth year`, `date of birth` or `dob`. `validate_statement`
-cannot be used directly: it needs a `CategorySpec`. No Markdown or HTML semantics; clients render
-it as text. Every optional section may stay empty.
+`categories.validate_section_text(text)` reuses F5's street-address pattern and applies the
+birth-year rule below. `validate_statement` cannot be used directly: it needs a `CategorySpec`. No
+Markdown or HTML semantics; clients render it as text. Every optional section may stay empty.
+
+**Birth-year rule.** Case-insensitive, whole-word triggers, with at most 20 characters between
+trigger and value, in either order. It is a safety net, not a proof.
+
+| Trigger | Refused value |
+| --- | --- |
+| `born`, `birth year`, `date of birth`, `dob` | A 19xx or 20xx year |
+| `birthday`, `birthdate`, `birth date` | A full date containing a 19xx or 20xx year, or a 19xx year alone |
+
+A full date is `YYYY-M-D`, `D-M-YYYY` (separator `-`, `/` or `.`), `D Month YYYY` or
+`Month D, YYYY`, with full or abbreviated month names and optional ordinals. So a 20xx year alone
+beside `birthday` is allowed.
+
+| Must refuse | Must allow |
+| --- | --- |
+| Birthday is 3 May 1985 | Birthday gift in 2026 |
+| Birthday: 1985-05-03 | Birthday trip in 2024 |
+| Birthday: June 3, 1985 | Adobe 2024 subscription |
+| Her birthday is 3 June 1985 | Bornholm ceramics, 2023 trip |
+| Birthdate 1985-06-03 | Stubborn about 2024 vintages |
 
 ## 2. Vocabulary
 
@@ -70,7 +89,7 @@ row. Only `demo/reset.py` hard-deletes.
 | `via` | text | CHECK in `ContributedVia` |
 | `acceptance` | text null | CHECK in `AcceptanceMode`: `explicit` for owner-confirmed or browser rows, `automatic` for other agent rows, null while pending |
 | `policy_version` | int | Composite FK to `contribution_policies (profile_id, version)` RESTRICT. Not null: no write precedes the first policy |
-| `pending_reason` | text null | CHECK in `PendingReason` (section 7); not null exactly when `state = pending`. Stored because a reason cannot be derived after the fact: it depends on state at write time. It stays under either answer to D5; only the value `withdrawn_source` is `pending D5` |
+| `pending_reason` | text null | CHECK in `PendingReason` (section 7); not null exactly when `state = pending`. Stored because one nullable column is simpler than replaying the decision table across sections on each owner read. It stays under either answer to D5; only the value `withdrawn_source` is `pending D5` |
 | `occurred_at` | timestamptz | Set by the service to `clock_timestamp()` after the profile lock is held, for ordering against `claim_events` (section 6.1) |
 
 Also `UNIQUE (profile_id, id)` as the composite target. `approve`, `restore` and `set_audience`
@@ -286,7 +305,7 @@ other than `only_me`: anywhere on the profile under option A, in that section un
 - Correction exception: a superseded citation leaves `W` when the proposal cites its live
   replacement **and** the proposal does not closely match the superseded fact (section 5 test).
   Replacement chains are followed through `supersedes_id` to the live fact, and the test runs on
-  the cited fact and every superseded fact on the chain.
+  the superseded citation and each superseded fact between it and the live replacement.
 - The row applies when `W` is non-empty and either the proposal matches the compared text
   (`T = tokens(compared text)`, `T` non-empty, `|T ∩ tokens(text)| / |T| >= 0.8`), or a citation in
   `W` closely matches the proposal (section 5 test, on its statement and details).
@@ -654,7 +673,7 @@ committed after it raises the count above `R` and stays outstanding. `reviewed_t
 integer only
 on owner `get_profile` with `include_facts=true` and the default status set (HTTP `?status=` makes
 it `null`), including when `needed` is false, so a first narrative can carry it. Every other
-surface returns `null` and tells the assistant to call `get_profile` first: an `add_facts` result
+surface returns `null`, or omits the key on the `get_updates` item, and tells the assistant to call `get_profile` first: an `add_facts` result
 must not let one assistant resolve another's unseen facts.
 
 Advance, only inside a successful `update_gifting_profile` that carried `reviewed_through = R`:
@@ -698,8 +717,8 @@ designated assistant there is no item, and the other surfaces still carry it:
 ```
 
 The service function gains a keyword, `get_updates(..., include_maintenance: bool = False)`, which
-the two adapters set from the gate. It is not a tool or HTTP input, so the tool's schema does not
-change and existing callers are unaffected. The item is appended after question items, does not count toward `MAX_UPDATES`, writes no event and is
+the two adapters set from the gate. It is not a tool or HTTP input, so the tool's input schema does
+not change and existing callers are unaffected. The item is appended after question items, does not count toward `MAX_UPDATES`, writes no event and is
 not routed through `update_assignment`. It must also appear on the `get_updates` early return for
 an empty inbox. `item_id` is stable until `C(p)` changes. It counts in `last_check_item_count`.
 
@@ -1105,7 +1124,7 @@ behavior is asserted separately:
 | Task | Items |
 | --- | --- |
 | GP-02 | All (gate-independent) |
-| GP-03 | All, including the read matrix, withdrawal, legacy regression, external equivalence, readiness. Gate-off: legacy keys and values unchanged, new keys null |
+| GP-03 | All, including the read matrix, withdrawal, legacy regression, external equivalence, readiness. Gate-off: legacy keys and values unchanged, new keys null, and the name `update_gifting_profile` absent from `tools/list` and `/openapi.json` |
 | GP-04 | Section writes, non-owner refusal, stale revisions, ceiling, policy, holds, narrowing, readiness and maintenance in write results, API/OpenAPI/MCP parity on the gate-on app, 20 tools on a gate-on server, authoring text in the tool description |
 | GP-05 | All, including stale-approval races and undo |
 | GP-06 | Signal, watermark, no-change, duplicate and missed polls, concurrent fact |
@@ -1183,8 +1202,8 @@ stay as task evidence; disposable scripts are deleted afterwards.
 | --- | --- |
 | `tests/authz/test_visibility_v2_db.py` | Parameterized matrix: owner, Public, Connections, Trusted Circle, revoked, unauthorized × section audience, with a private-synthesis negative. Zero-citation Public row with opt-in false and public tier forced. Source-withdrawal matrix: removed, narrowed, superseded, provisional off, opt-in withdrawn, connection revoked, each asserting text, evidence and readiness. Source return: narrow then re-widen, provisional off then on, both stay withheld; a laundering narrowing row does not reset it; a new revision and a regained tier show it. `pending D3` case. `view_as` equals a real viewer's response. External equivalence for two profiles with identical shared content and different private facts, conflicts and drafts |
 | `tests/authz/test_claim_read_guard.py` | `_SERVICE_USE` extended. Only `services/gifting_read.py`, `gifting_writes.py` and `gifting_maintenance.py` import `gifting_store`, so `revel/api` and `revel/mcp` cannot read revisions directly; no new claim-write module |
-| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold (`pending D2`), Public edit (`pending D1`), widening hold, narrowing immediate and unblocked by a stale citation, clear-then-set cannot widen, `pending D5`: withdrawn text with a swapped citation held, same text citing the replacement held, clear-then-set held, a real correction not held, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal including a stale citation, a pending revision on a Public section, and public-clear-opt-out-opt-in-set held, enrichment off (`pending D4` for `approve`), atomic batch, mixed-error precedence, no-change review, a fact committed between `C(p)` and the facts read stays outstanding, an `add_facts` result cannot resolve another assistant's fact, `validate_section_text` refusals, API/MCP parity smoke |
-| `tests/profiles/test_shared_profiles_db.py` | Captured legacy no-argument and handle responses, compact opt-in, absent-narrative fallback, gate-off null keys |
+| `tests/profiles/test_owner_controls_http_mcp_db.py` | Owner-only edit of one section, non-owner refused, stale revision, ceiling, sensitive, close match, first-publication hold (`pending D2`), Public edit (`pending D1`), widening hold, narrowing immediate and unblocked by a stale citation, clear-then-set cannot widen, `pending D5`: withdrawn text with a swapped citation held, same text citing the replacement held, clear-then-set held, a real correction not held, approve binds revision and audience, stale approval racing a second edit, racing a source withdrawal, disconnected author stays pending and needs current confirmation, reject, restore narrower and refused on withdrawn source, Public opt-in withdrawal including a stale citation, a pending revision on a Public section, and public-clear-opt-out-opt-in-set held, enrichment off (`pending D4` for `approve`), atomic batch, mixed-error precedence, no-change review, a fact committed between `C(p)` and the facts read stays outstanding, an `add_facts` result cannot resolve another assistant's fact, `validate_section_text`, all ten strings in section 1, API/MCP parity smoke |
+| `tests/profiles/test_shared_profiles_db.py` | Captured legacy no-argument and handle responses, compact opt-in, absent-narrative fallback, gate-off null keys. With the gate explicitly off, the string `update_gifting_profile` appears nowhere in `tools/list` or `/openapi.json`, schema text and descriptions included |
 | `tests/db/test_db_profile_migrations.py` | Schema, constraints, repository history and optimistic revision conflict, zero sections, facts preserved, downgrade refused with rows and clean without, one head |
 | `tests/profiles/test_readiness_rules.py` (new, one parameterized test) | Section 12.4 table and variants, fresh `taste` with stale `direction`, determinism, no grade input, `not_assessed` on failure |
 | `tests/questions/test_questions_service_db.py` | One item per window, duplicate and missed polls, other assistants' polls consume nothing, empty-inbox path, not designated gets none |
@@ -1207,3 +1226,4 @@ release PR.
   rule fixes, tool-only onboarding (12.5); section 18 lists four open owner decisions.
 - GP-01 review round 2: D5 added (section 7 row 4), D3 reconnection corrected, I9 tier exception
   labelled, one owner for the tool description.
+- GP-01 review round 3: birth-year rule restated and run over the section 1 strings.
