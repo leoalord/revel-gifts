@@ -39,9 +39,8 @@ trigger and value, in either order. It is a safety net, not a proof.
 
 A full date is `YYYY-M-D`, `D-M-YYYY` (separator `-`, `/` or `.`), `D Month YYYY` or
 `Month D YYYY` (comma optional), with full or abbreviated month names and optional ordinals. The
-numbers in `D-M-YYYY` are **not** range-checked or order-checked, so `12/25/2001` is refused. So a
-20xx year alone
-beside `birthday` is allowed.
+numbers in `D-M-YYYY` are **not** range-checked or order-checked, so `12/25/2001` is refused. A
+20xx year alone beside `birthday` is allowed.
 
 | Must refuse | Must allow |
 | --- | --- |
